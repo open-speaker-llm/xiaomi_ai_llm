@@ -1,0 +1,81 @@
+# 小米AI音箱 LLM 对话助手配置
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  cors_origins:
+    - "*"
+
+llm:
+  # MiniMax API 配置 (用户有订阅)
+  minimax:
+    api_key: "${MINIMAX_API_KEY}"
+    model: "MiniMax-M2.7"
+    base_url: "https://api.minimax.chat/v1"
+    max_tokens: 1024
+    temperature: 0.7
+    timeout: 45.0
+    max_retries: 1
+  # DeepSeek API 配置 (OpenAI-compatible)
+  deepseek:
+    api_key: "${DEEPSEEK_API_KEY}"
+    model: "deepseek-v4-flash"
+    base_url: "https://api.deepseek.com"
+    max_tokens: 1024
+    temperature: 0.7
+    timeout: 45.0
+    max_retries: 1
+  # Claude API 配置 (备选)
+  claude:
+    api_key: "${ANTHROPIC_API_KEY}"  # 环境变量
+    model: "claude-sonnet-4-20250514"
+    max_tokens: 1024
+    temperature: 0.7
+  # OpenAI API 配置 (备选)
+  openai:
+    api_key: "${OPENAI_API_KEY}"
+    model: "gpt-4o-mini"
+    max_tokens: 1024
+    temperature: 0.7
+
+asr:
+  # Whisper 本地部署 (开源)
+  provider: "whisper"  # whisper | azure | google
+  whisper:
+    model: "medium"  # tiny, base, small, medium, large
+    language: "zh"  # 中文
+  # Azure 配置 (备选)
+  azure:
+    key: "${AZURE_SPEECH_KEY}"
+    region: "eastus"
+
+tts:
+  # MiniMax TTS 配置 (用户订阅)
+  provider: "edgetts"  # minimax | edgetts | chattts | elevenlabs
+  minimax:
+    api_key: "${MINIMAX_API_KEY}"
+    voice_id: "Chinese (Mandarin)_Gentleman"  # 绅士男声
+    model: "speech-2.8-hd"  # MiniMax 最新 TTS 模型
+  chattts:
+    sample_rate: 24000
+  # ElevenLabs 配置 (备选)
+  elevenlabs:
+    api_key: "${ELEVENLABS_API_KEY}"
+    voice_id: "EXAVITQu4vr4xnSDxMaL"  # 默认音色
+    model: "eleven_v2"
+  # Azure TTS 配置 (备选)
+  azure:
+    key: "${AZURE_TTS_KEY}"
+    region: "eastus"
+    voice: "zh-CN-XiaoxiaoNeural"
+
+audio:
+  sample_rate: 32000
+  channels: 1
+  format: "wav"
+  codec: "pcm_s16le"
+
+device:
+  # 设备连接配置
+  websocket_timeout: 30
+  audio_buffer_size: 4096

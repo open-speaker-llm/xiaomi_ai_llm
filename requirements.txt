@@ -1,0 +1,27 @@
+# Web框架
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+websockets>=12.0
+
+# LLM API
+anthropic>=0.25.0
+openai>=1.12.0
+
+# 语音处理 - Whisper
+openai-whisper>=20231117
+
+# 音频处理
+pydub>=0.25.1
+numpy>=1.26.0
+soundfile>=0.12.1
+
+# HTTP客户端
+httpx>=0.26.0
+
+# 配置管理
+pyyaml>=6.0.1
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# 工具
+python-dotenv>=1.0.0
