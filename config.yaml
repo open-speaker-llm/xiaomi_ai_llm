@@ -52,6 +52,8 @@ asr:
 tts:
   # MiniMax TTS 配置 (用户订阅)
   provider: "edgetts"  # minimax | edgetts | chattts | elevenlabs
+  edgetts:
+    voice: "zh-CN-YunjianNeural"  # 云健，男声，有力量感
   minimax:
     api_key: "${MINIMAX_API_KEY}"
     voice_id: "Chinese (Mandarin)_Gentleman"  # 绅士男声

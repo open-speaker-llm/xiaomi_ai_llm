@@ -227,8 +227,9 @@ async def lifespan(app: FastAPI):
     # 初始化 TTS
     tts_provider = config["tts"]["provider"]
     if tts_provider == "edgetts":
-        tts_client = EdgeTTSClient()
-        print("EdgeTTS client initialized (free, Microsoft)")
+        edge_voice = config["tts"].get("edgetts", {}).get("voice", "zh-CN-YunjianNeural")
+        tts_client = EdgeTTSClient(voice=edge_voice)
+        print(f"EdgeTTS client initialized (free, Microsoft), voice: {edge_voice}")
     elif tts_provider == "chattts":
         tts_client = ChatTTSClient(
             sample_rate=config["tts"]["chattts"].get("sample_rate", 24000),

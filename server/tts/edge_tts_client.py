@@ -13,9 +13,10 @@ VOICES = {
     "xiaoxiao": "zh-CN-XiaoxiaoNeural",   # 女声-活泼
     "yunxi": "zh-CN-YunxiNeural",         # 男声-温柔
     "xiaoyi": "zh-CN-XiaoyiNeural",       # 女声-清晰
+    "yunjian": "zh-CN-YunjianNeural",     # 男声-有力量感
     "yunyang": "zh-CN-YunyangNeural",     # 男声-新闻
 }
-DEFAULT_VOICE = "zh-CN-YunxiNeural"
+DEFAULT_VOICE = "zh-CN-YunjianNeural"
 
 
 class EdgeTTSClient:

@@ -154,7 +154,7 @@ OPENAI_API_KEY=
 - DeepSeek: `deepseek-v4-flash`
 - MiniMax: `MiniMax-M2.7`
 - ASR: Whisper `medium`
-- TTS: EdgeTTS
+- TTS: EdgeTTS `zh-CN-YunjianNeural`
 
 ## 5. API 接口
 
