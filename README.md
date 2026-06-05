@@ -110,6 +110,17 @@ tail -f /tmp/native_first_client.log /tmp/native_first_events.log
 - 已验证 `/data/mibrain/mibrain_asr_nlp.rcd` 不比 `mibrain nlp_result_get` 更早，且中文字段会断行，不适合作为正式路由来源。
 - 已验证 `ubus monitor` 未看到更早的结构化 ASR/NLP push 事件。
 
+### 2.1 LLM 会话上下文
+
+同一次唤醒进入 LLM 后，首轮问题和后续连续追问共用同一个 `session_id`。因此在追问窗口内继续提问时，服务端会把这些问题放在同一个 LLM 对话历史里，支持上下文追问。
+
+会话边界：
+
+- 每次新的“小爱同学”唤醒会生成新的 `session_id`，形如 `native_first_deepseek_1780...`。
+- 同一次唤醒后的所有追问复用这个 `session_id`。
+- 追问超时、ASR 空、录音失败或退出对话后，再次唤醒会进入新的 LLM 会话。
+- 服务端按 `session_id` 保存最近 20 条消息；Mac 日志中的 `历史2轮`、`历史4轮` 等表示同一会话上下文正在累积。
+
 ## 3. 推荐配置
 
 配置模板在 [device/native_first.env.example](device/native_first.env.example)。

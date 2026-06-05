@@ -539,6 +539,23 @@ asr=1, nlp=1, tts=0, nlp_execute=0, asr_audio=/tmp/voice.wav
 
 只有 `peak/rms/active` 三个指标都低于窗口门槛时，才判定“窗口无有效语音”。
 
+LLM 会话上下文规则：
+
+```text
+一次“小爱同学”唤醒 -> 生成一个新的 session_id
+本次唤醒进入 LLM 后 -> 首轮 LLM 和所有连续追问复用同一个 session_id
+追问退出后再次唤醒 -> 生成新的 session_id，新会话开始
+```
+
+音箱日志里可看：
+
+```text
+[WAKE] native-first session=native_first_deepseek_...
+[TURN 2] 发送追问到 LLM: ...
+```
+
+Mac 服务端日志里可看 `历史2轮`、`历史4轮` 等字样。如果历史轮数递增，说明追问在同一个 LLM 会话里。
+
 ### 11.3 停止
 
 ```sh
