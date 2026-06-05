@@ -1,5 +1,8 @@
 import unittest
 
+import numpy as np
+
+from server.asr.whisper_client import WhisperASR
 from server.main import (
     conversation_histories,
     is_likely_assistant_echo,
@@ -16,7 +19,7 @@ class AsrQualityTest(unittest.TestCase):
     def test_high_no_speech_is_low_confidence(self):
         low, reason = is_low_confidence_asr({
             "text": "请不吝点赞订阅",
-            "avg_logprob": -0.3,
+            "avg_logprob": -0.2,
             "no_speech_prob": 0.86,
             "speech_duration": 1.2,
             "duration": 4.0,
@@ -38,6 +41,31 @@ class AsrQualityTest(unittest.TestCase):
         })
         self.assertFalse(low)
         self.assertEqual(reason, "ok")
+
+    def test_low_energy_but_confident_followup_passes_quality_gate(self):
+        low, reason = is_low_confidence_asr({
+            "text": "电脑怎么重启",
+            "avg_logprob": -0.54,
+            "no_speech_prob": 0.63,
+            "speech_duration": 4.8,
+            "duration": 4.8,
+            "active_ratio": 0.0,
+            "speech_active_ratio": 0.0,
+            "rms": 0.00143,
+            "speech_rms": 0.00143,
+        })
+        self.assertFalse(low)
+        self.assertEqual(reason, "ok")
+
+    def test_capture_channel_selector_avoids_clipped_loud_channel(self):
+        asr = WhisperASR.__new__(WhisperASR)
+        audio = np.zeros((16000, 8), dtype=np.float32)
+        audio[1000:5000, 1] = 1.0
+        audio[1000:5000, 5] = np.sin(np.linspace(0, 120, 4000)) * 0.35
+
+        _, info = asr._select_capture_channel(audio)
+
+        self.assertEqual(info["channel"], 5)
 
     def test_assistant_echo_substring_is_rejected(self):
         session_id = "test_echo"

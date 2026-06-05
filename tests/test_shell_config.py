@@ -44,14 +44,15 @@ class ShellConfigTest(unittest.TestCase):
             'printf "%s\\n" "$BACKEND $FOLLOWUP_START_HITS $NATIVE_REPLAY_SUCCESS_DELAY"'
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "deepseek 2 0")
+        self.assertEqual(result.stdout.strip(), "deepseek 1 0")
 
     def test_env_example_tracks_key_client_defaults(self):
         env_text = (ROOT / "device/native_first.env.example").read_text()
         client_text = (ROOT / "device/native_first_client.sh").read_text()
         expected_pairs = {
-            "FOLLOWUP_ARM_DELAY": "0.4",
-            "FOLLOWUP_START_HITS": "2",
+            "FOLLOWUP_ARM_DELAY": "0.2",
+            "FOLLOWUP_START_HITS": "1",
+            "FOLLOWUP_MIN_RAW_BYTES": "16000",
             "NATIVE_REPLAY_SUCCESS_DELAY": "0",
             "NATIVE_REPLAY_SUCCESS_SPEAK": "1",
             "FREEZE_NATIVE_PLAYER_ON_THINK": "1",

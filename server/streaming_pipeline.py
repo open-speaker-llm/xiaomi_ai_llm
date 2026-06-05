@@ -140,13 +140,27 @@ class StreamingPipeline:
 
     async def _tts_stream(self, sentence: str) -> AsyncIterator[dict]:
         """TTS 流生成器"""
+        import asyncio
         import time as _t
         _t0 = _t.time()
-        try:
-            wav = await self.tts.synthesize_pcm(sentence, sample_rate=self.sample_rate, speed=self.speed, volume=self.volume)
-        except Exception as e:
-            yield {"type": "error", "content": f"TTS: {e}"}
-            return
+        last_error = None
+        for attempt in range(2):
+            try:
+                wav = await self.tts.synthesize_pcm(
+                    sentence,
+                    sample_rate=self.sample_rate,
+                    speed=self.speed,
+                    volume=self.volume,
+                )
+                break
+            except Exception as e:
+                last_error = e
+                if attempt == 0:
+                    print(f"    🔊 TTS retry after error: {e}", flush=True)
+                    await asyncio.sleep(0.5)
+                else:
+                    yield {"type": "error", "content": f"TTS: {last_error}"}
+                    return
         _t1 = _t.time()
         pcm = self._trim_pcm_tail(wav[44:])
         before_sec = max(0.0, (len(wav) - 44) / max(self.sample_rate * 2, 1))

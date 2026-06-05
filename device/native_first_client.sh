@@ -29,19 +29,47 @@ PID_FILE="${PID_FILE:-/tmp/native_first_client.pid}"
 ORIG_WAKEUP="/tmp/wakeup.sh.orig"
 HOOK_WAKEUP="/tmp/wakeup.sh.native_first_client"
 MIPNS_CONF="/usr/share/xiaomi/xaudio_engine.conf"
+MIPNS_ARGS="${MIPNS_ARGS:--r opus32 -l}"
 NATIVE_WAIT_SECONDS="${NATIVE_WAIT_SECONDS:-12}"
 NATIVE_POLL_INTERVAL="${NATIVE_POLL_INTERVAL:-0.2}"
 NATIVE_UBUS_TIMEOUT="${NATIVE_UBUS_TIMEOUT:-1}"
 WAKE_EVENT_MAX_AGE="${WAKE_EVENT_MAX_AGE:-4}"
 WAKE_IGNORE_QUERIES="${WAKE_IGNORE_QUERIES:-${WAKE_ONLY_QUERIES:-小爱同学 小爱 小爱小爱 小爱同学小爱同学 我在 在呢}}"
-FOLLOWUP_TIMEOUT="${FOLLOWUP_TIMEOUT:-6}"
-FOLLOWUP_THRESHOLD="${FOLLOWUP_THRESHOLD:-600}"
-FOLLOWUP_START_HITS="${FOLLOWUP_START_HITS:-2}"
+FOLLOWUP_TIMEOUT="${FOLLOWUP_TIMEOUT:-8}"
+FOLLOWUP_THRESHOLD="${FOLLOWUP_THRESHOLD:-180}"
+FOLLOWUP_START_HITS="${FOLLOWUP_START_HITS:-1}"
 FOLLOWUP_END_THRESHOLD="${FOLLOWUP_END_THRESHOLD:-100}"
+FOLLOWUP_START_RMS_THRESHOLD="${FOLLOWUP_START_RMS_THRESHOLD:-115}"
+FOLLOWUP_END_RMS_THRESHOLD="${FOLLOWUP_END_RMS_THRESHOLD:-60}"
+FOLLOWUP_START_ACTIVE_PERMILLE="${FOLLOWUP_START_ACTIVE_PERMILLE:-80}"
+FOLLOWUP_END_ACTIVE_PERMILLE="${FOLLOWUP_END_ACTIVE_PERMILLE:-20}"
+FOLLOWUP_IGNORE_INITIAL_CHUNKS="${FOLLOWUP_IGNORE_INITIAL_CHUNKS:-2}"
+FOLLOWUP_TAIL_RMS_THRESHOLD="${FOLLOWUP_TAIL_RMS_THRESHOLD:-70}"
+FOLLOWUP_TAIL_ACTIVE_PERMILLE="${FOLLOWUP_TAIL_ACTIVE_PERMILLE:-30}"
 FOLLOWUP_SILENCE_LIMIT="${FOLLOWUP_SILENCE_LIMIT:-3}"
 FOLLOWUP_PREARM="${FOLLOWUP_PREARM:-1}"
 FOLLOWUP_PREARM_EXTRA="${FOLLOWUP_PREARM_EXTRA:-3}"
-FOLLOWUP_ARM_DELAY="${FOLLOWUP_ARM_DELAY:-0.4}"
+FOLLOWUP_ARM_DELAY="${FOLLOWUP_ARM_DELAY:-0.2}"
+FOLLOWUP_MIN_RAW_BYTES="${FOLLOWUP_MIN_RAW_BYTES:-16000}"
+FOLLOWUP_ASR_ENGINE="${FOLLOWUP_ASR_ENGINE:-native}"
+FOLLOWUP_NATIVE_ASR_TIMEOUT="${FOLLOWUP_NATIVE_ASR_TIMEOUT:-30}"
+FOLLOWUP_NATIVE_ASR_FALLBACK_MAC="${FOLLOWUP_NATIVE_ASR_FALLBACK_MAC:-0}"
+FOLLOWUP_NATIVE_MIN_QUERY_BYTES="${FOLLOWUP_NATIVE_MIN_QUERY_BYTES:-10}"
+FOLLOWUP_RECORD_MODE="${FOLLOWUP_RECORD_MODE:-window}"
+FOLLOWUP_WINDOW_SECONDS="${FOLLOWUP_WINDOW_SECONDS:-5}"
+FOLLOWUP_WINDOW_CAPTURE_DEV="${FOLLOWUP_WINDOW_CAPTURE_DEV:-Capture}"
+FOLLOWUP_WINDOW_MIN_PEAK="${FOLLOWUP_WINDOW_MIN_PEAK:-300}"
+FOLLOWUP_WINDOW_MIN_RMS_THRESHOLD="${FOLLOWUP_WINDOW_MIN_RMS_THRESHOLD:-40}"
+FOLLOWUP_WINDOW_MIN_ACTIVE_PERMILLE="${FOLLOWUP_WINDOW_MIN_ACTIVE_PERMILLE:-5}"
+if [ "$FOLLOWUP_ASR_ENGINE" = "native" ]; then
+    FOLLOWUP_WINDOW_CAPTURE_FORMAT="${FOLLOWUP_WINDOW_CAPTURE_FORMAT:-S16_LE}"
+    FOLLOWUP_WINDOW_CAPTURE_RATE="${FOLLOWUP_WINDOW_CAPTURE_RATE:-16000}"
+    FOLLOWUP_WINDOW_CAPTURE_CHANNELS="${FOLLOWUP_WINDOW_CAPTURE_CHANNELS:-1}"
+else
+    FOLLOWUP_WINDOW_CAPTURE_FORMAT="${FOLLOWUP_WINDOW_CAPTURE_FORMAT:-S32_LE}"
+    FOLLOWUP_WINDOW_CAPTURE_RATE="${FOLLOWUP_WINDOW_CAPTURE_RATE:-48000}"
+    FOLLOWUP_WINDOW_CAPTURE_CHANNELS="${FOLLOWUP_WINDOW_CAPTURE_CHANNELS:-8}"
+fi
 FOLLOWUP_ARM_FILE="/tmp/native_followup_vad.arm"
 STREAM_TIMEOUT="${STREAM_TIMEOUT:-180}"
 UNSUPPORTED_PATTERNS="${UNSUPPORTED_PATTERNS:-暂时|不会|不支持|回答不上|需要再学习|没听懂|不知道|不会这项技能}"
@@ -52,6 +80,7 @@ STOP_NATIVE_SECONDS="${STOP_NATIVE_SECONDS:-15}"
 SUPPRESS_DUP_SECONDS="${SUPPRESS_DUP_SECONDS:-0}"
 FREEZE_NATIVE_PLAYER_ON_FALLBACK="${FREEZE_NATIVE_PLAYER_ON_FALLBACK:-1}"
 FREEZE_NATIVE_PLAYER_ON_THINK="${FREEZE_NATIVE_PLAYER_ON_THINK:-1}"
+PAUSE_NATIVE_ASR_DURING_LLM="${PAUSE_NATIVE_ASR_DURING_LLM:-0}"
 MASTER_RESTORE_VALUE=""
 LLM_SESSION_MASTER_TARGET=""
 FOLLOWUP_VAD_PID=""
@@ -181,9 +210,11 @@ ALSAEOF
     fi
     mount --bind /tmp/libxaudio_engine_patched.so /usr/lib/libxaudio_engine.so 2>/dev/null
 
-    killall mipns-xiaomi 2>/dev/null
+    for pid in $(pidof mipns-xiaomi 2>/dev/null); do
+        kill -9 "$pid" 2>/dev/null
+    done
     sleep 1
-    /usr/bin/mipns-xiaomi -c "$MIPNS_CONF" >/tmp/native_mipns.log 2>&1 &
+    /usr/bin/mipns-xiaomi -c "$MIPNS_CONF" $MIPNS_ARGS >/tmp/native_mipns.log 2>&1 &
     sleep 2
 
     touch /tmp/dsnoop_ready
@@ -400,10 +431,50 @@ start_hook_watchdog() {
 }
 
 start_mipns() {
+    local pids count keep pid cmd
+
+    pids=$(pidof mipns-xiaomi 2>/dev/null)
+    count=$(echo "$pids" | wc -w 2>/dev/null)
+    count="${count:-0}"
+    if [ "$count" -eq 0 ] 2>/dev/null; then
+        /usr/bin/mipns-xiaomi -c "$MIPNS_CONF" $MIPNS_ARGS >/tmp/native_mipns.log 2>&1 &
+        return 0
+    fi
+
+    keep=""
+    for pid in $pids; do
+        cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
+        if echo "$cmd" | grep -q -- "-r opus32 -l"; then
+            keep="$pid"
+            break
+        fi
+    done
+    [ -n "$keep" ] || keep=$(echo "$pids" | awk '{print $1}')
+
+    if [ "$count" -gt 1 ] 2>/dev/null; then
+        log "[NATIVE] multiple mipns-xiaomi detected ($count)，keep pid=$keep"
+    fi
+    for pid in $pids; do
+        [ "$pid" = "$keep" ] || kill -9 "$pid" 2>/dev/null
+    done
+    kill -CONT "$keep" 2>/dev/null
+}
+
+restart_mipns_single() {
+    local pids pid cmd
+
+    pids=$(pidof mipns-xiaomi 2>/dev/null)
+    for pid in $pids; do
+        cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
+        if ! echo "$cmd" | grep -q -- "-r opus32 -l"; then
+            kill -9 "$pid" 2>/dev/null
+        fi
+    done
+    sleep 1
     if pidof mipns-xiaomi >/dev/null 2>&1; then
-        killall -CONT mipns-xiaomi 2>/dev/null
+        start_mipns
     else
-        /usr/bin/mipns-xiaomi -c "$MIPNS_CONF" >/tmp/native_mipns.log 2>&1 &
+        /usr/bin/mipns-xiaomi -c "$MIPNS_CONF" $MIPNS_ARGS >/tmp/native_mipns.log 2>&1 &
     fi
 }
 
@@ -550,13 +621,21 @@ resume_native_player() {
 }
 
 pause_native_asr() {
-    killall -STOP mipns-xiaomi 2>/dev/null
-    log "[NATIVE] mipns paused for LLM followup"
+    if [ "$PAUSE_NATIVE_ASR_DURING_LLM" = "1" ]; then
+        killall -STOP mipns-xiaomi 2>/dev/null
+        log "[NATIVE] mipns paused for LLM followup"
+    else
+        log "[NATIVE] keep mipns running for followup capture"
+    fi
 }
 
 resume_native_asr() {
-    killall -CONT mipns-xiaomi 2>/dev/null
-    log "[NATIVE] mipns resumed"
+    if [ "$PAUSE_NATIVE_ASR_DURING_LLM" = "1" ]; then
+        killall -CONT mipns-xiaomi 2>/dev/null
+        log "[NATIVE] mipns resumed"
+    else
+        log "[NATIVE] mipns already running"
+    fi
 }
 
 set_busy() {
@@ -611,16 +690,35 @@ start_followup_vad_prearm() {
     [ "$FOLLOWUP_PREARM" = "1" ] || return 0
     [ -z "$FOLLOWUP_VAD_PID" ] || return 0
 
-    timeout="$FOLLOWUP_TIMEOUT"
+    if [ "$FOLLOWUP_RECORD_MODE" = "window" ]; then
+        timeout="$FOLLOWUP_WINDOW_SECONDS"
+    else
+        timeout="$FOLLOWUP_TIMEOUT"
+    fi
     rm -f "$FOLLOWUP_ARM_FILE"
-    log "[FOLLOWUP] prearm VAD: wait_playback_done timeout=${timeout}s start=$FOLLOWUP_THRESHOLD end=$FOLLOWUP_END_THRESHOLD silence=${FOLLOWUP_SILENCE_LIMIT}s"
+    log "[FOLLOWUP] prearm recorder: mode=${FOLLOWUP_RECORD_MODE} wait_playback_done timeout=${timeout}s start=$FOLLOWUP_THRESHOLD end=$FOLLOWUP_END_THRESHOLD silence=${FOLLOWUP_SILENCE_LIMIT}s"
     (
         VAD_ARM_FILE="$FOLLOWUP_ARM_FILE" \
         SPEECH_THRESHOLD="$FOLLOWUP_THRESHOLD" \
         START_HITS="$FOLLOWUP_START_HITS" \
         END_THRESHOLD="$FOLLOWUP_END_THRESHOLD" \
+        START_RMS_THRESHOLD="$FOLLOWUP_START_RMS_THRESHOLD" \
+        END_RMS_THRESHOLD="$FOLLOWUP_END_RMS_THRESHOLD" \
+        START_ACTIVE_PERMILLE="$FOLLOWUP_START_ACTIVE_PERMILLE" \
+        END_ACTIVE_PERMILLE="$FOLLOWUP_END_ACTIVE_PERMILLE" \
+        IGNORE_INITIAL_CHUNKS="$FOLLOWUP_IGNORE_INITIAL_CHUNKS" \
+        TAIL_RMS_THRESHOLD="$FOLLOWUP_TAIL_RMS_THRESHOLD" \
+        TAIL_ACTIVE_PERMILLE="$FOLLOWUP_TAIL_ACTIVE_PERMILLE" \
         SILENCE_LIMIT="$FOLLOWUP_SILENCE_LIMIT" \
-        sh "$VAD_SCRIPT" continue "$timeout"
+        MIN_RAW_BYTES="$FOLLOWUP_MIN_RAW_BYTES" \
+        WINDOW_CAPTURE_DEV="$FOLLOWUP_WINDOW_CAPTURE_DEV" \
+        WINDOW_CAPTURE_FORMAT="$FOLLOWUP_WINDOW_CAPTURE_FORMAT" \
+        WINDOW_CAPTURE_RATE="$FOLLOWUP_WINDOW_CAPTURE_RATE" \
+        WINDOW_CAPTURE_CHANNELS="$FOLLOWUP_WINDOW_CAPTURE_CHANNELS" \
+        WINDOW_MIN_PEAK="$FOLLOWUP_WINDOW_MIN_PEAK" \
+        WINDOW_MIN_RMS_THRESHOLD="$FOLLOWUP_WINDOW_MIN_RMS_THRESHOLD" \
+        WINDOW_MIN_ACTIVE_PERMILLE="$FOLLOWUP_WINDOW_MIN_ACTIVE_PERMILLE" \
+        sh "$VAD_SCRIPT" "$FOLLOWUP_RECORD_MODE" "$timeout"
     ) &
     FOLLOWUP_VAD_PID=$!
 }
@@ -635,7 +733,7 @@ arm_followup_vad() {
 }
 
 wait_or_run_followup_vad() {
-    local ret
+    local ret timeout
 
     if [ -n "$FOLLOWUP_VAD_PID" ]; then
         set_state "FOLLOWUP_LISTENING"
@@ -648,12 +746,32 @@ wait_or_run_followup_vad() {
     fi
 
     set_state "FOLLOWUP_LISTENING"
-    log "[FOLLOWUP] ${FOLLOWUP_TIMEOUT}s 内可继续追问..."
+    if [ "$FOLLOWUP_RECORD_MODE" = "window" ]; then
+        timeout="$FOLLOWUP_WINDOW_SECONDS"
+    else
+        timeout="$FOLLOWUP_TIMEOUT"
+    fi
+    log "[FOLLOWUP] ${timeout}s 内可继续追问..."
     SPEECH_THRESHOLD="$FOLLOWUP_THRESHOLD" \
     START_HITS="$FOLLOWUP_START_HITS" \
     END_THRESHOLD="$FOLLOWUP_END_THRESHOLD" \
+    START_RMS_THRESHOLD="$FOLLOWUP_START_RMS_THRESHOLD" \
+    END_RMS_THRESHOLD="$FOLLOWUP_END_RMS_THRESHOLD" \
+    START_ACTIVE_PERMILLE="$FOLLOWUP_START_ACTIVE_PERMILLE" \
+    END_ACTIVE_PERMILLE="$FOLLOWUP_END_ACTIVE_PERMILLE" \
+    IGNORE_INITIAL_CHUNKS="$FOLLOWUP_IGNORE_INITIAL_CHUNKS" \
+    TAIL_RMS_THRESHOLD="$FOLLOWUP_TAIL_RMS_THRESHOLD" \
+    TAIL_ACTIVE_PERMILLE="$FOLLOWUP_TAIL_ACTIVE_PERMILLE" \
     SILENCE_LIMIT="$FOLLOWUP_SILENCE_LIMIT" \
-    sh "$VAD_SCRIPT" continue "$FOLLOWUP_TIMEOUT"
+    MIN_RAW_BYTES="$FOLLOWUP_MIN_RAW_BYTES" \
+    WINDOW_CAPTURE_DEV="$FOLLOWUP_WINDOW_CAPTURE_DEV" \
+    WINDOW_CAPTURE_FORMAT="$FOLLOWUP_WINDOW_CAPTURE_FORMAT" \
+    WINDOW_CAPTURE_RATE="$FOLLOWUP_WINDOW_CAPTURE_RATE" \
+    WINDOW_CAPTURE_CHANNELS="$FOLLOWUP_WINDOW_CAPTURE_CHANNELS" \
+    WINDOW_MIN_PEAK="$FOLLOWUP_WINDOW_MIN_PEAK" \
+    WINDOW_MIN_RMS_THRESHOLD="$FOLLOWUP_WINDOW_MIN_RMS_THRESHOLD" \
+    WINDOW_MIN_ACTIVE_PERMILLE="$FOLLOWUP_WINDOW_MIN_ACTIVE_PERMILLE" \
+    sh "$VAD_SCRIPT" "$FOLLOWUP_RECORD_MODE" "$timeout"
     return $?
 }
 
@@ -752,7 +870,11 @@ send_voice_and_play() {
     rm -f /tmp/stream_fifo
 }
 
-transcribe_followup_voice() {
+extract_ai_service_asr_query() {
+    LC_ALL=C sed -n 's/.*\\\\\\"query\\\\\\":\\\\\\"\([^\\]*\).*/\1/p' | head -1
+}
+
+transcribe_followup_voice_mac() {
     local voice_file="/tmp/voice.wav"
     local result_file="/tmp/native_followup_asr.env"
 
@@ -779,6 +901,77 @@ transcribe_followup_voice() {
         return 1
     fi
     return 0
+}
+
+transcribe_followup_voice_native() {
+    local voice_file="/tmp/voice.wav"
+    local result_file="/tmp/native_followup_ai_service.json"
+    local req_id payload safe_voice raw code
+
+    FOLLOWUP_TEXT=""
+    FOLLOWUP_ROUTE=""
+    FOLLOWUP_REASON=""
+
+    if [ ! -f "$voice_file" ]; then
+        log "[FOLLOWUP] 追问录音不存在"
+        return 1
+    fi
+
+    req_id="native_followup_$(date +%s)"
+    safe_voice=$(printf '%s' "$voice_file" | json_escape)
+    payload="{\"bypass\":\"\",\"caller\":\"native_first_followup\",\"duration\":0,\"id\":\"$req_id\",\"asr\":1,\"nlp\":1,\"tts\":0,\"asr_audio\":\"$safe_voice\",\"nlp_text\":\"\",\"nlp_execute\":0,\"tts_text\":\"\",\"tts_type\":\"\",\"tts_vendor\":\"\",\"tts_volume\":80,\"tts_codec\":\"mp3\",\"tts_save\":0,\"tts_play\":0}"
+
+    log "[FOLLOWUP] 发送追问录音给小米原生 ASR: $voice_file"
+    raw=$(ubus -t "$FOLLOWUP_NATIVE_ASR_TIMEOUT" call mibrain ai_service "$payload" 2>&1)
+    code=$(printf '%s' "$raw" | grep -o '"code"[[:space:]]*:[[:space:]]*-*[0-9]*' | grep -o -- '-*[0-9]*' | head -1)
+    printf '%s\n' "$raw" > "$result_file"
+
+    FOLLOWUP_TEXT=$(printf '%s' "$raw" | extract_ai_service_asr_query)
+    FOLLOWUP_ROUTE="llm"
+    FOLLOWUP_REASON="native_asr_ok"
+
+    log "[FOLLOWUP] Native ASR code=${code:-unknown} text=${FOLLOWUP_TEXT:-<empty>}"
+    if [ -z "$FOLLOWUP_TEXT" ]; then
+        cp "$voice_file" "/tmp/followup_native_empty_$(date +%s).wav" 2>/dev/null
+        FOLLOWUP_ROUTE="empty"
+        FOLLOWUP_REASON="native_asr_empty"
+        return 1
+    fi
+    if [ "$FOLLOWUP_NATIVE_MIN_QUERY_BYTES" -gt 0 ] 2>/dev/null; then
+        query_bytes=$(printf '%s' "$FOLLOWUP_TEXT" | wc -c 2>/dev/null)
+        query_bytes="${query_bytes:-0}"
+        if [ "$query_bytes" -lt "$FOLLOWUP_NATIVE_MIN_QUERY_BYTES" ] 2>/dev/null; then
+            log "[FOLLOWUP] Native ASR 文本过短，忽略 bytes=$query_bytes min=$FOLLOWUP_NATIVE_MIN_QUERY_BYTES text=$FOLLOWUP_TEXT"
+            FOLLOWUP_ROUTE="empty"
+            FOLLOWUP_REASON="native_asr_short"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+transcribe_followup_voice() {
+    case "$FOLLOWUP_ASR_ENGINE" in
+        native)
+            if transcribe_followup_voice_native; then
+                return 0
+            fi
+            if [ "$FOLLOWUP_NATIVE_ASR_FALLBACK_MAC" = "1" ]; then
+                log "[FOLLOWUP] Native ASR 无文本，fallback Mac ASR"
+                transcribe_followup_voice_mac
+                return $?
+            fi
+            return 1
+            ;;
+        mac|whisper)
+            transcribe_followup_voice_mac
+            return $?
+            ;;
+        *)
+            log "[FOLLOWUP] 未知 ASR 引擎: $FOLLOWUP_ASR_ENGINE"
+            return 1
+            ;;
+    esac
 }
 
 handle_llm_dialog() {
@@ -979,8 +1172,9 @@ log "Native poll: interval=${NATIVE_POLL_INTERVAL}s ubus_timeout=${NATIVE_UBUS_T
 log "Wake event: max_age=${WAKE_EVENT_MAX_AGE}s"
 log "Wake ignore queries: $WAKE_IGNORE_QUERIES"
 log "Native success: domains=$NATIVE_SUCCESS_DOMAINS replay_speak=$NATIVE_REPLAY_SUCCESS_SPEAK replay_delay=${NATIVE_REPLAY_SUCCESS_DELAY}s"
-log "Followup VAD: timeout=${FOLLOWUP_TIMEOUT}s arm_delay=${FOLLOWUP_ARM_DELAY}s start=$FOLLOWUP_THRESHOLD hits=$FOLLOWUP_START_HITS end=$FOLLOWUP_END_THRESHOLD silence=${FOLLOWUP_SILENCE_LIMIT}s prearm=$FOLLOWUP_PREARM"
+log "Followup recorder: mode=${FOLLOWUP_RECORD_MODE} asr=${FOLLOWUP_ASR_ENGINE} native_min_bytes=${FOLLOWUP_NATIVE_MIN_QUERY_BYTES} window=${FOLLOWUP_WINDOW_SECONDS}s capture=${FOLLOWUP_WINDOW_CAPTURE_DEV}/${FOLLOWUP_WINDOW_CAPTURE_FORMAT}/${FOLLOWUP_WINDOW_CAPTURE_RATE}/${FOLLOWUP_WINDOW_CAPTURE_CHANNELS}ch window_gate=peak${FOLLOWUP_WINDOW_MIN_PEAK}/rms${FOLLOWUP_WINDOW_MIN_RMS_THRESHOLD}/active${FOLLOWUP_WINDOW_MIN_ACTIVE_PERMILLE}‰ timeout=${FOLLOWUP_TIMEOUT}s arm_delay=${FOLLOWUP_ARM_DELAY}s start=$FOLLOWUP_THRESHOLD/rms=$FOLLOWUP_START_RMS_THRESHOLD/active=${FOLLOWUP_START_ACTIVE_PERMILLE}‰ hits=$FOLLOWUP_START_HITS tail=${FOLLOWUP_IGNORE_INITIAL_CHUNKS}s/rms=$FOLLOWUP_TAIL_RMS_THRESHOLD/active=${FOLLOWUP_TAIL_ACTIVE_PERMILLE}‰ end=$FOLLOWUP_END_THRESHOLD/rms=$FOLLOWUP_END_RMS_THRESHOLD/active=${FOLLOWUP_END_ACTIVE_PERMILLE}‰ silence=${FOLLOWUP_SILENCE_LIMIT}s min_raw=$FOLLOWUP_MIN_RAW_BYTES prearm=$FOLLOWUP_PREARM"
 log "Fallback: stop=${STOP_NATIVE_SECONDS}s freeze_mediaplayer=${FREEZE_NATIVE_PLAYER_ON_FALLBACK} prefreeze_on_think=${FREEZE_NATIVE_PLAYER_ON_THINK}"
+log "Native ASR pause during LLM: $PAUSE_NATIVE_ASR_DURING_LLM"
 log "Duplicate suppression: ${SUPPRESS_DUP_SECONDS}s"
 set_state "INIT"
 
@@ -996,7 +1190,7 @@ set_state "IDLE"
 
 install_hook
 start_hook_watchdog
-start_mipns
+restart_mipns_single
 
 log "[IDLE] 等待原生唤醒词：小爱同学"
 exec 3<>"$EVENT_FIFO"

@@ -80,7 +80,6 @@ class WhisperASR:
             condition_on_previous_text=False,
             compression_ratio_threshold=2.4,
             no_speech_threshold=0.6,
-            initial_prompt="以下是普通话语音助手对话，内容可能涉及电脑、手机、天气、家电控制、日常问题。",
         )
 
         text = result["text"].strip()
@@ -109,6 +108,11 @@ class WhisperASR:
             "text": text,
             "avg_logprob": avg_logprob,
             "no_speech_prob": max_no_speech,
+            "decode_channel": decode_info.get("channel", -1),
+            "decode_channel_score": decode_info.get("channel_score", 0.0),
+            "decode_channel_peak": decode_info.get("channel_peak", 0.0),
+            "decode_channel_rms": decode_info.get("channel_rms", 0.0),
+            "decode_channel_active_ratio": decode_info.get("channel_active_ratio", 0.0),
             "speech_duration": speech_stats["duration"],
             "speech_rms": speech_stats["rms"],
             "speech_peak": speech_stats["peak"],
@@ -211,6 +215,49 @@ class WhisperASR:
 
         return np.clip(audio * gain, -1.0, 1.0)
 
+    def _select_capture_channel(self, audio: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
+        """Select a usable channel from Xiaomi's 8ch Capture stream.
+
+        Picking the largest RMS channel is fragile: clipped echo/noise channels
+        can be louder than the near-field microphone. Score channels by
+        non-clipped energy and active ratio, and heavily penalize clipping.
+        """
+        usable = audio[:, : min(audio.shape[1], 6)].astype(np.float32)
+        best_channel = 0
+        best_score = -1.0
+        best_stats: dict[str, float] = {}
+
+        for channel in range(usable.shape[1]):
+            ch = usable[:, channel]
+            abs_ch = np.abs(ch)
+            peak = float(np.max(abs_ch)) if len(ch) else 0.0
+            rms = float(np.sqrt(np.mean(ch.astype(np.float64) ** 2))) if len(ch) else 0.0
+            threshold = max(0.0008, peak * 0.06)
+            active_ratio = float(np.mean(abs_ch > threshold)) if peak > 1e-9 else 0.0
+
+            if peak < 1e-6 or rms < 1e-6:
+                score = 0.0
+            else:
+                score = rms * max(active_ratio, 0.001)
+                if peak >= 0.98:
+                    score *= 0.08
+
+            if score > best_score:
+                best_channel = channel
+                best_score = score
+                best_stats = {
+                    "channel_peak": peak,
+                    "channel_rms": rms,
+                    "channel_active_ratio": active_ratio,
+                }
+
+        info: dict[str, Any] = {
+            "channel": best_channel,
+            "channel_score": best_score,
+            **best_stats,
+        }
+        return usable[:, best_channel], info
+
     def _decode_audio(
         self,
         audio_data: bytes,
@@ -225,21 +272,19 @@ class WhisperASR:
             # 尝试作为 WAV 解析
             audio_np, sr = sf.read(io.BytesIO(audio_data))
 
-            # A113 PDM 8ch S32_LE 48kHz → 提取 ch0 → >>8 → resample 16kHz
+            # A113 PDM 8ch S32_LE 48kHz.
+            # ALSA Capture already exposes valid 32-bit PCM. Older code shifted
+            # by 8 bits, which can clip low-level speech into full-scale noise
+            # and trigger Whisper prompt hallucinations.
+            channel_info: dict[str, Any] = {}
             if is_s32le:
-                # 多声道: 取通道2 (ch2 离线测试效果最好)
-                if len(audio_np.shape) > 1 and audio_np.shape[1] > 2:
-                    audio_np = audio_np[:, 2]
-                elif len(audio_np.shape) > 1:
-                    audio_np = audio_np[:, 0]
-                # PDM 数据在 S32_LE 的低 24 位: >>8 得到真实 S16 值
-                int32_vals = (audio_np * 2147483648.0).astype(np.int64)
-                int16_vals = (int32_vals >> 8).clip(-32768, 32767).astype(np.int16)
-                audio_np = int16_vals.astype(np.float32) / 32768.0
+                if len(audio_np.shape) > 1:
+                    audio_np, channel_info = self._select_capture_channel(audio_np)
         except Exception:
             audio_np = np.frombuffer(audio_data, dtype=np.int16)
             audio_np = audio_np.astype(np.float32) / 32768.0
             sr = expected_sample_rate
+            channel_info = {}
 
         # 转换为单声道
         if len(audio_np.shape) > 1:
@@ -255,7 +300,7 @@ class WhisperASR:
             )
             sr = 16000
 
-        return audio_np, {"sample_rate": sr, "is_pdm": is_s32le}
+        return audio_np, {"sample_rate": sr, "is_pdm": is_s32le, **channel_info}
 
 
 class AzureASR:

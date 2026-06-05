@@ -289,9 +289,11 @@ sh /data/native_wakeup_probe.sh stop
 sh /data/stream_client.sh > /tmp/stream_client.log 2>&1 &
 ```
 
-## 9. 原生小米唤醒客户端
+## 9. 历史路线：原生小米唤醒客户端
 
-原生客户端使用小米自带 `mipns-xiaomi + wakeup_model.bin` 检测“小爱同学”。唤醒后先播放“欸”，再录音并做路由：
+本节记录旧的 `native_client.sh` 实验路线，保留用于对照。当前推荐部署路径见第 11 节 `native_first_client.sh`。
+
+旧原生客户端使用小米自带 `mipns-xiaomi + wakeup_model.bin` 检测“小爱同学”。唤醒后先播放“欸”，再录音并做路由：
 
 ```text
 设备/家电/播放控制命令 -> 小米原生 mibrain ai_service
@@ -457,12 +459,26 @@ vi /data/native_first.env
 常调参数：
 
 ```sh
-FOLLOWUP_TIMEOUT=6
-FOLLOWUP_ARM_DELAY=0.4
-FOLLOWUP_THRESHOLD=600
-FOLLOWUP_START_HITS=2
+FOLLOWUP_ASR_ENGINE=native
+FOLLOWUP_NATIVE_ASR_TIMEOUT=30
+FOLLOWUP_NATIVE_ASR_FALLBACK_MAC=0
+FOLLOWUP_NATIVE_MIN_QUERY_BYTES=10
+FOLLOWUP_RECORD_MODE=window
+FOLLOWUP_WINDOW_SECONDS=5
+FOLLOWUP_WINDOW_CAPTURE_DEV=Capture
+FOLLOWUP_WINDOW_CAPTURE_FORMAT=S16_LE
+FOLLOWUP_WINDOW_CAPTURE_RATE=16000
+FOLLOWUP_WINDOW_CAPTURE_CHANNELS=1
+FOLLOWUP_WINDOW_MIN_PEAK=300
+FOLLOWUP_WINDOW_MIN_RMS_THRESHOLD=40
+FOLLOWUP_WINDOW_MIN_ACTIVE_PERMILLE=5
+FOLLOWUP_TIMEOUT=8
+FOLLOWUP_ARM_DELAY=0.2
+FOLLOWUP_THRESHOLD=180
+FOLLOWUP_START_HITS=1
 FOLLOWUP_END_THRESHOLD=100
 FOLLOWUP_SILENCE_LIMIT=3
+PAUSE_NATIVE_ASR_DURING_LLM=0
 WAKE_EVENT_MAX_AGE=4
 WAKE_IGNORE_QUERIES="小爱同学 小爱 小爱小爱 小爱同学小爱同学 我在 在呢"
 NATIVE_REPLAY_SUCCESS_SPEAK=1
@@ -497,14 +513,31 @@ tail -f /tmp/native_first_events.log
 [LLM] fallback -> backend=deepseek text=...
 [STATE] LLM_DIALOG -> LLM_SPEAKING
 [STATE] LLM_SPEAKING -> FOLLOWUP_WINDOW
-[FOLLOWUP] wait 1.2s for speaker tail
+[FOLLOWUP] prearm recorder: mode=window wait_playback_done timeout=5s
 [STATE] FOLLOWUP_WINDOW -> FOLLOWUP_LISTENING
+[VAD] 窗口统计 peak=... rms=... active=...‰
+[FOLLOWUP] Native ASR code=... text=...
 
 [NATIVE] result after 5s ts=... domain=michat action=dialog query=小爱同学 speak=在呢
 [NATIVE] ignored query result，忽略并回到待机
 ```
 
 `ignored query` 只在 `query` 精确等于 `WAKE_IGNORE_QUERIES` 中的短语时触发，不根据 `speak=在呢` 等播报文案判断。这个列表用于忽略“只唤醒/唤醒应答被 ASR 写入 query”的无效输入，例如 `小爱同学`、`我在`。
+
+连续追问当前默认使用小米原生 `ai_service` 对 `/tmp/voice.wav` 做 ASR。录音格式必须是 `S16_LE / 16000Hz / 1ch`，调用时关闭原生执行和播报，只取返回 JSON 里的 `query`：
+
+```text
+asr=1, nlp=1, tts=0, nlp_execute=0, asr_audio=/tmp/voice.wav
+```
+
+如果追问失败，优先看这几行：
+
+```text
+[VAD] 窗口统计 peak=... rms=... active=...‰
+[FOLLOWUP] Native ASR code=... text=...
+```
+
+只有 `peak/rms/active` 三个指标都低于窗口门槛时，才判定“窗口无有效语音”。
 
 ### 11.3 停止
 

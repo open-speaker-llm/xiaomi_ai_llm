@@ -82,10 +82,19 @@ def is_low_confidence_asr(info: dict) -> tuple[bool, str]:
 
     if avg_logprob < -1.0:
         return True, f"low_logprob:{avg_logprob:.2f}"
+    if no_speech_prob > 0.80:
+        return True, f"no_speech:{no_speech_prob:.2f}"
     if no_speech_prob > 0.75 and avg_logprob < -0.25:
         return True, f"no_speech:{no_speech_prob:.2f}"
     if speech_duration < 0.35:
         return True, f"short_speech:{speech_duration:.2f}"
+
+    # 小米音箱 8ch Capture 的追问录音经常整体能量很低，active_ratio 会接近 0。
+    # 这种情况下优先相信 Whisper 的文本置信度，避免把“电脑怎么重启”这类
+    # 可用短句误判为空；高 no_speech 和低 logprob 的幻觉仍会在上面被拦截。
+    if len(compact) >= 4 and avg_logprob >= -0.75 and no_speech_prob < 0.70:
+        return False, "ok"
+
     if duration >= 3.0 and speech_active_ratio < 0.008 and no_speech_prob > 0.55:
         return True, f"low_active_no_speech:{speech_active_ratio:.3f}/{no_speech_prob:.2f}"
     if duration >= 3.0 and speech_active_ratio < 0.006 and avg_logprob < -0.65:
@@ -158,6 +167,37 @@ def get_llm_client(backend: str = "default"):
         else:
             print(f"WARNING: Backend '{backend}' not configured, using default LLM")
     return llm_client
+
+
+async def synthesize_stream_error_audio(
+    error_content: str,
+    *,
+    sample_rate: int,
+    speed: float,
+    volume: float,
+) -> Optional[bytes]:
+    """Return fallback PCM only for LLM errors.
+
+    TTS errors mean one sentence failed to synthesize; playing "model timeout"
+    is misleading and can create an extra fake assistant turn.
+    """
+    if error_content.startswith("TTS:"):
+        print(f"[Stream] TTS error, skip sentence audio: {error_content[4:].strip()}", flush=True)
+        return None
+
+    print(f"[Stream] LLM error: {error_content}", flush=True)
+    fallback_text = "模型连接超时了，请稍后再试。"
+    try:
+        fallback_wav = await tts_client.synthesize_pcm(
+            fallback_text,
+            sample_rate=sample_rate,
+            speed=speed,
+            volume=volume,
+        )
+        return fallback_wav[44:]
+    except Exception as e:
+        print(f"[Stream] fallback TTS error: {e}", flush=True)
+        return b""
 
 
 @asynccontextmanager
@@ -339,16 +379,17 @@ def stream_llm_audio_response(
             elif chunk["type"] == "audio":
                 yield chunk["data"]
             elif chunk["type"] == "error":
-                print(f"[Stream] {chunk['content']}")
-                fallback_text = "模型连接超时了，请稍后再试。"
-                full_text.append(fallback_text)
-                fallback_wav = await tts_client.synthesize_pcm(
-                    fallback_text,
+                fallback_pcm = await synthesize_stream_error_audio(
+                    chunk["content"],
                     sample_rate=32000,
                     speed=speed,
                     volume=volume,
                 )
-                yield fallback_wav[44:]
+                if fallback_pcm is None:
+                    continue
+                if fallback_pcm:
+                    full_text.append("模型连接超时了，请稍后再试。")
+                    yield fallback_pcm
                 break
 
         final_response = "".join(full_text)
@@ -511,7 +552,12 @@ async def route_asr(file: UploadFile = File(...), session_id: str = Form("shell"
             f"active={float(asr_info.get('active_ratio', 0.0)):.3f} "
             f"speech_active={float(asr_info.get('speech_active_ratio', 0.0)):.3f} "
             f"rms={float(asr_info.get('rms', 0.0)):.5f} "
-            f"speech_rms={float(asr_info.get('speech_rms', 0.0)):.5f})",
+            f"speech_rms={float(asr_info.get('speech_rms', 0.0)):.5f} "
+            f"ch={int(asr_info.get('decode_channel', -1))} "
+            f"ch_score={float(asr_info.get('decode_channel_score', 0.0)):.6f} "
+            f"ch_peak={float(asr_info.get('decode_channel_peak', 0.0)):.5f} "
+            f"ch_rms={float(asr_info.get('decode_channel_rms', 0.0)):.5f} "
+            f"ch_active={float(asr_info.get('decode_channel_active_ratio', 0.0)):.3f})",
             flush=True,
         )
         return shell_kv_response({
@@ -545,7 +591,12 @@ async def route_asr(file: UploadFile = File(...), session_id: str = Form("shell"
         f"active={float(asr_info.get('active_ratio', 0.0)):.3f} "
         f"speech_active={float(asr_info.get('speech_active_ratio', 0.0)):.3f} "
         f"rms={float(asr_info.get('rms', 0.0)):.5f} "
-        f"speech_rms={float(asr_info.get('speech_rms', 0.0)):.5f})",
+        f"speech_rms={float(asr_info.get('speech_rms', 0.0)):.5f} "
+        f"ch={int(asr_info.get('decode_channel', -1))} "
+        f"ch_score={float(asr_info.get('decode_channel_score', 0.0)):.6f} "
+        f"ch_peak={float(asr_info.get('decode_channel_peak', 0.0)):.5f} "
+        f"ch_rms={float(asr_info.get('decode_channel_rms', 0.0)):.5f} "
+        f"ch_active={float(asr_info.get('decode_channel_active_ratio', 0.0)):.3f})",
         flush=True,
     )
 
@@ -783,16 +834,17 @@ async def stream_chat(file: UploadFile = File(...), session_id: str = "shell", b
             elif chunk["type"] == "audio":
                 yield chunk["data"]
             elif chunk["type"] == "error":
-                print(f"[Stream] {chunk['content']}")
-                fallback_text = "模型连接超时了，请稍后再试。"
-                full_text.append(fallback_text)
-                fallback_wav = await tts_client.synthesize_pcm(
-                    fallback_text,
+                fallback_pcm = await synthesize_stream_error_audio(
+                    chunk["content"],
                     sample_rate=32000,
                     speed=speed,
                     volume=volume,
                 )
-                yield fallback_wav[44:]
+                if fallback_pcm is None:
+                    continue
+                if fallback_pcm:
+                    full_text.append("模型连接超时了，请稍后再试。")
+                    yield fallback_pcm
                 break
 
     _t_start_outer = t_start

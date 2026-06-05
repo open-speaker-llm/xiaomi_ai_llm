@@ -20,7 +20,7 @@
 - 接收音箱端 fallback 请求
 - 调用 LLM
 - 生成 TTS 音频流
-- 对连续追问录音做 ASR、低置信度过滤和助手回声过滤
+- 保留 Mac Whisper ASR 接口，作为历史路线和追问兜底能力
 
 启动方式：
 
@@ -94,9 +94,11 @@ tail -f /tmp/native_first_client.log /tmp/native_first_events.log
        -> domain 在成功白名单：恢复播放器并 replay 原生 speak
        -> 原生不支持：停止/冻结原生播报，fallback 到 Mac LLM
   -> LLM 播放完成
-  -> 6s 连续追问窗口
-       -> 有有效语音：Mac ASR + LLM
-       -> 无语音/ASR 空：退出对话，回到待机
+  -> 8s 连续追问窗口
+       -> 固定窗口录音 5s
+       -> 小米原生 ai_service 做 ASR，但不执行原生 NLP/TTS
+       -> ASR 有文本：文本直接进入 LLM
+       -> ASR 空/录音无效：退出对话，回到待机
 ```
 
 当前强约束：
@@ -119,18 +121,31 @@ BACKEND=deepseek
 NATIVE_REPLAY_SUCCESS_SPEAK=1
 NATIVE_REPLAY_SUCCESS_DELAY=0
 FREEZE_NATIVE_PLAYER_ON_THINK=1
-FOLLOWUP_ARM_DELAY=0.4
-FOLLOWUP_THRESHOLD=600
-FOLLOWUP_START_HITS=2
+FOLLOWUP_ASR_ENGINE=native
+FOLLOWUP_RECORD_MODE=window
+FOLLOWUP_WINDOW_SECONDS=5
+FOLLOWUP_WINDOW_CAPTURE_DEV=Capture
+FOLLOWUP_WINDOW_CAPTURE_FORMAT=S16_LE
+FOLLOWUP_WINDOW_CAPTURE_RATE=16000
+FOLLOWUP_WINDOW_CAPTURE_CHANNELS=1
+FOLLOWUP_WINDOW_MIN_PEAK=300
+FOLLOWUP_WINDOW_MIN_RMS_THRESHOLD=40
+FOLLOWUP_WINDOW_MIN_ACTIVE_PERMILLE=5
+FOLLOWUP_TIMEOUT=8
+FOLLOWUP_ARM_DELAY=0.2
+FOLLOWUP_THRESHOLD=180
+FOLLOWUP_START_HITS=1
 FOLLOWUP_END_THRESHOLD=100
 FOLLOWUP_SILENCE_LIMIT=3
+PAUSE_NATIVE_ASR_DURING_LLM=0
 ```
 
 这些值对应当前折中：
 
 - 原生成功问题尽量快播报。
 - 原生失败问题优先完整拦截，再转 LLM。
-- 连续追问避免录到 LLM 尾音，同时降低环境噪声误触发。
+- 连续追问默认复用小米原生 ASR 获取文本，避免 Mac Whisper 对多麦克风录音识别不稳定。
+- 固定窗口录音先用 `peak/rms/active` 做轻量有效性判断；只有三个指标都低才认为没有有效语音。
 
 ## 4. Mac 服务端配置
 
@@ -167,7 +182,7 @@ OPENAI_API_KEY=
 | `/api/v1/voice_chat` | POST | 端到端语音对话 |
 | `/api/v1/stream/text_chat` | POST | native-first fallback 文本流式对话 |
 | `/api/v1/stream/chat` | POST | 录音上传、ASR、LLM、TTS 流式返回 |
-| `/api/v1/route/asr` | POST | 连续追问录音 ASR 质量门控，保留旧路径兼容音箱脚本 |
+| `/api/v1/route/asr` | POST | Mac Whisper ASR 路由接口，当前主线仅作为历史路线和兜底兼容 |
 
 ## 6. 测试
 
@@ -270,7 +285,8 @@ device/audio_capture.py
 |------|------|------|
 | KWS | Keyword Spotting | 唤醒词检测，用来识别“小爱同学”“你好小智”等唤醒词。当前主线不使用自定义 KWS。 |
 | Wake Word | 唤醒词 | 触发语音助手开始监听的固定短语。当前主线使用小米原生“小爱同学”。 |
-| ASR | Automatic Speech Recognition | 语音转文字。首轮使用小米原生 ASR，连续追问目前使用 Mac Whisper ASR。 |
+| ASR | Automatic Speech Recognition | 语音转文字。首轮和当前连续追问都优先使用小米原生 ASR；Mac Whisper ASR 保留作兼容和兜底。 |
+| `ai_service` | 小米原生服务接口 | `ubus call mibrain ai_service`，当前用于追问录音的原生 ASR：`asr=1,nlp=1,tts=0,nlp_execute=0`。 |
 | TTS | Text To Speech | 文字转语音，把 LLM 回复合成为音频并在音箱播放。 |
 | VAD | Voice Activity Detection | 语音活动检测，用来判断什么时候开始说话、什么时候静默结束录音。 |
 | LLM | Large Language Model | 大语言模型，例如 DeepSeek、MiniMax、Claude、OpenAI 模型。 |
