@@ -1,0 +1,14 @@
+#!/bin/sh /etc/rc.common
+START=45
+
+start() {
+    # Enable dropbear before /etc/init.d/dropbear START=50 runs.
+    # Keep authorized_keys on writable /data so SSH keys survive rootfs swaps.
+    mkdir -p /data/dropbear
+    if [ ! -f /data/dropbear/authorized_keys ]; then
+        cp /etc/dropbear/authorized_keys /data/dropbear/authorized_keys
+    fi
+    mount --bind /data/dropbear/authorized_keys /etc/dropbear/authorized_keys
+
+    echo "1" > /tmp/ssh_en
+}

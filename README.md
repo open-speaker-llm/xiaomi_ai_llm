@@ -9,7 +9,17 @@
 - 原生不支持的问题：fallback 到 DeepSeek/MiniMax 等 LLM
 - LLM 播放后：进入短暂连续追问窗口
 
-详细调试命令见 [DEV_COMMANDS.md](DEV_COMMANDS.md)。
+## 文档导航
+
+| 文档 | 用途 |
+|---|---|
+| [DEV_COMMANDS.md](DEV_COMMANDS.md) | 日常联调、启动、停止、看日志、串口、failsafe、boot 切换等命令手册。 |
+| [REMOTE_SHELL.md](REMOTE_SHELL.md) | 早期获取 root shell、failsafe、SSH 注入 system0 的完整操作记录。 |
+| [docs/BOOT_FLOW.md](docs/BOOT_FLOW.md) | boot0/boot1、system0/system1、kernel、initramfs、rootfs、OpenWrt/LEDE 等启动链路说明。 |
+| [docs/BOOT1_SSH_RUNBOOK.md](docs/BOOT1_SSH_RUNBOOK.md) | boot1/system1 SSH 打通、写入、校验和回退操作手册。 |
+| [docs/AUTOSTART_INIT_HOOK.md](docs/AUTOSTART_INIT_HOOK.md) | 断电重启后自动运行 native-first 客户端的 init hook 方案。 |
+| [TESTING.md](TESTING.md) | 自动化测试与人工测试说明。 |
+| [tests/manual_native_first_cases.md](tests/manual_native_first_cases.md) | 真实音箱人工验证用例。 |
 
 ## 1. 当前主线
 
@@ -225,7 +235,13 @@ xiaomi_ai_llm/
 │   ├── native_wake_asr_trace.sh     # 原生唤醒/ASR 跟踪工具
 │   ├── stream_client.sh             # 历史 KWS/录音客户端
 │   └── wake_monitor.sh              # 历史 KWS 唤醒监控
+├── docs/
+│   ├── BOOT_FLOW.md                 # 启动链路与系统分区说明
+│   ├── BOOT1_SSH_RUNBOOK.md         # boot1 SSH 注入操作手册
+│   └── AUTOSTART_INIT_HOOK.md       # 自启动 init hook 方案
 ├── DEV_COMMANDS.md          # 设备调试命令手册
+├── REMOTE_SHELL.md          # root shell / SSH 获取历史操作手册
+├── TESTING.md               # 自动化和人工测试说明
 ├── config.yaml              # 服务端模型配置
 ├── .env.example             # API Key 模板
 └── requirements.txt         # Python 依赖
@@ -315,3 +331,10 @@ device/audio_capture.py
 | `dsnoop` | ALSA 录音共享插件 | 允许多个进程同时读取同一个麦克风输入，避免录音设备被独占。 |
 | U-Boot | Bootloader | 设备启动加载器，可用于切换启动分区、进入 failsafe 等低层调试。 |
 | failsafe | 安全模式 | 系统异常或需要修复配置时进入的最小恢复环境。 |
+| boot0 / boot1 | 启动分区 | NAND 中的两套启动分区，主要包含 kernel + initramfs。U-Boot 根据 `boot_part` 选择其中之一。 |
+| system0 / system1 | 系统分区 | NAND 中的两套 rootfs 分区，包含 `/bin`、`/etc`、`/usr` 和小米用户态服务。 |
+| kernel | Linux 内核 | 管理硬件、内存、进程、驱动、文件系统和网络的核心程序。 |
+| initramfs | Initial RAM filesystem | kernel 启动早期使用的临时根文件系统，负责早期初始化和挂载真正 rootfs。 |
+| rootfs | Root filesystem | 当前挂载为 `/` 的根文件系统。本设备上通常是 system0 或 system1。 |
+| mount | 挂载 | 把某个分区接入 Linux 目录树，例如把 `/dev/mtdblock5` 挂载为 `/`。 |
+| OpenWrt / LEDE | 嵌入式 Linux 发行版框架 | 负责 init、ubus、网络和服务管理；小米语音服务运行在这个底座之上。 |

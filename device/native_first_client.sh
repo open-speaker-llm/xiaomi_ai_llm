@@ -28,14 +28,30 @@ LOG_FILE="${LOG_FILE:-/tmp/native_first_client.log}"
 PID_FILE="${PID_FILE:-/tmp/native_first_client.pid}"
 ORIG_WAKEUP="/tmp/wakeup.sh.orig"
 HOOK_WAKEUP="/tmp/wakeup.sh.native_first_client"
-MIPNS_CONF="/usr/share/xiaomi/xaudio_engine.conf"
+MIPNS_CONF="${MIPNS_CONF:-/usr/share/xiaomi/xaudio_engine.conf}"
 MIPNS_ARGS="${MIPNS_ARGS:--r opus32 -l}"
+AUDIO_CAPTURE_SETUP="${AUDIO_CAPTURE_SETUP:-auto}"
+NATIVE_RESULT_SOURCE="${NATIVE_RESULT_SOURCE:-auto}"
+NATIVE_AIVS_LAB_RESULT_SYSTEM1="${NATIVE_AIVS_LAB_RESULT_SYSTEM1:-1}"
+SYSTEM1_NATIVE_WAIT_SECONDS="${SYSTEM1_NATIVE_WAIT_SECONDS:-3}"
+SYSTEM1_FOLLOWUP_ENABLED="${SYSTEM1_FOLLOWUP_ENABLED:-0}"
+SYSTEM1_FOLLOWUP_CAPTURE_MIPNS="${SYSTEM1_FOLLOWUP_CAPTURE_MIPNS:-0}"
+SYSTEM1_FOLLOWUP_ASR_ENGINE="${SYSTEM1_FOLLOWUP_ASR_ENGINE:-mac}"
+SYSTEM1_FOLLOWUP_WINDOW_CAPTURE_DEV="${SYSTEM1_FOLLOWUP_WINDOW_CAPTURE_DEV:-hw:0,2}"
+SYSTEM1_FOLLOWUP_WINDOW_CAPTURE_FORMAT="${SYSTEM1_FOLLOWUP_WINDOW_CAPTURE_FORMAT:-S32_LE}"
+SYSTEM1_FOLLOWUP_WINDOW_CAPTURE_RATE="${SYSTEM1_FOLLOWUP_WINDOW_CAPTURE_RATE:-48000}"
+SYSTEM1_FOLLOWUP_WINDOW_CAPTURE_CHANNELS="${SYSTEM1_FOLLOWUP_WINDOW_CAPTURE_CHANNELS:-8}"
+AIVS_LAB_INSTRUCTION_LOG="${AIVS_LAB_INSTRUCTION_LOG:-/tmp/mico_aivs_lab/instruction.log}"
+AIVS_LAB_LOOKBACK_LINES="${AIVS_LAB_LOOKBACK_LINES:-40}"
+AIVS_LAB_LAST_DIALOG_FILE="${AIVS_LAB_LAST_DIALOG_FILE:-/tmp/native_first_last_aivs_dialog}"
 NATIVE_WAIT_SECONDS="${NATIVE_WAIT_SECONDS:-12}"
 NATIVE_POLL_INTERVAL="${NATIVE_POLL_INTERVAL:-0.2}"
 NATIVE_UBUS_TIMEOUT="${NATIVE_UBUS_TIMEOUT:-1}"
 WAKE_EVENT_MAX_AGE="${WAKE_EVENT_MAX_AGE:-4}"
 WAKE_IGNORE_QUERIES="${WAKE_IGNORE_QUERIES:-${WAKE_ONLY_QUERIES:-小爱同学 小爱 小爱小爱 小爱同学小爱同学 我在 在呢}}"
 FOLLOWUP_TIMEOUT="${FOLLOWUP_TIMEOUT:-8}"
+FOLLOWUP_ENABLED="${FOLLOWUP_ENABLED:-1}"
+FOLLOWUP_MODE="${FOLLOWUP_MODE:-local_record}"
 FOLLOWUP_THRESHOLD="${FOLLOWUP_THRESHOLD:-180}"
 FOLLOWUP_START_HITS="${FOLLOWUP_START_HITS:-1}"
 FOLLOWUP_END_THRESHOLD="${FOLLOWUP_END_THRESHOLD:-100}"
@@ -71,11 +87,23 @@ else
     FOLLOWUP_WINDOW_CAPTURE_CHANNELS="${FOLLOWUP_WINDOW_CAPTURE_CHANNELS:-8}"
 fi
 FOLLOWUP_ARM_FILE="/tmp/native_followup_vad.arm"
+NATIVE_FOLLOWUP_POLL_SECONDS="${NATIVE_FOLLOWUP_POLL_SECONDS:-12}"
+NATIVE_FOLLOWUP_POLL_INTERVAL="${NATIVE_FOLLOWUP_POLL_INTERVAL:-0.2}"
+NATIVE_FOLLOWUP_PRE_MULTIROUNDS="${NATIVE_FOLLOWUP_PRE_MULTIROUNDS:-1}"
+NATIVE_FOLLOWUP_TTS_NOTIFY="${NATIVE_FOLLOWUP_TTS_NOTIFY:-1}"
+NATIVE_FOLLOWUP_MULTIROUNDS_TRIGGER="${NATIVE_FOLLOWUP_MULTIROUNDS_TRIGGER:-pns}"
+NATIVE_FOLLOWUP_TRIGGER_AFTER_TTS_END="${NATIVE_FOLLOWUP_TRIGGER_AFTER_TTS_END:-0}"
 STREAM_TIMEOUT="${STREAM_TIMEOUT:-180}"
 UNSUPPORTED_PATTERNS="${UNSUPPORTED_PATTERNS:-暂时|不会|不支持|回答不上|需要再学习|没听懂|不知道|不会这项技能}"
+DIRECT_LLM_QUERY_PATTERNS="${DIRECT_LLM_QUERY_PATTERNS:-DEEPSEEK|DeepSeek|deepseek}"
 NATIVE_SUCCESS_DOMAINS="${NATIVE_SUCCESS_DOMAINS:-smartMiot soundboxControl time weather music player alarm timer system volume}"
 NATIVE_REPLAY_SUCCESS_SPEAK="${NATIVE_REPLAY_SUCCESS_SPEAK:-1}"
 NATIVE_REPLAY_SUCCESS_DELAY="${NATIVE_REPLAY_SUCCESS_DELAY:-0}"
+NATIVE_REPLAY_CANCEL_ON_WAKE="${NATIVE_REPLAY_CANCEL_ON_WAKE:-1}"
+NATIVE_REPLAY_CANCEL_DOMAINS="${NATIVE_REPLAY_CANCEL_DOMAINS:-smartMiot soundboxControl volume system}"
+NATIVE_REPLAY_CANCEL_GRACE="${NATIVE_REPLAY_CANCEL_GRACE:-0.2}"
+NATIVE_REPLAY_CANCEL_WINDOW="${NATIVE_REPLAY_CANCEL_WINDOW:-4}"
+NATIVE_REPLAY_CANCEL_MARKER="${NATIVE_REPLAY_CANCEL_MARKER:-/tmp/native_first_replay_cancel}"
 STOP_NATIVE_SECONDS="${STOP_NATIVE_SECONDS:-15}"
 SUPPRESS_DUP_SECONDS="${SUPPRESS_DUP_SECONDS:-0}"
 FREEZE_NATIVE_PLAYER_ON_FALLBACK="${FREEZE_NATIVE_PLAYER_ON_FALLBACK:-1}"
@@ -87,6 +115,8 @@ FOLLOWUP_VAD_PID=""
 HOOK_WATCHDOG_PID=""
 CURRENT_SESSION_ID=""
 NATIVE_PLAYER_FROZEN=0
+NATIVE_ASR_RESTART_NEEDED=0
+NATIVE_FOLLOWUP_MARKED=0
 STATE="BOOT"
 LAST_LOG_SEC=""
 LAST_LOG_MS=0
@@ -158,6 +188,67 @@ setup_audio() {
     amixer -c 0 sset 'Hard Mute' off 2>/dev/null
     amixer -c 0 sset 'Ch1' unmute 2>/dev/null
     amixer -c 0 sset 'Ch2' unmute 2>/dev/null
+}
+
+root_device() {
+    awk '$2 == "/" {print $1; exit}' /proc/mounts 2>/dev/null
+}
+
+is_system1_root() {
+    [ "$(root_device)" = "/dev/mtdblock5" ]
+}
+
+restore_audio_capture_overlays() {
+    local i
+    for i in 1 2 3 4 5; do
+        umount -l /etc/asound.conf 2>/dev/null
+        umount -l /usr/lib/libxaudio_engine.so 2>/dev/null
+    done
+    rm -f /tmp/dsnoop_ready
+}
+
+should_setup_dsnoop() {
+    case "$AUDIO_CAPTURE_SETUP" in
+        1|yes|true|on)
+            return 0
+            ;;
+        0|no|false|off)
+            return 1
+            ;;
+        auto|"")
+            # boot1/system1 uses the pristine native audio path. The dsnoop and
+            # libxaudio_engine overlay used on system0 can make native recorder
+            # crash there, so keep boot1 native unless explicitly overridden.
+            is_system1_root && return 1
+            return 0
+            ;;
+        *)
+            log "[SETUP] unknown AUDIO_CAPTURE_SETUP=$AUDIO_CAPTURE_SETUP, use auto"
+            is_system1_root && return 1
+            return 0
+            ;;
+    esac
+}
+
+apply_system_defaults() {
+    if is_system1_root; then
+        FOLLOWUP_ENABLED="$SYSTEM1_FOLLOWUP_ENABLED"
+        if [ "$FOLLOWUP_ASR_ENGINE" = "native" ]; then
+            FOLLOWUP_ASR_ENGINE="$SYSTEM1_FOLLOWUP_ASR_ENGINE"
+        fi
+        if [ "$FOLLOWUP_WINDOW_CAPTURE_DEV" = "Capture" ]; then
+            FOLLOWUP_WINDOW_CAPTURE_DEV="$SYSTEM1_FOLLOWUP_WINDOW_CAPTURE_DEV"
+        fi
+        if [ "$FOLLOWUP_WINDOW_CAPTURE_FORMAT" = "S16_LE" ]; then
+            FOLLOWUP_WINDOW_CAPTURE_FORMAT="$SYSTEM1_FOLLOWUP_WINDOW_CAPTURE_FORMAT"
+        fi
+        if [ "$FOLLOWUP_WINDOW_CAPTURE_RATE" = "16000" ]; then
+            FOLLOWUP_WINDOW_CAPTURE_RATE="$SYSTEM1_FOLLOWUP_WINDOW_CAPTURE_RATE"
+        fi
+        if [ "$FOLLOWUP_WINDOW_CAPTURE_CHANNELS" = "1" ]; then
+            FOLLOWUP_WINDOW_CAPTURE_CHANNELS="$SYSTEM1_FOLLOWUP_WINDOW_CAPTURE_CHANNELS"
+        fi
+    fi
 }
 
 setup_dsnoop() {
@@ -340,15 +431,21 @@ restore_hook() {
 }
 
 ensure_original_wakeup() {
-    if [ -f "$ORIG_WAKEUP" ] && grep -q 'play_wakeup' "$ORIG_WAKEUP" 2>/dev/null; then
+    if [ -f "$ORIG_WAKEUP" ] && ! grep -q 'NATIVE_WAKE_EVENT' "$ORIG_WAKEUP" 2>/dev/null; then
         return 0
     fi
-    cp /bin/wakeup.sh "$ORIG_WAKEUP"
+    if cp /bin/wakeup.sh "$ORIG_WAKEUP" 2>/dev/null; then
+        chmod +x "$ORIG_WAKEUP" 2>/dev/null
+        log "[HOOK] saved original wakeup -> $ORIG_WAKEUP"
+        return 0
+    fi
+    log "[HOOK] save original wakeup failed: /bin/wakeup.sh -> $ORIG_WAKEUP"
+    return 1
 }
 
 install_hook() {
     restore_hook
-    ensure_original_wakeup
+    ensure_original_wakeup || return 1
 
     cat > "$HOOK_WAKEUP" << 'EOF'
 #!/bin/sh
@@ -359,7 +456,9 @@ EVENT_LOG="${EVENT_LOG:-/tmp/native_first_events.log}"
 ORIG_WAKEUP="${ORIG_WAKEUP:-/tmp/wakeup.sh.orig}"
 PLAYER_FROZEN_MARKER="${PLAYER_FROZEN_MARKER:-/tmp/native_first_player_frozen}"
 BUSY_MARKER="${BUSY_MARKER:-/tmp/native_first_busy}"
+NATIVE_REPLAY_CANCEL_MARKER="${NATIVE_REPLAY_CANCEL_MARKER:-/tmp/native_first_replay_cancel}"
 FREEZE_NATIVE_PLAYER_ON_THINK="${FREEZE_NATIVE_PLAYER_ON_THINK:-1}"
+WAKE_ON_THINK_SYSTEM1="${WAKE_ON_THINK_SYSTEM1:-1}"
 
 log_ts() {
     local base ms
@@ -374,6 +473,13 @@ case "$1" in
     WuW|WuW_first|WuW_oneshot)
         ts=$(date +%s)
         echo "[$(log_ts)] NATIVE_WAKE_EVENT args=$* ts=$ts" >> "$EVENT_LOG"
+        if [ -f "$NATIVE_REPLAY_CANCEL_MARKER" ]; then
+            rm -f "$NATIVE_REPLAY_CANCEL_MARKER"
+            ubus -t 1 call mediaplayer player_play_operation '{"action":"stop"}' >/dev/null 2>&1
+            ubus -t 1 call mediaplayer media_control '{"player":"mediaplayer","action":"stop"}' >/dev/null 2>&1
+            ubus -t 1 call mediaplayer player_reset '{}' >/dev/null 2>&1
+            echo "[$(log_ts)] NATIVE_REPLAY_CANCEL_ON_WAKE args=$* ts=$ts" >> "$EVENT_LOG"
+        fi
         if [ -f "$BUSY_MARKER" ]; then
             echo "[$(log_ts)] NATIVE_WAKE_IGNORED_BUSY args=$* ts=$ts" >> "$EVENT_LOG"
         elif [ -p "$EVENT_FIFO" ]; then
@@ -381,13 +487,23 @@ case "$1" in
         fi
         ;;
     think)
-        echo "[$(log_ts)] NATIVE_WAKE_EVENT args=$*" >> "$EVENT_LOG"
+        ts=$(date +%s)
+        echo "[$(log_ts)] NATIVE_WAKE_EVENT args=$* ts=$ts" >> "$EVENT_LOG"
         if [ -f "$BUSY_MARKER" ]; then
             echo "[$(log_ts)] NATIVE_THINK_IGNORED_BUSY args=$*" >> "$EVENT_LOG"
-        elif [ "$FREEZE_NATIVE_PLAYER_ON_THINK" = "1" ]; then
-            killall -STOP mediaplayer 2>/dev/null
-            date +%s > "$PLAYER_FROZEN_MARKER"
-            echo "[$(log_ts)] NATIVE_PRE_FREEZE args=$*" >> "$EVENT_LOG"
+        else
+            root_dev=$(awk '$2 == "/" {print $1; exit}' /proc/mounts 2>/dev/null)
+            if [ "$WAKE_ON_THINK_SYSTEM1" = "1" ] && [ "$root_dev" = "/dev/mtdblock5" ] && [ -p "$EVENT_FIFO" ]; then
+                ( echo "think $ts" > "$EVENT_FIFO" 2>/dev/null ) &
+                echo "[$(log_ts)] NATIVE_WAKE_EVENT_FROM_THINK root=$root_dev ts=$ts" >> "$EVENT_LOG"
+            fi
+            if [ "$root_dev" = "/dev/mtdblock5" ]; then
+                echo "[$(log_ts)] NATIVE_PRE_FREEZE_SKIP_SYSTEM1 args=$*" >> "$EVENT_LOG"
+            elif [ "$FREEZE_NATIVE_PLAYER_ON_THINK" = "1" ]; then
+                killall -STOP mediaplayer 2>/dev/null
+                date +%s > "$PLAYER_FROZEN_MARKER"
+                echo "[$(log_ts)] NATIVE_PRE_FREEZE args=$*" >> "$EVENT_LOG"
+            fi
         fi
         ;;
     ready|bf|bf_end|noangle|noangle_end|multirounds)
@@ -489,15 +605,90 @@ json_escape() {
     sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
-get_latest_native_result() {
-    local raw="$1"
-    local item
+json_unicode_decode() {
+    awk '
+function hv(c) { return index("0123456789abcdef", tolower(c)) - 1 }
+function emit(n) {
+    if (n < 128) printf "%c", n;
+    else if (n < 2048) printf "%c%c", 192 + int(n / 64), 128 + (n % 64);
+    else printf "%c%c%c", 224 + int(n / 4096), 128 + (int(n / 64) % 64), 128 + (n % 64);
+}
+{
+    for (i = 1; i <= length($0); i++) {
+        if (substr($0, i, 2) == "\\u" && i + 5 <= length($0)) {
+            h = substr($0, i + 2, 4);
+            n = 0;
+            ok = 1;
+            for (j = 1; j <= 4; j++) {
+                v = hv(substr(h, j, 1));
+                if (v < 0) ok = 0;
+                n = n * 16 + v;
+            }
+            if (ok) {
+                emit(n);
+                i += 5;
+                continue;
+            }
+        }
+        printf "%s", substr($0, i, 1);
+    }
+    printf "\n";
+}'
+}
 
+json_text_unescape() {
+    json_unicode_decode | sed 's/\\"/"/g; s/\\\\/\\/g'
+}
+
+reset_native_result() {
+    RESULT_SOURCE=""
     RESULT_TS=""
     RESULT_DOMAIN=""
     RESULT_ACTION=""
     RESULT_QUERY=""
     RESULT_SPEAK=""
+}
+
+select_native_result_source() {
+    case "$NATIVE_RESULT_SOURCE" in
+        ubus_nlp_result|aivs_lab_instruction)
+            echo "$NATIVE_RESULT_SOURCE"
+            ;;
+        auto|*)
+            if is_system1_root && [ "$NATIVE_AIVS_LAB_RESULT_SYSTEM1" = "1" ]; then
+                echo "aivs_lab_instruction"
+            else
+                echo "ubus_nlp_result"
+            fi
+            ;;
+    esac
+}
+
+get_aivs_lab_latest_dialog_id() {
+    [ -f "$AIVS_LAB_INSTRUCTION_LOG" ] || return 0
+    tail -n "$AIVS_LAB_LOOKBACK_LINES" "$AIVS_LAB_INSTRUCTION_LOG" 2>/dev/null \
+        | sed -n 's/.*"dialog_id":"\([^"]*\)".*/\1/p' \
+        | tail -1
+}
+
+init_native_result_state() {
+    local source dialog_id
+
+    source=$(select_native_result_source)
+    if [ "$source" = "aivs_lab_instruction" ]; then
+        dialog_id=$(get_aivs_lab_latest_dialog_id)
+        if [ -n "$dialog_id" ]; then
+            echo "$dialog_id" > "$AIVS_LAB_LAST_DIALOG_FILE"
+            log "Native result: initialized aivs_lab last_dialog=$dialog_id"
+        fi
+    fi
+}
+
+get_native_result_ubus() {
+    local raw="$1"
+    local item
+
+    reset_native_result
 
     # nlp_result_get returns a history array. The newest item may contain only
     # timestamp/asr and no nlp, so all fields must be extracted from the same
@@ -510,6 +701,210 @@ get_latest_native_result() {
     RESULT_ACTION=$(echo "$item" | extract_first_value action)
     RESULT_QUERY=$(echo "$item" | extract_first_value query)
     RESULT_SPEAK=$(echo "$item" | extract_first_value to_speak)
+    RESULT_SOURCE="ubus_nlp_result"
+}
+
+get_native_result_aivs_lab() {
+    local new_lines dialog_id dialog_lines raw_query raw_speak
+    local last_dialog
+
+    reset_native_result
+
+    [ "$NATIVE_AIVS_LAB_RESULT_SYSTEM1" = "1" ] || return 1
+    is_system1_root || return 1
+    [ -f "$AIVS_LAB_INSTRUCTION_LOG" ] || return 1
+
+    new_lines=$(tail -n "$AIVS_LAB_LOOKBACK_LINES" "$AIVS_LAB_INSTRUCTION_LOG" 2>/dev/null)
+    [ -n "$new_lines" ] || return 1
+
+    dialog_id=$(printf '%s\n' "$new_lines" | sed -n 's/.*"dialog_id":"\([^"]*\)".*/\1/p' | tail -1)
+    [ -n "$dialog_id" ] || return 1
+
+    last_dialog=$(cat "$AIVS_LAB_LAST_DIALOG_FILE" 2>/dev/null)
+    [ "$dialog_id" = "$last_dialog" ] && return 1
+
+    dialog_lines=$(printf '%s\n' "$new_lines" | grep "\"dialog_id\":\"$dialog_id\"")
+    [ -n "$dialog_lines" ] || return 1
+
+    raw_query=$(printf '%s\n' "$dialog_lines" \
+        | sed -n 's/.*"name":"RecognizeResult".*"is_final":true.*"text":"\([^"]*\)".*/\1/p' \
+        | tail -1)
+    [ -n "$raw_query" ] || raw_query=$(printf '%s\n' "$dialog_lines" \
+        | sed -n 's/.*"name":"RecognizeResult".*"text":"\([^"]*\)".*/\1/p' \
+        | tail -1)
+    raw_speak=$(printf '%s\n' "$dialog_lines" \
+        | sed -n 's/.*"name":"Speak".*"text":"\([^"]*\)".*/\1/p' \
+        | tail -1)
+
+    [ -n "$raw_query$raw_speak" ] || return 1
+
+    [ -n "$raw_query" ] && RESULT_QUERY=$(printf '%s\n' "$raw_query" | json_text_unescape)
+    [ -n "$raw_speak" ] && RESULT_SPEAK=$(printf '%s\n' "$raw_speak" | json_text_unescape)
+
+    if [ -n "$RESULT_QUERY" ] && echo "$RESULT_QUERY" | grep -Eq "$DIRECT_LLM_QUERY_PATTERNS"; then
+        RESULT_TS=$(date +%s)
+        RESULT_DOMAIN="michat"
+        RESULT_ACTION="model"
+        RESULT_SOURCE="aivs_lab_instruction"
+        echo "$dialog_id" > "$AIVS_LAB_LAST_DIALOG_FILE"
+        return 0
+    fi
+
+    if [ -n "$RESULT_QUERY" ] && [ -n "$RESULT_SPEAK" ] && is_unsupported_result; then
+        RESULT_TS=$(date +%s)
+        RESULT_DOMAIN="michat"
+        RESULT_ACTION="model"
+        RESULT_SOURCE="aivs_lab_instruction"
+        echo "$dialog_id" > "$AIVS_LAB_LAST_DIALOG_FILE"
+        return 0
+    fi
+
+    return 1
+}
+
+native_followup_mark_multirounds() {
+    local force="${1:-0}"
+
+    [ "$NATIVE_FOLLOWUP_PRE_MULTIROUNDS" = "1" ] || return 0
+    [ "$force" != "1" ] && [ "$NATIVE_FOLLOWUP_MARKED" = "1" ] && return 0
+    NATIVE_FOLLOWUP_MARKED=1
+    log "[NATIVE_FOLLOWUP] pre multirounds trigger=$NATIVE_FOLLOWUP_MULTIROUNDS_TRIGGER"
+    case "$NATIVE_FOLLOWUP_MULTIROUNDS_TRIGGER" in
+        pns6)
+            ubus -t 1 call pnshelper event_notify '{"src":3,"event":6}' >/dev/null 2>&1
+            ;;
+        oneshot)
+            ubus -t 1 call pnshelper oneshot_set '{"open":true}' >/dev/null 2>&1
+            ;;
+        wakeup)
+            [ -x "$ORIG_WAKEUP" ] && "$ORIG_WAKEUP" multirounds >/dev/null 2>&1
+            ;;
+        both6)
+            ubus -t 1 call pnshelper event_notify '{"src":3,"event":6}' >/dev/null 2>&1
+            [ -x "$ORIG_WAKEUP" ] && "$ORIG_WAKEUP" multirounds >/dev/null 2>&1
+            ;;
+        both)
+            ubus -t 1 call pnshelper event_notify '{"src":3,"event":4,"detail":"pre_multirounds"}' >/dev/null 2>&1
+            [ -x "$ORIG_WAKEUP" ] && "$ORIG_WAKEUP" multirounds >/dev/null 2>&1
+            ;;
+        pns|*)
+            ubus -t 1 call pnshelper event_notify '{"src":3,"event":4,"detail":"pre_multirounds"}' >/dev/null 2>&1
+            ;;
+    esac
+}
+
+native_followup_tts_start() {
+    [ "$NATIVE_FOLLOWUP_TTS_NOTIFY" = "1" ] || return 0
+    ubus -t 1 call pnshelper event_notify '{"src":3,"event":12}' >/dev/null 2>&1
+    log "[NATIVE_FOLLOWUP] notify local tts start"
+}
+
+native_followup_tts_end() {
+    [ "$NATIVE_FOLLOWUP_TTS_NOTIFY" = "1" ] || return 0
+    ubus -t 1 call pnshelper event_notify '{"src":3,"event":13}' >/dev/null 2>&1
+    log "[NATIVE_FOLLOWUP] notify local tts end"
+    if [ "$NATIVE_FOLLOWUP_TRIGGER_AFTER_TTS_END" = "1" ]; then
+        log "[NATIVE_FOLLOWUP] trigger multirounds after tts end"
+        native_followup_mark_multirounds 1
+    fi
+}
+
+extract_aivs_latest_final_text_after() {
+    local last_dialog="$1"
+    local ignore_text="$2"
+    local new_lines dialog_id dialog_lines raw_text text
+
+    FOLLOWUP_TEXT=""
+    [ -f "$AIVS_LAB_INSTRUCTION_LOG" ] || return 1
+
+    new_lines=$(tail -n "$AIVS_LAB_LOOKBACK_LINES" "$AIVS_LAB_INSTRUCTION_LOG" 2>/dev/null)
+    [ -n "$new_lines" ] || return 1
+
+    dialog_id=$(printf '%s\n' "$new_lines" | sed -n 's/.*"dialog_id":"\([^"]*\)".*/\1/p' | tail -1)
+    [ -n "$dialog_id" ] || return 1
+    [ "$dialog_id" = "$last_dialog" ] && return 1
+
+    dialog_lines=$(printf '%s\n' "$new_lines" | grep "\"dialog_id\":\"$dialog_id\"")
+    [ -n "$dialog_lines" ] || return 1
+
+    raw_text=$(printf '%s\n' "$dialog_lines" \
+        | sed -n 's/.*"name":"RecognizeResult".*"is_final":true.*"text":"\([^"]*\)".*/\1/p' \
+        | tail -1)
+    [ -n "$raw_text" ] || return 1
+
+    text=$(printf '%s\n' "$raw_text" | json_text_unescape)
+    [ -n "$text" ] || return 1
+    [ "$text" = "$ignore_text" ] && return 1
+
+    FOLLOWUP_TEXT="$text"
+    echo "$dialog_id" > "$AIVS_LAB_LAST_DIALOG_FILE"
+    return 0
+}
+
+wait_native_followup_text() {
+    local last_dialog="$1"
+    local ignore_text="$2"
+    local max_ticks waited_ticks=0
+
+    max_ticks=$(awk -v s="$NATIVE_FOLLOWUP_POLL_SECONDS" -v p="$NATIVE_FOLLOWUP_POLL_INTERVAL" 'BEGIN { printf "%d", (s / p) }')
+    log "[NATIVE_FOLLOWUP] wait native ASR ${NATIVE_FOLLOWUP_POLL_SECONDS}s last_dialog=${last_dialog:-none}"
+    while [ "$waited_ticks" -lt "$max_ticks" ]; do
+        sleep "$NATIVE_FOLLOWUP_POLL_INTERVAL"
+        if extract_aivs_latest_final_text_after "$last_dialog" "$ignore_text"; then
+            log "[NATIVE_FOLLOWUP] ASR text=$FOLLOWUP_TEXT"
+            return 0
+        fi
+        waited_ticks=$((waited_ticks + 1))
+    done
+    log "[NATIVE_FOLLOWUP] timeout/no text"
+    return 1
+}
+
+get_native_result() {
+    local source="$1"
+    local raw
+
+    case "$source" in
+        aivs_lab_instruction)
+            get_native_result_aivs_lab && return 0
+            reset_native_result
+            return 1
+            ;;
+        ubus_nlp_result|*)
+            raw=$(ubus -t "$NATIVE_UBUS_TIMEOUT" call mibrain nlp_result_get)
+            get_native_result_ubus "$raw"
+            [ -n "$RESULT_TS" ] && [ -n "$RESULT_DOMAIN" ]
+            return $?
+            ;;
+    esac
+}
+
+start_native_replay_cancel_window() {
+    local token
+
+    [ "$NATIVE_REPLAY_CANCEL_ON_WAKE" = "1" ] || return 1
+    token="$$-$(monotonic_ms)"
+    printf '%s\n' "$token" > "$NATIVE_REPLAY_CANCEL_MARKER" 2>/dev/null || return 1
+    REPLAY_CANCEL_TOKEN="$token"
+    (
+        sleep "$NATIVE_REPLAY_CANCEL_WINDOW"
+        current=$(cat "$NATIVE_REPLAY_CANCEL_MARKER" 2>/dev/null)
+        [ "$current" = "$token" ] && rm -f "$NATIVE_REPLAY_CANCEL_MARKER"
+    ) &
+    return 0
+}
+
+is_native_replay_cancelled() {
+    local current
+
+    [ -n "$REPLAY_CANCEL_TOKEN" ] || return 1
+    current=$(cat "$NATIVE_REPLAY_CANCEL_MARKER" 2>/dev/null)
+    [ "$current" != "$REPLAY_CANCEL_TOKEN" ]
+}
+
+should_cancel_native_replay_on_wake() {
+    [ "$NATIVE_REPLAY_CANCEL_ON_WAKE" = "1" ] || return 1
+    echo " $NATIVE_REPLAY_CANCEL_DOMAINS " | grep -q " $RESULT_DOMAIN "
 }
 
 native_tts_speak() {
@@ -523,6 +918,22 @@ native_tts_speak() {
         >/dev/null 2>&1
 }
 
+native_tts_speak_cancellable() {
+    local text="$1"
+
+    REPLAY_CANCEL_TOKEN=""
+    if start_native_replay_cancel_window; then
+        log "[NATIVE] replay cancel window: grace=${NATIVE_REPLAY_CANCEL_GRACE}s window=${NATIVE_REPLAY_CANCEL_WINDOW}s"
+        sleep "$NATIVE_REPLAY_CANCEL_GRACE"
+        if is_native_replay_cancelled; then
+            log "[NATIVE] replay cancelled before speak: $text"
+            return 0
+        fi
+    fi
+
+    native_tts_speak "$text"
+}
+
 handle_native_success_speak() {
     if [ -z "$RESULT_SPEAK" ]; then
         resume_native_player 0
@@ -532,13 +943,22 @@ handle_native_success_speak() {
     case "$NATIVE_REPLAY_SUCCESS_SPEAK" in
         1|yes|true)
             resume_native_player 0
-            native_tts_speak "$RESULT_SPEAK"
+            if should_cancel_native_replay_on_wake; then
+                native_tts_speak_cancellable "$RESULT_SPEAK"
+            else
+                native_tts_speak "$RESULT_SPEAK"
+            fi
             ;;
         auto)
             resume_native_player 0
             log "[NATIVE] success speak auto replay after ${NATIVE_REPLAY_SUCCESS_DELAY}s"
+            should_cancel_native_replay_on_wake && start_native_replay_cancel_window || true
             sleep "$NATIVE_REPLAY_SUCCESS_DELAY"
-            native_tts_speak "$RESULT_SPEAK"
+            if is_native_replay_cancelled; then
+                log "[NATIVE] replay cancelled before speak: $RESULT_SPEAK"
+            else
+                native_tts_speak "$RESULT_SPEAK"
+            fi
             ;;
         *)
             resume_native_player 0
@@ -630,11 +1050,28 @@ pause_native_asr() {
 }
 
 resume_native_asr() {
+    if [ "$NATIVE_ASR_RESTART_NEEDED" = "1" ]; then
+        restart_mipns_single
+        NATIVE_ASR_RESTART_NEEDED=0
+        log "[NATIVE] mipns restarted after boot1 followup capture"
+        return 0
+    fi
     if [ "$PAUSE_NATIVE_ASR_DURING_LLM" = "1" ]; then
         killall -CONT mipns-xiaomi 2>/dev/null
         log "[NATIVE] mipns resumed"
     else
         log "[NATIVE] mipns already running"
+    fi
+}
+
+prepare_followup_capture() {
+    if is_system1_root && [ "$SYSTEM1_FOLLOWUP_CAPTURE_MIPNS" = "1" ]; then
+        if pidof mipns-xiaomi >/dev/null 2>&1; then
+            killall -9 mipns-xiaomi 2>/dev/null
+            NATIVE_ASR_RESTART_NEEDED=1
+            log "[NATIVE] mipns killed for boot1 followup capture"
+            sleep 0.3
+        fi
     fi
 }
 
@@ -727,6 +1164,7 @@ arm_followup_vad() {
     if [ -n "$FOLLOWUP_VAD_PID" ]; then
         log "[FOLLOWUP] wait ${FOLLOWUP_ARM_DELAY}s for speaker tail"
         sleep "$FOLLOWUP_ARM_DELAY"
+        prepare_followup_capture
         touch "$FOLLOWUP_ARM_FILE" 2>/dev/null
         log "[FOLLOWUP] arm VAD after playback"
     fi
@@ -815,6 +1253,9 @@ send_text_and_play() {
 
     aplay /tmp/stream_fifo 2>/dev/null &
     APLAY_PID=$!
+    if [ "$cleanup_mode" = "native_defer" ]; then
+        native_followup_tts_start
+    fi
 
     wait $CURL_PID 2>/dev/null
     t1=$(date +%s)
@@ -825,10 +1266,13 @@ send_text_and_play() {
     wait $APLAY_PID 2>/dev/null
     t2=$(date +%s)
     log "[LLM] aplay done in $((t2 - t0))s (drain=$((t2 - t1))s)"
+    if [ "$cleanup_mode" = "native_defer" ]; then
+        native_followup_tts_end
+    fi
     if [ "$cleanup_mode" = "defer" ]; then
         arm_followup_vad
     fi
-    if [ "$cleanup_mode" = "defer" ]; then
+    if [ "$cleanup_mode" = "defer" ] || [ "$cleanup_mode" = "native_defer" ]; then
         log "[LLM] playback done, defer cleanup for followup"
         set_state "FOLLOWUP_WINDOW"
     else
@@ -979,11 +1423,51 @@ handle_llm_dialog() {
     local first_text="$2"
     local turn=1
     local ret
+    local last_dialog
 
     CURRENT_SESSION_ID="$session_id"
     set_state "LLM_DIALOG"
     led_on
     pause_native_asr
+
+    if [ "$FOLLOWUP_ENABLED" != "1" ]; then
+        log "[FOLLOWUP] disabled，首轮 LLM 播放完成后直接退出对话"
+        send_text_and_play "$session_id" "$first_text" normal
+        led_off
+        resume_native_asr
+        CURRENT_SESSION_ID=""
+        set_state "IDLE"
+        return 0
+    fi
+
+    if [ "$FOLLOWUP_MODE" = "native_multirounds" ]; then
+        log "[FOLLOWUP] mode=native_multirounds，不启动本地录音"
+        last_dialog=$(get_aivs_lab_latest_dialog_id)
+        native_followup_mark_multirounds
+        send_text_and_play "$session_id" "$first_text" native_defer
+
+        while true; do
+            turn=$((turn + 1))
+            set_state "FOLLOWUP_LISTENING"
+            if ! wait_native_followup_text "$last_dialog" "$first_text"; then
+                log "[FOLLOWUP] 原生追问 ASR 无文本，退出对话"
+                break
+            fi
+            last_dialog=$(get_aivs_lab_latest_dialog_id)
+            log "[TURN $turn] 原生追问转 LLM: $FOLLOWUP_TEXT"
+            native_followup_mark_multirounds
+            send_text_and_play "$session_id" "$FOLLOWUP_TEXT" native_defer
+            log "[TURN $turn] 播放完成"
+        done
+
+        finish_llm_playback
+        led_off
+        resume_native_asr
+        CURRENT_SESSION_ID=""
+        set_state "IDLE"
+        return 0
+    fi
+
     send_text_and_play "$session_id" "$first_text" defer
 
     while true; do
@@ -1022,28 +1506,36 @@ handle_wakeup() {
     local session_id="native_first_${BACKEND}_$(date +%s)"
     local waited_ticks=0
     local max_ticks
+    local wait_seconds
     local last_ts=0
     local fallback_query=""
     local saw_success=0
     local start_ms
     local elapsed
+    local result_source
 
     log "[WAKE] native-first session=$session_id wake_ts=$wake_ts"
+    NATIVE_FOLLOWUP_MARKED=0
     start_ms=$(monotonic_ms)
+    result_source=$(select_native_result_source)
+    log "[NATIVE] result source=$result_source"
     set_state "NATIVE_PROCESSING"
     led_on
-    max_ticks=$(awk -v s="$NATIVE_WAIT_SECONDS" -v p="$NATIVE_POLL_INTERVAL" 'BEGIN { printf "%d", (s / p) }')
+    wait_seconds="$NATIVE_WAIT_SECONDS"
+    if is_system1_root && [ "$result_source" = "aivs_lab_instruction" ]; then
+        wait_seconds="$SYSTEM1_NATIVE_WAIT_SECONDS"
+    fi
+    max_ticks=$(awk -v s="$wait_seconds" -v p="$NATIVE_POLL_INTERVAL" 'BEGIN { printf "%d", (s / p) }')
 
     while [ "$waited_ticks" -lt "$max_ticks" ]; do
         sleep "$NATIVE_POLL_INTERVAL"
-        raw=$(ubus -t "$NATIVE_UBUS_TIMEOUT" call mibrain nlp_result_get)
-        get_latest_native_result "$raw"
+        get_native_result "$result_source" || true
 
         if [ -n "$RESULT_TS" ] && [ "$RESULT_TS" -ge "$wake_ts" ] && [ "$RESULT_TS" -gt "$last_ts" ] && [ -n "$RESULT_DOMAIN" ]; then
             last_ts="$RESULT_TS"
             [ -n "$RESULT_QUERY" ] && fallback_query="$RESULT_QUERY"
             elapsed=$(elapsed_s "$start_ms")
-            log "[NATIVE] result elapsed=${elapsed}s ticks=$waited_ticks interval=${NATIVE_POLL_INTERVAL}s ts=$RESULT_TS domain=$RESULT_DOMAIN action=$RESULT_ACTION query=$RESULT_QUERY speak=$RESULT_SPEAK"
+            log "[NATIVE] result source=$RESULT_SOURCE elapsed=${elapsed}s ticks=$waited_ticks interval=${NATIVE_POLL_INTERVAL}s ts=$RESULT_TS domain=$RESULT_DOMAIN action=$RESULT_ACTION query=$RESULT_QUERY speak=$RESULT_SPEAK"
 
             if is_ignored_query_result; then
                 log "[NATIVE] ignored query result，忽略并回到待机"
@@ -1057,6 +1549,7 @@ handle_wakeup() {
             if is_unsupported_result; then
                 log "[NATIVE] unsupported，停止原生播报并转 LLM"
                 set_state "NATIVE_FALLBACK"
+                [ "$FOLLOWUP_ENABLED" = "1" ] && [ "$FOLLOWUP_MODE" = "native_multirounds" ] && native_followup_mark_multirounds
                 freeze_native_player
                 handle_llm_dialog "$session_id" "$fallback_query"
                 return 0
@@ -1072,6 +1565,7 @@ handle_wakeup() {
             else
                 log "[NATIVE] non-success-domain，立即 fallback LLM"
                 set_state "NATIVE_FALLBACK"
+                [ "$FOLLOWUP_ENABLED" = "1" ] && [ "$FOLLOWUP_MODE" = "native_multirounds" ] && native_followup_mark_multirounds
                 freeze_native_player
                 handle_llm_dialog "$session_id" "$fallback_query"
                 return 0
@@ -1092,6 +1586,7 @@ handle_wakeup() {
     if [ -n "$fallback_query" ]; then
         log "[NATIVE] 无明确成功结果，fallback LLM query=$fallback_query"
         set_state "NATIVE_FALLBACK"
+        [ "$FOLLOWUP_ENABLED" = "1" ] && [ "$FOLLOWUP_MODE" = "native_multirounds" ] && native_followup_mark_multirounds
         freeze_native_player
         handle_llm_dialog "$session_id" "$fallback_query"
         return 0
@@ -1099,7 +1594,7 @@ handle_wakeup() {
 
     resume_native_player 0
     led_off
-    log "[NATIVE] ${NATIVE_WAIT_SECONDS}s 未拿到新结果，暂不 fallback"
+    log "[NATIVE] ${wait_seconds}s 未拿到新结果，暂不 fallback"
     set_state "IDLE"
     return 1
 }
@@ -1115,10 +1610,14 @@ cleanup() {
         FOLLOWUP_VAD_PID=""
     fi
     rm -f "$FOLLOWUP_ARM_FILE"
+    rm -f "$NATIVE_REPLAY_CANCEL_MARKER"
     clear_busy
     resume_native_player
     restore_llm_master_volume
     restore_hook
+    if ! should_setup_dsnoop; then
+        restore_audio_capture_overlays
+    fi
     resume_native_asr
     rm -f "$EVENT_FIFO" "$BUSY_MARKER"
     if [ -f "$PID_FILE" ] && [ "$(cat "$PID_FILE" 2>/dev/null)" = "$$" ]; then
@@ -1144,8 +1643,10 @@ case "$1" in
         exit 0
         ;;
     parse_test)
-        raw=$(ubus -t 2 call mibrain nlp_result_get)
-        get_latest_native_result "$raw"
+        source=$(select_native_result_source)
+        get_native_result "$source" || true
+        echo "source=$source"
+        echo "result_source=$RESULT_SOURCE"
         echo "ts=$RESULT_TS"
         echo "domain=$RESULT_DOMAIN"
         echo "action=$RESULT_ACTION"
@@ -1162,25 +1663,32 @@ exec >> "$LOG_FILE" 2>&1
 echo "$$" > "$PID_FILE"
 
 log "=== native-first + LLM fallback client ==="
+apply_system_defaults
 log "Config: $CONFIG_FILE"
 log "Server: $SERVER"
 log "Backend: $BACKEND"
 log "LLM_VOLUME: $LLM_VOLUME"
 log "LLM_MASTER_VOLUME: $LLM_MASTER_VOLUME"
 log "LLM_MASTER_AUTO: media_scale=${LLM_MASTER_SCALE}% current_scale=${LLM_MASTER_CURRENT_SCALE}% min=$LLM_MASTER_MIN max=$LLM_MASTER_MAX"
-log "Native poll: interval=${NATIVE_POLL_INTERVAL}s ubus_timeout=${NATIVE_UBUS_TIMEOUT}s wait=${NATIVE_WAIT_SECONDS}s"
+log "Native result: source=${NATIVE_RESULT_SOURCE} selected=$(select_native_result_source) wait=${NATIVE_WAIT_SECONDS}s system1_wait=${SYSTEM1_NATIVE_WAIT_SECONDS}s interval=${NATIVE_POLL_INTERVAL}s ubus_timeout=${NATIVE_UBUS_TIMEOUT}s"
 log "Wake event: max_age=${WAKE_EVENT_MAX_AGE}s"
 log "Wake ignore queries: $WAKE_IGNORE_QUERIES"
-log "Native success: domains=$NATIVE_SUCCESS_DOMAINS replay_speak=$NATIVE_REPLAY_SUCCESS_SPEAK replay_delay=${NATIVE_REPLAY_SUCCESS_DELAY}s"
-log "Followup recorder: mode=${FOLLOWUP_RECORD_MODE} asr=${FOLLOWUP_ASR_ENGINE} native_min_bytes=${FOLLOWUP_NATIVE_MIN_QUERY_BYTES} window=${FOLLOWUP_WINDOW_SECONDS}s capture=${FOLLOWUP_WINDOW_CAPTURE_DEV}/${FOLLOWUP_WINDOW_CAPTURE_FORMAT}/${FOLLOWUP_WINDOW_CAPTURE_RATE}/${FOLLOWUP_WINDOW_CAPTURE_CHANNELS}ch window_gate=peak${FOLLOWUP_WINDOW_MIN_PEAK}/rms${FOLLOWUP_WINDOW_MIN_RMS_THRESHOLD}/active${FOLLOWUP_WINDOW_MIN_ACTIVE_PERMILLE}‰ timeout=${FOLLOWUP_TIMEOUT}s arm_delay=${FOLLOWUP_ARM_DELAY}s start=$FOLLOWUP_THRESHOLD/rms=$FOLLOWUP_START_RMS_THRESHOLD/active=${FOLLOWUP_START_ACTIVE_PERMILLE}‰ hits=$FOLLOWUP_START_HITS tail=${FOLLOWUP_IGNORE_INITIAL_CHUNKS}s/rms=$FOLLOWUP_TAIL_RMS_THRESHOLD/active=${FOLLOWUP_TAIL_ACTIVE_PERMILLE}‰ end=$FOLLOWUP_END_THRESHOLD/rms=$FOLLOWUP_END_RMS_THRESHOLD/active=${FOLLOWUP_END_ACTIVE_PERMILLE}‰ silence=${FOLLOWUP_SILENCE_LIMIT}s min_raw=$FOLLOWUP_MIN_RAW_BYTES prearm=$FOLLOWUP_PREARM"
+log "Native success: domains=$NATIVE_SUCCESS_DOMAINS replay_speak=$NATIVE_REPLAY_SUCCESS_SPEAK replay_delay=${NATIVE_REPLAY_SUCCESS_DELAY}s replay_cancel_on_wake=$NATIVE_REPLAY_CANCEL_ON_WAKE cancel_domains=$NATIVE_REPLAY_CANCEL_DOMAINS grace=${NATIVE_REPLAY_CANCEL_GRACE}s window=${NATIVE_REPLAY_CANCEL_WINDOW}s"
+log "Followup recorder: enabled=${FOLLOWUP_ENABLED} followup_mode=${FOLLOWUP_MODE} record_mode=${FOLLOWUP_RECORD_MODE} asr=${FOLLOWUP_ASR_ENGINE} native_min_bytes=${FOLLOWUP_NATIVE_MIN_QUERY_BYTES} native_poll=${NATIVE_FOLLOWUP_POLL_SECONDS}s/${NATIVE_FOLLOWUP_POLL_INTERVAL}s window=${FOLLOWUP_WINDOW_SECONDS}s capture=${FOLLOWUP_WINDOW_CAPTURE_DEV}/${FOLLOWUP_WINDOW_CAPTURE_FORMAT}/${FOLLOWUP_WINDOW_CAPTURE_RATE}/${FOLLOWUP_WINDOW_CAPTURE_CHANNELS}ch audio_setup=${AUDIO_CAPTURE_SETUP} root=$(root_device) window_gate=peak${FOLLOWUP_WINDOW_MIN_PEAK}/rms${FOLLOWUP_WINDOW_MIN_RMS_THRESHOLD}/active${FOLLOWUP_WINDOW_MIN_ACTIVE_PERMILLE}‰ timeout=${FOLLOWUP_TIMEOUT}s arm_delay=${FOLLOWUP_ARM_DELAY}s start=$FOLLOWUP_THRESHOLD/rms=$FOLLOWUP_START_RMS_THRESHOLD/active=${FOLLOWUP_START_ACTIVE_PERMILLE}‰ hits=$FOLLOWUP_START_HITS tail=${FOLLOWUP_IGNORE_INITIAL_CHUNKS}s/rms=$FOLLOWUP_TAIL_RMS_THRESHOLD/active=${FOLLOWUP_TAIL_ACTIVE_PERMILLE}‰ end=$FOLLOWUP_END_THRESHOLD/rms=$FOLLOWUP_END_RMS_THRESHOLD/active=${FOLLOWUP_END_ACTIVE_PERMILLE}‰ silence=${FOLLOWUP_SILENCE_LIMIT}s min_raw=$FOLLOWUP_MIN_RAW_BYTES prearm=$FOLLOWUP_PREARM"
 log "Fallback: stop=${STOP_NATIVE_SECONDS}s freeze_mediaplayer=${FREEZE_NATIVE_PLAYER_ON_FALLBACK} prefreeze_on_think=${FREEZE_NATIVE_PLAYER_ON_THINK}"
 log "Native ASR pause during LLM: $PAUSE_NATIVE_ASR_DURING_LLM"
 log "Duplicate suppression: ${SUPPRESS_DUP_SECONDS}s"
+init_native_result_state
 set_state "INIT"
 
 setup_audio
 led_off
-setup_dsnoop
+if should_setup_dsnoop; then
+    setup_dsnoop
+else
+    restore_audio_capture_overlays
+    log "[SETUP] 跳过 dsnoop/libxaudio 覆盖: AUDIO_CAPTURE_SETUP=$AUDIO_CAPTURE_SETUP root=$(root_device)"
+fi
 stop_our_assistants
 : > "$EVENT_LOG"
 mkfifo "$EVENT_FIFO" 2>/dev/null || mknod "$EVENT_FIFO" p 2>/dev/null
@@ -1200,7 +1708,10 @@ while true; do
         continue
     fi
 
-    [ "$event" = "WuW" ] || continue
+    case "$event" in
+        WuW|think) ;;
+        *) continue ;;
+    esac
     now=$(date +%s)
     if [ -n "$ts" ] && [ $((now - ts)) -gt "$WAKE_EVENT_MAX_AGE" ] 2>/dev/null; then
         log "[WAKE] ignore stale event ts=$ts age=$((now - ts))s"

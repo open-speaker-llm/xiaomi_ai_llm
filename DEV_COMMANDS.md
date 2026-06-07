@@ -2,6 +2,8 @@
 
 本文档记录小米 AI 音箱改造项目开发和调试时常用的命令。
 
+启动链路和分区概念说明见 [docs/BOOT_FLOW.md](docs/BOOT_FLOW.md)，包括 `boot0/boot1`、`system0/system1`、`kernel`、`initramfs`、`rootfs`、OpenWrt/LEDE 等基础概念。
+
 ## 1. 当前网络信息
 
 ```text
@@ -39,6 +41,52 @@ Ctrl+A -> K -> Y
 
 ## 3. 进入 U-Boot
 
+### 3.0 通过 SSH 切换 boot 启动分区
+
+如果当前系统还能 SSH 登录，可以不用手动进 U-Boot，直接在 Linux 里写 U-Boot 环境变量并重启。
+
+前提：
+
+- 当前 SSH 可用。
+- 串口已连接，或者至少确认可以通过串口进 U-Boot 回退。
+- 只在明确需要切换启动分区时执行。
+
+查看当前启动分区相关信息：
+
+```bash
+ssh -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa root@192.168.8.152 'fw_env boot_part 2>&1; mount | head -5'
+```
+
+切到 `boot1` 并重启：
+
+```bash
+ssh -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa root@192.168.8.152 'fw_env boot_part=boot1 && sync && reboot'
+```
+
+切回 `boot0` 并重启：
+
+```bash
+ssh -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa root@192.168.8.152 'fw_env boot_part=boot0 && sync && reboot'
+```
+
+这等价于在 U-Boot 中执行：
+
+```text
+s12# setenv boot_part boot1
+s12# saveenv
+s12# reset
+```
+
+或：
+
+```text
+s12# setenv boot_part boot0
+s12# saveenv
+s12# reset
+```
+
+注意：`fw_env boot_part=...` 会直接写 U-Boot env。写错或切到异常系统后，仍需要串口进 U-Boot 回退。
+
 ### 3.1 先连接串口
 
 ```bash
@@ -75,7 +123,13 @@ s12#
 
 ## 4. 进入 failsafe 模式
 
-failsafe 只在 `boot0` 上。重新进入 failsafe 前，先在 U-Boot 中切回 `boot0`：
+failsafe 只在 `boot0` 上。重新进入 failsafe 前，先在 U-Boot 中查看当前启动分区：
+
+```text
+s12# printenv boot_part
+```
+
+如果不是 `boot0`，切回 `boot0`：
 
 ```text
 s12# setenv boot_part boot0
@@ -94,6 +148,20 @@ Press the [f] key and hit [enter]
 ```bash
 ssh -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa root@192.168.8.152
 ```
+
+## 5.1 boot1 SSH 打通
+
+`boot1/system1` 的 SSH 注入、写入、校验、切换和回退流程见：
+
+```text
+docs/BOOT1_SSH_RUNBOOK.md
+```
+
+核心结论：
+
+- `system1` 有坏块，最终写入使用 `mtd -f write - system1`。
+- 不要用 `dd of=/dev/mtdblock5` 作为最终写入方案。
+- 切 `boot1` 验证前必须确保串口可用，失败时从 U-Boot 切回 `boot0`。
 
 ## 6. Mac 服务端
 
@@ -169,14 +237,16 @@ curl --max-time 2 http://127.0.0.1:8080/
 
 如果返回连接失败，说明已关闭。
 
-## 7. 音箱客户端
+## 7. 音箱客户端（当前主线）
 
 ### 7.1 前台启动
+
+当前主线使用 `native-first` 客户端。它复用小米原生“小爱同学”唤醒、ASR/NLP 和家电控制；原生不支持时再转 Mac 服务端 LLM。
 
 在音箱 SSH 里执行：
 
 ```sh
-sh /data/stream_client.sh
+SERVER=http://192.168.8.150:8080 BACKEND=deepseek sh /data/native_first_client.sh
 ```
 
 前台启动时，主流程日志直接显示在当前 SSH 窗口。
@@ -184,21 +254,22 @@ sh /data/stream_client.sh
 ### 7.2 后台启动
 
 ```sh
-sh /data/stream_client.sh > /tmp/stream_client.log 2>&1 &
+SERVER=http://192.168.8.150:8080 BACKEND=deepseek \
+sh /data/native_first_client.sh > /tmp/native_first_client.log 2>&1 &
 ```
 
 ### 7.3 检查客户端状态
 
 ```sh
-ps | grep -E 'stream_client|wake_monitor|kws|vad_record|curl|aplay' | grep -v grep
+sh /data/native_first_client.sh status
+ps | grep -E 'native_first_client|mipns-xiaomi|mediaplayer|curl|aplay|arecord' | grep -v grep
 ```
 
 正常至少应看到：
 
 ```text
-sh /data/wake_monitor.sh
-/data/open-xiaoai/kws/kws ...
-tail -f /tmp/kws_events.log
+sh /data/native_first_client.sh
+/usr/bin/mipns-xiaomi ...
 ```
 
 ### 7.4 查看客户端日志
@@ -206,40 +277,42 @@ tail -f /tmp/kws_events.log
 后台启动后查看主日志：
 
 ```sh
-tail -f /tmp/stream_client.log
+tail -f /tmp/native_first_client.log
 ```
 
-查看 KWS 原始日志：
+同时查看客户端日志和原生唤醒事件：
 
 ```sh
-tail -f /tmp/kws_events.log
+tail -f /tmp/native_first_client.log /tmp/native_first_events.log
 ```
 
-`/tmp/kws_events.log` 会持续刷 `Processing buffer`，一般只在排查唤醒词时看。
+关键启动成功日志：
+
+```text
+[HOOK] mounted /bin/wakeup.sh -> /tmp/wakeup.sh.native_first_client
+[HOOK] watchdog pid=...
+[IDLE] 等待原生唤醒词：小爱同学
+```
 
 ### 7.5 关闭客户端
 
 ```sh
-killall kws 2>/dev/null
-killall tail 2>/dev/null
-killall curl 2>/dev/null
-killall aplay 2>/dev/null
-killall arecord 2>/dev/null
-ps | grep -E 'stream_client.sh|wake_monitor.sh|vad_record.sh' | grep -v grep | awk '{print $1}' | xargs -r kill
-rm -f /tmp/stream_fifo
+sh /data/native_first_client.sh stop
 ```
 
 确认是否停干净：
 
 ```sh
-ps | grep -E 'stream_client|wake_monitor|kws|vad_record|curl|aplay' | grep -v grep
+ps | grep -E 'native_first_client|curl|aplay|arecord' | grep -v grep
 ```
 
 如果只剩系统音频进程，例如 `mediaplayer`、`bluealsa-aplay`，说明助手已关闭。
 
 ## 8. 原生小米唤醒实验
 
-默认方案仍然是 `sherpa-onnx`：
+本节是历史/实验路线。当前主线见第 7 节和第 11 节。
+
+早期 KWS 方案是：
 
 ```text
 /data/open-xiaoai/kws/kws -> /data/wake_monitor.sh
@@ -286,7 +359,8 @@ sh /data/native_wakeup_probe.sh stop
 恢复后重新启动当前助手：
 
 ```sh
-sh /data/stream_client.sh > /tmp/stream_client.log 2>&1 &
+SERVER=http://192.168.8.150:8080 BACKEND=deepseek \
+sh /data/native_first_client.sh > /tmp/native_first_client.log 2>&1 &
 ```
 
 ## 9. 历史路线：原生小米唤醒客户端
@@ -435,6 +509,12 @@ smartMiot time weather music player alarm timer system volume
 - 已验证 `/data/mibrain/mibrain_asr_nlp.rcd` 不比 `mibrain nlp_result_get` 更早，且中文 `query/speak` 在 `strings` 输出里会断行，不适合作为正式路由来源。
 - 已验证 `ubus monitor` 未看到更早的 `RESULT_ASR/RESULT_NLP` push 事件；公开可用的结构化结果来源仍是 `mibrain nlp_result_get`。
 
+结果源按系统自动适配：
+
+- boot0/system0：`NATIVE_RESULT_SOURCE=auto` 会选择 `ubus_nlp_result`，读取 `mibrain nlp_result_get`。
+- boot1/system1：`NATIVE_RESULT_SOURCE=auto` 会选择 `aivs_lab_instruction`，读取 `/tmp/mico_aivs_lab/instruction.log` 中的 `RecognizeResult` 和 `Speak`。该路径主要用于识别需要 fallback LLM 的场景；原生成功命令仍由小爱链路直接完成。
+- 启动日志会打印 `Native result: source=... selected=...`，每轮唤醒会打印 `[NATIVE] result source=...`。
+
 ### 11.1 启动
 
 当前主客户端是：
@@ -488,6 +568,7 @@ LLM_MASTER_CURRENT_SCALE=112
 ```
 
 ```sh
+SERVER=http://192.168.8.150:8080 BACKEND=deepseek \
 sh /data/native_first_client.sh > /tmp/native_first_client.log 2>&1 &
 ```
 
