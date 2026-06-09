@@ -1,9 +1,5 @@
 # boot1 SSH 打通操作手册
 
-文档类型：高风险操作手册  
-适用范围：boot1/system1 无法 SSH 时，重新注入 SSH 启动 hook  
-当前结论：system1 已验证可注入 `S45sshen`；日常登录不需要重复执行本文写入步骤
-
 本文档记录如何在小米音箱 `system1` rootfs 中注入 SSH 启动 hook，使设备启动到 `boot1/system1` 时也能通过 SSH 登录。
 
 目标读者：没有 LLM 协助时，能按本文独立完成操作。

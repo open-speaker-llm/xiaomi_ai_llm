@@ -1,340 +1,181 @@
 # 小米 AI 音箱 LLM 助手
 
-当前主线是 **native-first 原生优先路线**：音箱继续使用小米原生“小爱同学”唤醒、ASR、NLP 和家电控制；当小米原生判断无法处理时，再把小米识别出的文本转给 Mac 服务端的 LLM。
+这个项目的目标是：让一台小米 AI 音箱继续保留“小爱同学”的原生能力，同时在小米原生不会回答时，把问题转给 Mac 上的 LLM 服务端回答。
 
-这个方向的目标不是替换小爱，而是复用小爱最稳定的部分：
+当前主线是 **native-first 原生优先路线**：继续使用“小爱同学”唤醒、小米原生 ASR/NLP 和家电控制；当小米原生明确处理不了时，再把小米识别出的文本转给 Mac 服务端 LLM。
 
-- 唤醒词：继续使用“小爱同学”
-- 家电控制、天气、音量等：优先走小米原生链路
-- 原生不支持的问题：fallback 到 DeepSeek/MiniMax 等 LLM
-- LLM 播放后：进入短暂连续追问窗口
+一句话结论：
 
-## 文档导航
+- 原生能做的，比如开关灯、音量、天气，优先交给小米原生。
+- 原生不能回答的问题，拦截失败播报，转给 DeepSeek/MiniMax 等 LLM。
+- 音箱里的 `boot0/system0` 和 `boot1/system1` 都要能 SSH，才能避免每次异常切系统后还要重新接串口。
+- boot0 与 boot1 共用 `/data` 里的同一套客户端脚本，但底层小米服务版本不同，脚本会按系统自动选择结果源。
+- boot1 当前稳定策略是保证原生命令和首轮 LLM；连续追问仍在探索更理想的“干净音频/原生 ASR reopen”方案。
 
-| 文档 | 用途 |
+## 1. 推荐阅读顺序
+
+如果你是第一次拿自己的小爱音箱尝试打通 LLM，按这个顺序读：
+
+```text
+README
+  -> BRINGUP_GUIDE：从串口、SSH、文件上传到第一次 LLM 响应
+  -> BOOT_FLOW：理解 boot/system/rootfs，知道为什么要兼容两套系统
+  -> QUICKSTART：SSH 已可用后的日常启动
+  -> OPERATIONS：启动、停止、看日志、切 boot、自启动
+  -> TROUBLESHOOTING：有唤醒但无动作、串台、音量、追问等问题
+```
+
+| 你要做什么 | 读这个 |
 |---|---|
-| [DEV_COMMANDS.md](DEV_COMMANDS.md) | 日常联调、启动、停止、看日志、串口、failsafe、boot 切换等命令手册。 |
-| [REMOTE_SHELL.md](REMOTE_SHELL.md) | 早期获取 root shell、failsafe、SSH 注入 system0 的完整操作记录。 |
-| [docs/BOOT_FLOW.md](docs/BOOT_FLOW.md) | boot0/boot1、system0/system1、kernel、initramfs、rootfs、OpenWrt/LEDE 等启动链路说明。 |
-| [docs/BOOT1_SSH_RUNBOOK.md](docs/BOOT1_SSH_RUNBOOK.md) | boot1/system1 SSH 打通、写入、校验和回退操作手册。 |
-| [docs/AUTOSTART_INIT_HOOK.md](docs/AUTOSTART_INIT_HOOK.md) | 断电重启后自动运行 native-first 客户端的 init hook 方案。 |
-| [TESTING.md](TESTING.md) | 自动化测试与人工测试说明。 |
-| [tests/manual_native_first_cases.md](tests/manual_native_first_cases.md) | 真实音箱人工验证用例。 |
+| 从零打通一台小爱音箱 | [docs/BRINGUP_GUIDE.md](docs/BRINGUP_GUIDE.md) |
+| SSH 已可用后的快速联调 | [docs/QUICKSTART.md](docs/QUICKSTART.md) |
+| 日常启动、停止、看日志、切 boot | [docs/OPERATIONS.md](docs/OPERATIONS.md) |
+| 遇到没响应、播报串台、音量异常 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
+| 理解 native-first 怎么工作 | [docs/NATIVE_FIRST_ARCHITECTURE.md](docs/NATIVE_FIRST_ARCHITECTURE.md) |
+| 理解 boot0/system0/kernel/rootfs | [docs/BOOT_FLOW.md](docs/BOOT_FLOW.md) |
+| 术语解释：KWS、TTS、VAD、ALSA 等 | [docs/GLOSSARY.md](docs/GLOSSARY.md) |
+| boot0 SSH 注入操作 | [docs/BOOT0_SSH_RUNBOOK.md](docs/BOOT0_SSH_RUNBOOK.md) |
+| boot1 SSH 注入操作 | [docs/BOOT1_SSH_RUNBOOK.md](docs/BOOT1_SSH_RUNBOOK.md) |
+| 断电重启后自动运行 | [docs/AUTOSTART_INIT_HOOK.md](docs/AUTOSTART_INIT_HOOK.md) |
+| 自动化测试和人工测试 | [TESTING.md](TESTING.md) |
+| 历史探索和旧路线 | [docs/history/README.md](docs/history/README.md) |
 
-## 1. 当前主线
+旧版文档已原样归档到 [docs/archive/2026-06-07-pre-doc-reorg](docs/archive/2026-06-07-pre-doc-reorg)。
 
-### 1.1 Mac 服务端
+## 2. 当前主线
 
-服务端负责：
+```text
+小爱同学
+  -> 小米原生唤醒
+  -> 小米原生 ASR/NLP
+  -> native_first_client.sh 读取原生结果
+       -> 原生成功 domain：恢复/重放原生 speak
+       -> 原生不支持：冻结失败播报，转 Mac LLM
+  -> Mac 服务端调用 LLM + EdgeTTS
+  -> 音箱播放 LLM 音频
+```
 
-- 接收音箱端 fallback 请求
-- 调用 LLM
-- 生成 TTS 音频流
-- 保留 Mac Whisper ASR 接口，作为历史路线和追问兜底能力
+当前部署到音箱的主脚本：
 
-启动方式：
+```text
+/data/native_first_client.sh
+```
+
+推荐配置文件：
+
+```text
+/data/native_first.env
+```
+
+配置模板：
+
+```text
+device/native_first.env.example
+```
+
+## 3. 快速启动
+
+Mac 服务端：
 
 ```sh
 cd /Users/mac-mini-wx/research/xiaomi_ai/xiaomi_ai_llm
 ./start_server.sh
 ```
 
-后台启动：
-
-```sh
-nohup ./start_server.sh > /tmp/server.log 2>&1 &
-tail -f /tmp/server.log | grep -E '📥|🎤|🌐|🔊|🤖|✅|⚠️'
-```
-
-健康检查：
-
-```sh
-curl http://127.0.0.1:8080/
-```
-
-### 1.2 音箱端主客户端
-
-当前部署到音箱的主脚本是：
-
-```text
-/data/native_first_client.sh
-```
-
-推荐配置文件是：
-
-```text
-/data/native_first.env
-```
-
-首次部署配置：
-
-```sh
-cp /data/native_first.env.example /data/native_first.env
-vi /data/native_first.env
-```
-
-启动：
+音箱端：
 
 ```sh
 SERVER=http://192.168.8.150:8080 BACKEND=deepseek \
 sh /data/native_first_client.sh > /tmp/native_first_client.log 2>&1 &
 ```
 
-查看日志：
+看日志：
 
 ```sh
 tail -f /tmp/native_first_client.log /tmp/native_first_events.log
 ```
 
-当前主线日志里应该能看到：
+更完整步骤见 [docs/QUICKSTART.md](docs/QUICKSTART.md)。
+
+## 4. 音箱上需要哪些文件
+
+音箱端最小运行文件放在 `/data`：
 
 ```text
-[HOOK] mounted /bin/wakeup.sh -> /tmp/wakeup.sh.native_first_client
-[HOOK] watchdog pid=...
-[IDLE] 等待原生唤醒词：小爱同学
+/data/native_first_client.sh       # 当前主客户端
+/data/native_first.env             # 当前设备配置
+/data/native_first.env.example     # 配置模板
+/data/vad_record.sh                # boot0 追问/历史录音能力需要
+/data/data_init_native_first.sh     # 自启动入口模板
+/data/init.sh                      # 自启动时实际执行的入口
 ```
 
-## 2. Native-first 工作流
-
-```text
-小爱同学
-  -> 小米原生唤醒
-  -> 小米原生 ASR/NLP
-  -> 读取 mibrain nlp_result_get
-       -> domain 在成功白名单：恢复播放器并 replay 原生 speak
-       -> 原生不支持：停止/冻结原生播报，fallback 到 Mac LLM
-  -> LLM 播放完成
-  -> 8s 连续追问窗口
-       -> 固定窗口录音 5s
-       -> 小米原生 ai_service 做 ASR，但不执行原生 NLP/TTS
-       -> ASR 有文本：文本直接进入 LLM
-       -> ASR 空/录音无效：退出对话，回到待机
-```
-
-当前强约束：
-
-- 路由优先看 `domain/action`，不要用关键词猜测是否家电控制。
-- `query` 只作为 fallback LLM 的输入；原生成功场景里可能是 `token` 等内部值。
-- 原生成功播报使用 `speak/to_speak` replay。
-- `think` 阶段 freeze mediaplayer，用于完整拦截原生失败播报。
-- 已验证 `/data/mibrain/mibrain_asr_nlp.rcd` 不比 `mibrain nlp_result_get` 更早，且中文字段会断行，不适合作为正式路由来源。
-- 已验证 `ubus monitor` 未看到更早的结构化 ASR/NLP push 事件。
-
-### 2.1 LLM 会话上下文
-
-同一次唤醒进入 LLM 后，首轮问题和后续连续追问共用同一个 `session_id`。因此在追问窗口内继续提问时，服务端会把这些问题放在同一个 LLM 对话历史里，支持上下文追问。
-
-会话边界：
-
-- 每次新的“小爱同学”唤醒会生成新的 `session_id`，形如 `native_first_deepseek_1780...`。
-- 同一次唤醒后的所有追问复用这个 `session_id`。
-- 追问超时、ASR 空、录音失败或退出对话后，再次唤醒会进入新的 LLM 会话。
-- 服务端按 `session_id` 保存最近 20 条消息；Mac 日志中的 `历史2轮`、`历史4轮` 等表示同一会话上下文正在累积。
-
-## 3. 推荐配置
-
-配置模板在 [device/native_first.env.example](device/native_first.env.example)。
-
-当前核心推荐值：
+通过 SSH 上传时，常用命令是：
 
 ```sh
-BACKEND=deepseek
-NATIVE_REPLAY_SUCCESS_SPEAK=1
-NATIVE_REPLAY_SUCCESS_DELAY=0
-FREEZE_NATIVE_PLAYER_ON_THINK=1
-FOLLOWUP_ASR_ENGINE=native
-FOLLOWUP_RECORD_MODE=window
-FOLLOWUP_WINDOW_SECONDS=5
-FOLLOWUP_WINDOW_CAPTURE_DEV=Capture
-FOLLOWUP_WINDOW_CAPTURE_FORMAT=S16_LE
-FOLLOWUP_WINDOW_CAPTURE_RATE=16000
-FOLLOWUP_WINDOW_CAPTURE_CHANNELS=1
-FOLLOWUP_WINDOW_MIN_PEAK=300
-FOLLOWUP_WINDOW_MIN_RMS_THRESHOLD=40
-FOLLOWUP_WINDOW_MIN_ACTIVE_PERMILLE=5
-FOLLOWUP_TIMEOUT=8
-FOLLOWUP_ARM_DELAY=0.2
-FOLLOWUP_THRESHOLD=180
-FOLLOWUP_START_HITS=1
-FOLLOWUP_END_THRESHOLD=100
-FOLLOWUP_SILENCE_LIMIT=3
-PAUSE_NATIVE_ASR_DURING_LLM=0
+scp -O -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa \
+  device/native_first_client.sh device/native_first.env.example device/vad_record.sh device/data_init_native_first.sh \
+  root@192.168.8.152:/data/
 ```
 
-这些值对应当前折中：
-
-- 原生成功问题尽量快播报。
-- 原生失败问题优先完整拦截，再转 LLM。
-- 连续追问默认复用小米原生 ASR 获取文本，避免 Mac Whisper 对多麦克风录音识别不稳定。
-- 固定窗口录音先用 `peak/rms/active` 做轻量有效性判断；只有三个指标都低才认为没有有效语音。
-
-## 4. Mac 服务端配置
-
-复制 `.env.example` 为 `.env`，填入需要的 API Key：
+然后在音箱上：
 
 ```sh
-cp .env.example .env
+cp /data/native_first.env.example /data/native_first.env
+chmod +x /data/native_first_client.sh /data/vad_record.sh /data/data_init_native_first.sh
 ```
 
-常用后端：
+如果还没有 SSH，就不能指望快速上传文件，只能先通过串口/failsafe 打通 SSH。完整过程见 [docs/BRINGUP_GUIDE.md](docs/BRINGUP_GUIDE.md)。
 
-```sh
-DEEPSEEK_API_KEY=
-MINIMAX_API_KEY=
-ANTHROPIC_API_KEY=
-OPENAI_API_KEY=
-```
+## 5. 服务端能力
 
-当前常用模型配置在 [config.yaml](config.yaml)：
+Mac 服务端负责：
 
-- DeepSeek: `deepseek-v4-flash`
-- MiniMax: `MiniMax-M2.7`
-- ASR: Whisper `medium`
-- TTS: EdgeTTS `zh-CN-YunjianNeural`
+- 接收音箱 fallback 文本。
+- 调用 DeepSeek、MiniMax、OpenAI、Claude 等 LLM 后端。
+- 使用 EdgeTTS 生成语音，当前默认音色为 `zh-CN-YunjianNeural`。
+- 保留 Whisper ASR 接口，作为历史路线、测试和兜底能力。
 
-## 5. API 接口
+常用接口：
 
-| 端点 | 方法 | 描述 |
-|------|------|------|
-| `/` | GET | 健康检查 |
-| `/api/v1/chat` | POST | 文字对话 |
-| `/api/v1/asr` | POST | 语音识别 |
-| `/api/v1/tts` | POST | 语音合成 |
-| `/api/v1/voice_chat` | POST | 端到端语音对话 |
-| `/api/v1/stream/text_chat` | POST | native-first fallback 文本流式对话 |
-| `/api/v1/stream/chat` | POST | 录音上传、ASR、LLM、TTS 流式返回 |
-| `/api/v1/route/asr` | POST | Mac Whisper ASR 路由接口，当前主线仅作为历史路线和兜底兼容 |
+| 端点 | 用途 |
+|---|---|
+| `GET /` | 健康检查 |
+| `POST /api/v1/stream/text_chat` | native-first 文本进入 LLM 并流式返回 TTS |
+| `POST /api/v1/route/asr` | 录音 ASR + 路由，当前主要用于测试和兜底 |
+| `POST /api/v1/stream/chat` | 录音上传、ASR、LLM、TTS 一体化历史接口 |
 
 ## 6. 测试
 
-自动化测试不依赖真实音箱和 API：
+自动化测试：
 
 ```sh
 ./scripts/run_tests.sh
 ```
 
-人工音箱测试见 [tests/manual_native_first_cases.md](tests/manual_native_first_cases.md)。
-
-更完整说明见 [TESTING.md](TESTING.md)。
-
-## 7. 项目结构
+人工测试用例：
 
 ```text
-xiaomi_ai_llm/
-├── server/
-│   ├── main.py              # FastAPI 主服务
-│   ├── llm/                 # DeepSeek / MiniMax / Claude / OpenAI
-│   ├── asr/                 # Whisper ASR
-│   ├── tts/                 # EdgeTTS / MiniMax / 其他 TTS
-│   └── audio/               # 音频处理
-├── device/
-│   ├── native_first_client.sh       # 当前主线音箱客户端
-│   ├── native_first.env.example     # 当前主线推荐配置
-│   ├── vad_record.sh                # 音箱端 VAD 录音
-│   ├── native_result_timing_probe.sh# 原生结果时序探针
-│   ├── native_wake_asr_trace.sh     # 原生唤醒/ASR 跟踪工具
-│   ├── stream_client.sh             # 历史 KWS/录音客户端
-│   └── wake_monitor.sh              # 历史 KWS 唤醒监控
-├── docs/
-│   ├── BOOT_FLOW.md                 # 启动链路与系统分区说明
-│   ├── BOOT1_SSH_RUNBOOK.md         # boot1 SSH 注入操作手册
-│   └── AUTOSTART_INIT_HOOK.md       # 自启动 init hook 方案
-├── DEV_COMMANDS.md          # 设备调试命令手册
-├── REMOTE_SHELL.md          # root shell / SSH 获取历史操作手册
-├── TESTING.md               # 自动化和人工测试说明
-├── config.yaml              # 服务端模型配置
-├── .env.example             # API Key 模板
-└── requirements.txt         # Python 依赖
+tests/manual_native_first_cases.md
 ```
 
-## 8. 历史路线
+修改状态机、路由、音量、TTS、ASR 或启动脚本后，至少跑自动化测试；涉及真实音箱行为时，再跑对应人工用例。
 
-这些路线保留用于回溯和对照，不是当前推荐部署路径。
+## 7. 当前已知边界
 
-### 8.1 KWS + stream_client 路线
+- native-first 首轮 fallback 已是当前主线。
+- 原生成功播报通过 `speak/to_speak` replay，控制类短播报可在下一次唤醒时取消。
+- boot1/system1 的原生结果源和 boot0/system0 不同，脚本保留两套适配。
+- 连续追问还不是最终形态。boot0 可走本地录音方案；boot1 默认关闭追问以优先保证主流程稳定。
+- 原生 ASR reopen 多轮方案已多次验证未打通，后续更值得投入的是“获取小米处理后的干净音频”。
 
-早期路线使用 `/data/open-xiaoai/kws` 做自定义唤醒词检测，例如“你好小智”，然后用 `stream_client.sh` 录音上传 Mac。
-
-相关脚本：
+## 8. 目录速览
 
 ```text
-device/stream_client.sh
-device/wake_monitor.sh
+server/                 Mac FastAPI 服务端
+device/                 音箱端脚本和配置模板
+docs/                   当前说明、架构、运维、排障、历史
+tests/                  自动化测试和人工测试用例
+config.yaml             LLM / ASR / TTS 配置
+start_server.sh         Mac 服务端标准启动入口
 ```
-
-保留原因：
-
-- 可作为自定义唤醒词实验参考。
-- 可用于对比 KWS、VAD、录音链路。
-
-不再作为主线的原因：
-
-- 自定义 KWS 准确率不如小米原生“小爱同学”。
-- 追问、家电控制、唤醒反馈都需要额外实现。
-
-### 8.2 native_client 路线
-
-`native_client.sh` 是原生唤醒实验阶段的旧客户端。
-
-相关脚本：
-
-```text
-device/native_client.sh
-```
-
-保留原因：
-
-- 可对照 native-first 前的原生唤醒实验逻辑。
-
-不再作为主线的原因：
-
-- 当前状态机、hook watchdog、原生失败拦截、连续追问等优化都集中在 `native_first_client.sh`。
-
-### 8.3 audio_capture / WebSocket 路线
-
-早期通用客户端入口：
-
-```text
-device/audio_capture.py
-```
-
-保留原因：
-
-- 可用于普通 HTTP/WebSocket 音频测试。
-
-不再作为主线的原因：
-
-- 不接入小米原生唤醒、NLP、家电控制链路。
-
-## 9. 术语说明
-
-| 名称 | 全称 | 说明 |
-|------|------|------|
-| KWS | Keyword Spotting | 唤醒词检测，用来识别“小爱同学”“你好小智”等唤醒词。当前主线不使用自定义 KWS。 |
-| Wake Word | 唤醒词 | 触发语音助手开始监听的固定短语。当前主线使用小米原生“小爱同学”。 |
-| ASR | Automatic Speech Recognition | 语音转文字。首轮和当前连续追问都优先使用小米原生 ASR；Mac Whisper ASR 保留作兼容和兜底。 |
-| `ai_service` | 小米原生服务接口 | `ubus call mibrain ai_service`，当前用于追问录音的原生 ASR：`asr=1,nlp=1,tts=0,nlp_execute=0`。 |
-| TTS | Text To Speech | 文字转语音，把 LLM 回复合成为音频并在音箱播放。 |
-| VAD | Voice Activity Detection | 语音活动检测，用来判断什么时候开始说话、什么时候静默结束录音。 |
-| LLM | Large Language Model | 大语言模型，例如 DeepSeek、MiniMax、Claude、OpenAI 模型。 |
-| NLP | Natural Language Processing | 自然语言处理。小米原生链路会对 ASR 文本做意图识别，例如天气、音量、家电控制。 |
-| Native | 小米原生链路 | 音箱自带的小爱服务链路，负责原生唤醒、ASR、NLP、家电控制和部分问答。 |
-| Native-first | 原生优先 | 当前主线：先让小米原生链路处理，原生无法处理时再 fallback 到 LLM。 |
-| Fallback | 兜底处理 | 当小米原生返回不支持、不会、无法回答等结果时，把问题转给 LLM。 |
-| PCM | Pulse-Code Modulation | 原始音频采样数据，常用于边生成边播放的音频流。 |
-| WAV | Waveform Audio File | 带文件头的音频文件格式，常用于录音上传和测试。 |
-| ALSA | Advanced Linux Sound Architecture | Linux 底层音频框架，负责声卡、录音、播放、混音和音量控制。 |
-| `arecord` | ALSA 录音工具 | 音箱端用于从麦克风录音。 |
-| `aplay` | ALSA 播放工具 | 音箱端用于播放服务端返回的音频。 |
-| `amixer` | ALSA 混音控制工具 | 用于查看和设置音量、静音、声道开关等 mixer 参数。 |
-| `asound.conf` | ALSA 配置文件 | 用于定义音频设备、虚拟设备、插件链路和默认输入输出。 |
-| `dsnoop` | ALSA 录音共享插件 | 允许多个进程同时读取同一个麦克风输入，避免录音设备被独占。 |
-| U-Boot | Bootloader | 设备启动加载器，可用于切换启动分区、进入 failsafe 等低层调试。 |
-| failsafe | 安全模式 | 系统异常或需要修复配置时进入的最小恢复环境。 |
-| boot0 / boot1 | 启动分区 | NAND 中的两套启动分区，主要包含 kernel + initramfs。U-Boot 根据 `boot_part` 选择其中之一。 |
-| system0 / system1 | 系统分区 | NAND 中的两套 rootfs 分区，包含 `/bin`、`/etc`、`/usr` 和小米用户态服务。 |
-| kernel | Linux 内核 | 管理硬件、内存、进程、驱动、文件系统和网络的核心程序。 |
-| initramfs | Initial RAM filesystem | kernel 启动早期使用的临时根文件系统，负责早期初始化和挂载真正 rootfs。 |
-| rootfs | Root filesystem | 当前挂载为 `/` 的根文件系统。本设备上通常是 system0 或 system1。 |
-| mount | 挂载 | 把某个分区接入 Linux 目录树，例如把 `/dev/mtdblock5` 挂载为 `/`。 |
-| OpenWrt / LEDE | 嵌入式 Linux 发行版框架 | 负责 init、ubus、网络和服务管理；小米语音服务运行在这个底座之上。 |

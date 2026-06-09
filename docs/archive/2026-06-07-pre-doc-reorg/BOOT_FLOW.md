@@ -1,9 +1,5 @@
 # 小米音箱启动链路与系统分区说明
 
-文档类型：原理说明  
-适用范围：理解 boot0/boot1、system0/system1、kernel、rootfs，以及为什么两套系统行为不同  
-当前结论：当前设备 boot0/boot1 kernel 内容相同，boot0/system0 与 boot1/system1 的差异主要来自 rootfs 用户态版本不同
-
 本文说明这台小米 AI 音箱从上电到运行 `native_first_client.sh` 的完整链路，并解释 `boot0`、`boot1`、`system0`、`system1`、`kernel`、`initramfs`、`rootfs`、OpenWrt/LEDE 等概念。
 
 ## 1. 当前设备结论
@@ -114,8 +110,8 @@ s12# reset
 也可以在 Linux 里通过 SSH 切换：
 
 ```sh
-fw_env -s boot_part boot1 && reboot
-fw_env -s boot_part boot0 && reboot
+fw_env boot_part=boot1 && sync && reboot
+fw_env boot_part=boot0 && sync && reboot
 ```
 
 ## 4. boot0 / boot1
@@ -363,3 +359,4 @@ system0/system1 rootfs 中的小米用户态版本不同
 ```
 
 不是当前 `boot0/boot1` kernel 不同。
+

@@ -1,9 +1,5 @@
 # native-first 自启动 init hook 探索
 
-文档类型：长期部署操作手册  
-适用范围：让音箱断电重启后自动启动 `native_first_client.sh`  
-当前结论：system0/system1 的 `/etc/rc.local` 都已注入 `/data/init.sh` 入口；后续调整主要改 `/data/init.sh`
-
 本文记录让音箱断电重启后自动运行 `native_first_client.sh` 的候选方案。
 
 ## 1. 当前结论
