@@ -95,6 +95,7 @@ tail -f /tmp/native_first_client.log /tmp/native_first_events.log
 |---|---|
 | `GET /` | 健康检查 |
 | `POST /api/v1/stream/text_chat` | native-first 主链路：文本进 LLM，流式返回 TTS 音频 |
+| `POST /api/v1/tts/stream` | 纯文本→流式 WAV（不含 LLM），供音箱直连模式 / 可移植迷你 TTS 服务 |
 | `POST /api/v1/route/asr` | 录音 ASR + 路由（测试/兜底） |
 | `POST /api/v1/stream/chat` | 录音上传 → ASR → LLM → TTS 一体化（历史接口） |
 
@@ -110,6 +111,7 @@ tests/manual_native_first_cases.md        # 真实音箱人工用例
 ## 当前边界
 
 - native-first 首轮 fallback 是稳定主线；boot0 与 boot1 两套系统（2019/2023 ROM）均已适配。
+- 音箱可选**独立直连模式**（`LLM_PIPELINE=native`）：LLM 由音箱 shell 直接调用，Mac 只提供 TTS（可换成任意常驻设备上的迷你服务），微服务离线时降级原生 TTS。让音箱脱离开发 Mac 独立运行。详见 [docs/concepts/native-first.md](docs/concepts/native-first.md)。
 - 连续追问（LLM 回答后不喊唤醒词直接追问）还不是最终形态：boot0 有实验性的本地录音方案，boot1 默认关闭。原生 ASR reopen 方向已多次验证未打通，下一步更值得探索"获取小米处理后的干净音频"。详见 [docs/history/followup-exploration.md](docs/history/followup-exploration.md)。
 
 ## 相关项目

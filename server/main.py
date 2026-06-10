@@ -752,6 +752,57 @@ async def stream_text_chat(
     )
 
 
+@app.post("/api/v1/tts/stream")
+async def stream_tts(
+    message: str = Form(...),
+    speed: float = Form(1.0),
+    volume: float = Form(1.0),
+):
+    """Pure text→streaming-WAV TTS, no LLM.
+
+    This is the portable micro-service core: the speaker drives the LLM itself
+    and POSTs each finished sentence here to get good-voice audio. Reuses the
+    pipeline's sentence split + EdgeTTS + tail-trim, just without the LLM stage.
+    """
+    import struct
+    import time as _time
+
+    if not tts_client:
+        raise HTTPException(status_code=500, detail="TTS client not configured")
+    if not message.strip():
+        return Response(content=b"", media_type="audio/wav")
+
+    pipeline = StreamingPipeline(None, tts_client, sample_rate=32000, speed=speed, volume=volume)
+
+    async def generate():
+        max_data = 180 * 32000 * 2
+        header = struct.pack(
+            '<4sI4s4sIHHIIHH4sI',
+            b'RIFF', 36 + max_data, b'WAVE', b'fmt ',
+            16, 1, 1, 32000, 64000, 2, 16,
+            b'data', max_data,
+        )
+        yield header
+
+        t0 = _time.time()
+        sentences = pipeline._split_sync(message)
+        for s in sentences:
+            async for chunk in pipeline._tts_stream(s):
+                if chunk["type"] == "audio":
+                    yield chunk["data"]
+                # TTS error on a single sentence: skip it, keep streaming the rest
+        print(
+            f"[{_time.strftime('%H:%M:%S')}] 🔊 TTS-stream({_time.time()-t0:.1f}s, {len(sentences)}句): {message[:40]}",
+            flush=True,
+        )
+
+    return StreamingResponse(
+        generate(),
+        media_type="audio/wav",
+        headers={"X-Accel-Buffering": "no"},
+    )
+
+
 @app.post("/api/v1/stream/chat")
 async def stream_chat(file: UploadFile = File(...), session_id: str = "shell", backend: str = "minimax", speed: float = 1.0, volume: float = 1.0):
     """

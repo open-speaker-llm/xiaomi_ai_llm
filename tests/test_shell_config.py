@@ -56,6 +56,10 @@ class ShellConfigTest(unittest.TestCase):
             "NATIVE_REPLAY_SUCCESS_DELAY": "0",
             "NATIVE_REPLAY_SUCCESS_SPEAK": "1",
             "FREEZE_NATIVE_PLAYER_ON_THINK": "1",
+            "LLM_PIPELINE": "server",
+            "LLM_MODEL": "deepseek-v4-flash",
+            "LLM_THINKING": "disabled",
+            "TTS_FALLBACK_NATIVE": "1",
         }
         for key, value in expected_pairs.items():
             with self.subTest(key=key):

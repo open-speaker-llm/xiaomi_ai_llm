@@ -78,6 +78,21 @@ ps | grep -E 'native_first_client|mipns-xiaomi|mediaplayer|curl|aplay|arecord' |
 [IDLE] 等待原生唤醒词：小爱同学
 ```
 
+### 音箱独立 LLM 模式（LLM_PIPELINE=native）
+
+默认 `LLM_PIPELINE=server`（fallback 经 Mac 调 LLM + TTS）。要让音箱直连 LLM、Mac 只出 TTS，在 `/data/native_first.env` 配：
+
+```sh
+LLM_PIPELINE=native
+DEEPSEEK_API_KEY=sk-...
+TTS_SERVER=http://192.168.8.150:8080   # TTS 微服务地址，可指向任意常驻设备
+LLM_THINKING=disabled                   # deepseek-v4-flash 关思考，首句 ~2s
+```
+
+改后重启客户端生效，日志里会看到 `[LLM-NATIVE] direct → ...`。TTS 微服务不可用时自动降级原生 mibrain TTS（原生音色）。原理见 [../concepts/native-first.md](../concepts/native-first.md)。
+
+回退：把 `LLM_PIPELINE` 改回 `server` 重启即可。
+
 ## 4. 配置文件
 
 音箱上的运行配置：

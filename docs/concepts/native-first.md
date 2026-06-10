@@ -122,9 +122,30 @@ Mac 服务端（FastAPI）做三件事：
 
 1. `POST /api/v1/stream/text_chat` 接收 fallback 文本，按 `BACKEND` 选择 LLM（DeepSeek/MiniMax/Claude/OpenAI）。
 2. LLM 流式输出经 `sentence_splitter` 按中文句子边界切分，逐句送 EdgeTTS，先发 WAV 头再流式输出 PCM——首句合成完即可开播，不必等全文。
-3. 保留 Whisper ASR 端点（`/api/v1/route/asr`、`/api/v1/stream/chat`）作为历史路线、测试和兜底。
+3. `POST /api/v1/tts/stream` 纯文本→流式 WAV（不含 LLM），供音箱直连模式使用，也是可移植迷你 TTS 服务的核心。
+4. 保留 Whisper ASR 端点（`/api/v1/route/asr`、`/api/v1/stream/chat`）作为历史路线、测试和兜底。
 
-## 7. 连续追问状态
+## 7. 两种 LLM 链路：经 Mac vs 音箱直连
+
+fallback 到 LLM 时走哪条链路由 `LLM_PIPELINE` 决定：
+
+| 模式 | 链路 | Mac 角色 |
+|---|---|---|
+| `server`（默认） | 音箱把文本 POST 给 `/api/v1/stream/text_chat`，Mac 调 LLM + EdgeTTS 流式返回 | 调 LLM + TTS |
+| `native` | 音箱 shell 自己直连 LLM 拿回答 → 整段发 `/api/v1/tts/stream` → EdgeTTS 流式返回；微服务不可用时降级原生 `mibrain` TTS | 只出 TTS（甚至可换成路由器/NAS/云函数上的迷你服务） |
+
+`native` 模式让音箱脱离开发 Mac 独立运行——唤醒、ASR、NLP 全是小米原生，LLM 由音箱直连，TTS 优先用 EdgeTTS 微服务（好音色、和小爱区分）、离线退回原生 TTS（不哑）。
+
+关键设计点（都是实测踩坑后定的）：
+
+- **中文切句放在端点 Python 做**，不在 busybox shell 里——shell 按字节处理 UTF-8 会把 `。！？` 切碎成乱码。音箱只管"整段发 + fifo 流式播放"。
+- **思考型模型要关思考**：`deepseek-v4-flash` 默认输出 `reasoning_content`（思考链），首句要等 ~3s。`LLM_THINKING=disabled` 关掉后首句 ~2s，而且 shell 只取 `content` 字段天然把思考滤掉。
+- **降级探测**：每次 fallback 前快速 ping TTS 微服务（`TTS_HEALTH_TIMEOUT`），在线走 EdgeTTS，离线走原生 `mibrain text_to_speech`（已验证能完整念几百字长文本）。
+- **会话历史**存音箱 `/data`（`LLM_HISTORY_DIR`），保留最近 `LLM_HISTORY_TURNS` 轮多轮上下文。
+
+相关配置见 `device/native_first.env.example` 的"音箱端直连 LLM"段。回退随时可做：`LLM_PIPELINE=server` 即切回经 Mac 的老链路。
+
+## 8. 连续追问状态
 
 当前追问不是最终方案：
 

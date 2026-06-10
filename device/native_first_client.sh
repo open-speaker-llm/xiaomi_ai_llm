@@ -96,6 +96,24 @@ NATIVE_FOLLOWUP_TRIGGER_AFTER_TTS_END="${NATIVE_FOLLOWUP_TRIGGER_AFTER_TTS_END:-
 STREAM_TIMEOUT="${STREAM_TIMEOUT:-180}"
 UNSUPPORTED_PATTERNS="${UNSUPPORTED_PATTERNS:-暂时|不会|不支持|回答不上|需要再学习|没听懂|不知道|不会这项技能}"
 DIRECT_LLM_QUERY_PATTERNS="${DIRECT_LLM_QUERY_PATTERNS:-DEEPSEEK|DeepSeek|deepseek}"
+
+# --- 音箱端直连 LLM（独立链路，不依赖 Mac 调 LLM）---
+# LLM_PIPELINE=server: 经 Mac /stream/text_chat（Mac 调 LLM+TTS，老链路，默认）
+# LLM_PIPELINE=native: 音箱直连 LLM 拿文本 → 整段发 TTS 微服务（端点切句）/原生兜底
+LLM_PIPELINE="${LLM_PIPELINE:-server}"
+LLM_API_BASE="${LLM_API_BASE:-https://api.deepseek.com}"
+LLM_API_KEY="${LLM_API_KEY:-${DEEPSEEK_API_KEY}}"
+LLM_MODEL="${LLM_MODEL:-deepseek-v4-flash}"
+LLM_THINKING="${LLM_THINKING:-disabled}"          # disabled=关思考(快，~2s首句); enabled=开思考(深，~3s+)
+LLM_DIRECT_TIMEOUT="${LLM_DIRECT_TIMEOUT:-40}"
+LLM_HISTORY_TURNS="${LLM_HISTORY_TURNS:-6}"
+LLM_HISTORY_DIR="${LLM_HISTORY_DIR:-/tmp/native_first_llm_hist}"
+LLM_SYSTEM_PROMPT="${LLM_SYSTEM_PROMPT:-你是一个语音助手，请用纯文本口语直接回答，不要复述问题，不要使用任何 Markdown 格式或列表，说完整的句子。}"
+# TTS 微服务（默认与 SERVER 同地址；可指向独立部署的迷你 TTS 服务）
+TTS_SERVER="${TTS_SERVER:-$SERVER}"
+TTS_FALLBACK_NATIVE="${TTS_FALLBACK_NATIVE:-1}"   # TTS 微服务不可用时降级原生 mibrain TTS
+TTS_HEALTH_TIMEOUT="${TTS_HEALTH_TIMEOUT:-2}"
+LLM_DIRECT_ANSWER=""
 NATIVE_SUCCESS_DOMAINS="${NATIVE_SUCCESS_DOMAINS:-smartMiot soundboxControl time weather music player alarm timer system volume}"
 NATIVE_REPLAY_SUCCESS_SPEAK="${NATIVE_REPLAY_SUCCESS_SPEAK:-1}"
 NATIVE_REPLAY_SUCCESS_DELAY="${NATIVE_REPLAY_SUCCESS_DELAY:-0}"
@@ -1213,11 +1231,135 @@ wait_or_run_followup_vad() {
     return $?
 }
 
+# --- native 直连 LLM 链路 ---
+
+# TTS 微服务健康探测（快速，失败即走原生兜底）
+tts_service_online() {
+    curl -sf -m "$TTS_HEALTH_TIMEOUT" "$TTS_SERVER/" -o /dev/null 2>/dev/null
+}
+
+# 整段文本 → TTS。微服务在线走 EdgeTTS（端点 Python 切句流式）；否则降级原生 mibrain。
+tts_play_text() {
+    local text="$1"
+    [ -n "$text" ] || return 1
+
+    if [ "$TTS_FALLBACK_NATIVE" = "1" ] && ! tts_service_online; then
+        log "[TTS] 微服务不可用，降级原生 mibrain"
+        native_tts_speak "$text"
+        return 0
+    fi
+
+    rm -f /tmp/stream_fifo
+    mkfifo /tmp/stream_fifo 2>/dev/null || mknod /tmp/stream_fifo p 2>/dev/null
+    curl -s --no-buffer -o /tmp/stream_fifo --max-time "$STREAM_TIMEOUT" \
+        -F "message=${text}" \
+        -F "volume=${LLM_VOLUME}" \
+        "${TTS_SERVER}/api/v1/tts/stream" &
+    CURL_PID=$!
+    aplay /tmp/stream_fifo 2>/dev/null &
+    APLAY_PID=$!
+    wait $CURL_PID 2>/dev/null
+    wait $APLAY_PID 2>/dev/null
+    rm -f /tmp/stream_fifo
+}
+
+# 构造 messages JSON（system + 最近历史 + 当前 user），输出不含外层方括号
+llm_build_messages() {
+    local sid="$1"
+    local user="$2"
+    local histfile="$LLM_HISTORY_DIR/$sid"
+    printf '{"role":"system","content":"%s"}' "$(printf '%s' "$LLM_SYSTEM_PROMPT" | json_escape)"
+    if [ -f "$histfile" ]; then
+        tail -n $((LLM_HISTORY_TURNS * 2)) "$histfile" | while IFS="$(printf '\t')" read -r role etext; do
+            [ -n "$role" ] || continue
+            printf ',{"role":"%s","content":"%s"}' "$role" "$etext"
+        done
+    fi
+    printf ',{"role":"user","content":"%s"}' "$(printf '%s' "$user" | json_escape)"
+}
+
+# 直连 LLM 流式取回答全文（关思考、只取 content）。结果存 LLM_DIRECT_ANSWER。
+llm_direct_answer() {
+    local sid="$1"
+    local user="$2"
+    local messages req answer
+
+    if [ -z "$LLM_API_KEY" ]; then
+        log "[LLM-NATIVE] 缺少 LLM_API_KEY（在 /data/native_first.env 配 DEEPSEEK_API_KEY）"
+        return 1
+    fi
+    mkdir -p "$LLM_HISTORY_DIR"
+    messages=$(llm_build_messages "$sid" "$user")
+    req="{\"model\":\"$LLM_MODEL\",\"messages\":[$messages],\"stream\":true,\"thinking\":{\"type\":\"$LLM_THINKING\"}}"
+
+    answer=$(curl -sS -N -m "$LLM_DIRECT_TIMEOUT" "$LLM_API_BASE/chat/completions" \
+        -H "Authorization: Bearer $LLM_API_KEY" \
+        -H "Content-Type: application/json" \
+        -d "$req" 2>/dev/null \
+        | grep '^data:' \
+        | sed -n 's/.*"content":"\([^"]*\)".*/\1/p' \
+        | tr -d '\n')
+
+    LLM_DIRECT_ANSWER="$answer"
+    [ -n "$answer" ] || return 1
+
+    # 追加到会话历史（存已转义文本，构造请求时直接复用）
+    {
+        printf 'user\t%s\n' "$(printf '%s' "$user" | json_escape)"
+        printf 'assistant\t%s\n' "$(printf '%s' "$answer" | json_escape)"
+    } >> "$LLM_HISTORY_DIR/$sid"
+    return 0
+}
+
+# native 链路主流程：音箱直连 LLM → 整段发 TTS（微服务/原生兜底）→ 播放
+send_text_native() {
+    local session_id="$1"
+    local text="$2"
+    local cleanup_mode="${3:-now}"
+    local t0 t1 t2
+
+    if [ -z "$text" ]; then
+        log "[LLM-NATIVE] 无 query，跳过"
+        return 1
+    fi
+    if is_recent_duplicate_llm_query "$text"; then
+        log "[DUP] suppress duplicate fallback ${SUPPRESS_DUP_SECONDS}s 内重复: $text"
+        resume_native_player 1
+        return 0
+    fi
+
+    log "[LLM-NATIVE] direct → model=$LLM_MODEL thinking=$LLM_THINKING text=$text"
+    set_state "LLM_SPEAKING"
+    record_llm_query "$text"
+    set_busy "llm_playing"
+    apply_llm_master_volume
+    freeze_native_player
+    t0=$(date +%s)
+
+    if ! llm_direct_answer "$session_id" "$text"; then
+        log "[LLM-NATIVE] 空回答/调用失败，结束"
+        finish_llm_playback
+        return 1
+    fi
+    t1=$(date +%s)
+    log "[LLM-NATIVE] answer(${t1}-${t0}=$((t1 - t0))s): $LLM_DIRECT_ANSWER"
+
+    tts_play_text "$LLM_DIRECT_ANSWER"
+    t2=$(date +%s)
+    log "[LLM-NATIVE] played in $((t2 - t0))s (llm=$((t1 - t0))s)"
+    finish_llm_playback
+}
+
 send_text_and_play() {
     local session_id="$1"
     local text="$2"
     local cleanup_mode="${3:-now}"
     local t0 t1 t2
+
+    if [ "$LLM_PIPELINE" = "native" ]; then
+        send_text_native "$session_id" "$text" "$cleanup_mode"
+        return $?
+    fi
 
     if [ -z "$text" ]; then
         log "[LLM] 无 query，跳过 fallback"

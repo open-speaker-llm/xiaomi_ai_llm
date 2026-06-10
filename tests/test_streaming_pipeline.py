@@ -43,6 +43,17 @@ class StreamingPipelineTest(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertEqual(texts, ["可以回答。"])
 
+    async def test_tts_only_pipeline_without_llm(self):
+        # /api/v1/tts/stream 用 llm=None 复用 _split_sync + _tts_stream（音箱直连 LLM 时端点只做 TTS）
+        pipeline = StreamingPipeline(None, FakeTTS())
+        sentences = pipeline._split_sync("第一句。第二句！第三句？")
+        self.assertEqual(sentences, ["第一句。", "第二句！", "第三句？"])
+        audio = b""
+        async for chunk in pipeline._tts_stream(sentences[0]):
+            if chunk["type"] == "audio":
+                audio += chunk["data"]
+        self.assertGreater(len(audio), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
