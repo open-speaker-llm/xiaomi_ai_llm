@@ -153,7 +153,7 @@ grep -E 'FOLLOWUP|SYSTEM1_FOLLOWUP' /data/native_first.env
 SYSTEM1_FOLLOWUP_ENABLED=0
 ```
 
-追问探索历史见 [history/NATIVE_FOLLOWUP_EXPLORATION.md](history/NATIVE_FOLLOWUP_EXPLORATION.md)。
+追问探索历史见 [../history/followup-exploration.md](../history/followup-exploration.md)。
 
 ## 9. TTS 超时
 

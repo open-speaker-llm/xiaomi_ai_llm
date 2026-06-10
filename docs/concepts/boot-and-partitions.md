@@ -4,7 +4,7 @@
 适用范围：理解 boot0/boot1、system0/system1、kernel、rootfs，以及为什么两套系统行为不同  
 当前结论：当前设备 boot0/boot1 kernel 内容相同，boot0/system0 与 boot1/system1 的差异主要来自 rootfs 用户态版本不同
 
-本文说明这台小米 AI 音箱从上电到运行 `native_first_client.sh` 的完整链路，并解释 `boot0`、`boot1`、`system0`、`system1`、`kernel`、`initramfs`、`rootfs`、OpenWrt/LEDE 等概念。
+本文说明这台小米 AI 音箱从上电到运行 `native_first_client.sh` 的完整链路，并解释 `boot0`、`boot1`、`system0`、`system1`、`kernel`、`initramfs`、`rootfs`、OpenWrt/LEDE 等概念。术语速查见 [glossary.md](glossary.md)。
 
 ## 1. 当前设备结论
 
@@ -320,26 +320,7 @@ Dialog/Finish
 
 ## 12. 和当前项目的关系
 
-当前主线是 native-first：
-
-```text
-小爱同学唤醒
-  ↓
-小米原生 ASR/NLP 先处理
-  ↓
-原生支持：家电、天气、音量等直接走小米
-  ↓
-原生不支持：脚本拦截失败播报，转给 Mac LLM
-```
-
-脚本文件在 `/data`：
-
-```text
-/data/native_first_client.sh
-/data/native_first.env
-```
-
-因为 `/data` 共享，所以两套系统使用同一份脚本；因为 `system0/system1` 的小米服务层不同，所以脚本内部需要按当前 rootfs 做适配。
+因为 `/data` 共享，所以两套系统使用同一份 `/data/native_first_client.sh`；因为 `system0/system1` 的小米服务层不同，所以脚本内部需要按当前 rootfs 做适配。适配细节（结果源、唤醒事件、音频采集差异）见 [native-first.md](native-first.md#5-boot0-与-boot1-兼容)。
 
 ## 13. 当前设备状态总结
 

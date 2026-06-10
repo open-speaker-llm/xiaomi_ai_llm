@@ -1,8 +1,10 @@
 # boot0 SSH 打通操作手册
 
-文档类型：高风险操作手册  
-适用范围：boot0/system0 还不能 SSH，需要从串口/failsafe 打通远程 root shell  
+文档类型：高风险操作手册
+适用范围：boot0/system0 还不能 SSH，需要从串口/failsafe 打通远程 root shell
 当前结论：通过在 system0 rootfs 注入 `S45sshen`，让 dropbear 正常启动，并把 SSH 公钥放到可写 `/data/dropbear/authorized_keys`
+
+> 高风险手册保留完整命令形式，不依赖 `ssh xiaomi` 别名，保证在干净环境也能照做。IP、串口设备名均为示例值。
 
 ## 1. 先理解目标
 
@@ -49,6 +51,8 @@ echo "1" > /tmp/ssh_en
 device/init.d/sshen
 ```
 
+> 为什么不能直接改密码登录：1.54.8 固件的串口登录走 DSA 签名验证（`magic = SN + 随机wildcard`），没有小米私钥无法算出正确密码；写 shadow/passwd 也会被签名校验拦截。完整试错记录见 [../history/journey.md](../history/journey.md)。
+
 ## 3. 风险
 
 这是写系统分区的操作。开始前必须确认：
@@ -56,10 +60,10 @@ device/init.d/sshen
 - 串口可用。
 - 能进入 U-Boot。
 - 至少有一个可回退系统。
-- Mac 上准备好 `unsquashfs`、`mksquashfs`、`fakeroot`。
+- Mac 上准备好 `unsquashfs`、`mksquashfs`、`fakeroot`（`brew install squashfs fakeroot`）。
 - 不要在不理解分区的情况下写 `boot0/boot1/system0/system1`。
 
-建议先读 [BOOT_FLOW.md](BOOT_FLOW.md)，理解 `boot0/system0/rootfs`。
+建议先读 [../concepts/boot-and-partitions.md](../concepts/boot-and-partitions.md)，理解 `boot0/system0/rootfs`。
 
 ## 4. 进入 failsafe
 
@@ -69,12 +73,7 @@ device/init.d/sshen
 Press the [f] key and hit [enter]
 ```
 
-立即输入：
-
-```text
-f
-Enter
-```
+立即输入 `f → Enter`。
 
 如果当前不在 boot0，先在 U-Boot 中切回：
 
@@ -88,7 +87,7 @@ s12# reset
 
 failsafe 里没有完整正常系统，需要手动挂载 `/data`、加载 WiFi、启动临时 shell。
 
-以下命令中的 SSID、密码、IP、网关要按你的网络修改：
+以下命令中的 SSID、密码、IP、网关、MAC 地址要按你的设备和网络修改（音箱 WiFi MAC 可在路由器后台或串口启动日志里查看）：
 
 ```sh
 mknod /dev/ubi_ctrl c 10 58 2>/dev/null
@@ -98,7 +97,7 @@ mkdir -p /tmp/data
 mount -t ubifs ubi0:data /tmp/data
 
 insmod mlan
-insmod sd8xxx "drv_mode=3 cfg80211_wext=0xf cal_data_cfg=mrvl/WlanCalData_ext.conf fw_name=mrvl/sdsd8977_combo_v2.bin sta_name=wlan mac_addr=E0:B6:55:AD:F3:5B reg_alpha2=CN drvdbg=0x80007 ps_mode=2 auto_ds=2"
+insmod sd8xxx "drv_mode=3 cfg80211_wext=0xf cal_data_cfg=mrvl/WlanCalData_ext.conf fw_name=mrvl/sdsd8977_combo_v2.bin sta_name=wlan mac_addr=<音箱WiFi MAC> reg_alpha2=CN drvdbg=0x80007 ps_mode=2 auto_ds=2"
 sleep 5
 
 mkdir -p /tmp/data/wifi
@@ -155,12 +154,12 @@ mkdir -p "$WORK"
 cd "$WORK"
 
 unsquashfs -d system0_root /path/to/system0.img
-cp /Users/mac-mini-wx/research/xiaomi_ai/xiaomi_ai_llm/device/init.d/sshen system0_root/etc/init.d/sshen
+cp <仓库目录>/device/init.d/sshen system0_root/etc/init.d/sshen
 chmod +x system0_root/etc/init.d/sshen
 ln -sf ../init.d/sshen system0_root/etc/rc.d/S45sshen
 ```
 
-补设备节点伪文件：
+补设备节点伪文件（普通用户解包时无法创建字符设备，打包时用 `-pf` 补回）：
 
 ```sh
 cat > pseudo.txt << 'EOF'
@@ -170,7 +169,7 @@ cat > pseudo.txt << 'EOF'
 EOF
 ```
 
-重新打包：
+重新打包（参数需与原版一致）：
 
 ```sh
 mksquashfs system0_root system0_ssh.img \
@@ -178,7 +177,7 @@ mksquashfs system0_root system0_ssh.img \
   -pf pseudo.txt -noappend
 ```
 
-补齐到 system0 分区大小：
+补齐到 system0 分区大小（32MB）：
 
 ```sh
 dd if=system0_ssh.img of=system0_ssh_padded.img bs=33554432 conv=sync count=1
@@ -211,7 +210,7 @@ ssh-keygen -R 192.168.8.152
 ssh -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa root@192.168.8.152
 ```
 
-如果需要添加新的 Mac 公钥：
+如果需要添加新的 Mac 公钥，在音箱上：
 
 ```sh
 echo "ssh-rsa AAA... user@mac" >> /data/dropbear/authorized_keys
@@ -221,8 +220,7 @@ echo "ssh-rsa AAA... user@mac" >> /data/dropbear/authorized_keys
 
 boot0 SSH 打通后：
 
-1. 上传 native-first 脚本到 `/data`。
-2. 启动 Mac 服务端和音箱客户端。
+1. 在 Mac `~/.ssh/config` 配置 `xiaomi` 别名（见 [../README.md](../README.md#文档约定)）。
+2. 按 [../getting-started/quickstart.md](../getting-started/quickstart.md) 上传脚本、启动联调。
 3. 验证 boot0 主流程。
-4. 继续打通 boot1 SSH，见 [BOOT1_SSH_RUNBOOK.md](BOOT1_SSH_RUNBOOK.md)。
-
+4. 继续打通 boot1 SSH，见 [boot1-ssh.md](boot1-ssh.md)。

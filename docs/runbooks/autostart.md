@@ -1,4 +1,4 @@
-# native-first 自启动 init hook 探索
+# native-first 自启动 init hook
 
 文档类型：长期部署操作手册  
 适用范围：让音箱断电重启后自动启动 `native_first_client.sh`  

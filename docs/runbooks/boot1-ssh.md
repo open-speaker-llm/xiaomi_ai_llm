@@ -8,6 +8,8 @@
 
 目标读者：没有 LLM 协助时，能按本文独立完成操作。
 
+> 高风险手册保留完整命令形式，不依赖 `ssh xiaomi` 别名。IP 均为示例值，约定见 [../README.md](../README.md#文档约定)。
+
 本次实测结论：
 
 - `system1` 已成功注入 `S45sshen`。
@@ -127,13 +129,7 @@ brew install squashfs fakeroot
 
 ## 5. 从音箱备份 system1
 
-在 Mac 项目目录执行：
-
-```bash
-cd /Users/mac-mini-wx/research/xiaomi_ai/xiaomi_ai_llm
-```
-
-通过 SSH 读出 `system1`：
+以下命令在 Mac 仓库根目录执行。通过 SSH 读出 `system1`：
 
 ```bash
 ssh -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa \
@@ -511,9 +507,7 @@ ssh -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa root@192.16
 
 ### 14.4 boot1 能 SSH 后，启动音箱助手用什么命令？
 
-boot1/system1 上必须保持小米原生音频链路。`native_first_client.sh` 的 `AUDIO_CAPTURE_SETUP=auto` 会在检测到 `/` 挂载自 `/dev/mtdblock5` 时自动跳过 `dsnoop` 和 `libxaudio_engine.so` 覆盖。
-
-如果手动配置 `/data/native_first.env`，保持：
+boot1/system1 上必须保持小米原生音频链路，配置保持 `auto`：
 
 ```sh
 AUDIO_CAPTURE_SETUP=auto
@@ -522,24 +516,11 @@ WAKE_ON_THINK_SYSTEM1=1
 NATIVE_AIVS_LAB_RESULT_SYSTEM1=1
 ```
 
-不要在 boot1 上强制设成 `1`，否则可能导致原生 `recorder` 崩溃，表现为能唤醒但后续 ASR/NLP、开关灯、天气等都不响应。
+不要在 boot1 上把 `AUDIO_CAPTURE_SETUP` 强制设成 `1`，否则可能导致原生 `recorder` 崩溃，表现为能唤醒但后续 ASR/NLP、开关灯、天气等都不响应。boot0/boot1 链路差异的完整说明（唤醒事件、结果源、freeze 策略）见 [../concepts/native-first.md](../concepts/native-first.md#5-boot0-与-boot1-兼容)。
 
-boot1 的真实唤醒 hook 事件可能只有 `think/ready`，没有 boot0 上常见的 `WuW`。因此 `WAKE_ON_THINK_SYSTEM1=1` 会在检测到 root 为 `/dev/mtdblock5` 时，把 `think` 当作 native-first 状态机触发源。
-
-boot1 上 `think` 阶段不会提前 freeze `mediaplayer`，否则可能影响原生 ASR/NLP 继续产出结果。boot0 仍保留原来的 think 预冻结策略。
-
-boot0 与 boot1 的小爱语音链路不是同一套：
-
-- boot0 主要通过 `mibrain nlp_result_get` 暴露 `domain/action/query/speak`。
-- boot1/system1 多了 `mico_aivs_lab`，原生 ASR/TTS 指令会写到 `/tmp/mico_aivs_lab/instruction.log`，`mibrain nlp_result_get` 可能不刷新。
-- `native_first_client.sh` 的 `NATIVE_RESULT_SOURCE=auto` 会在 boot0 选择 `ubus_nlp_result`，在 boot1 选择 `aivs_lab_instruction`。
-
-因此不要通过复制 boot0 的 `mibrain_service`、`mipns-xiaomi`、`libxaudio_engine.so` 或 `wakeup.sh` 来“填平”boot1 差异。当前长期方案是在脚本里保留两套结果源适配器。
-
-Mac 服务端：
+Mac 服务端（仓库根目录）：
 
 ```bash
-cd /Users/mac-mini-wx/research/xiaomi_ai/xiaomi_ai_llm
 ./start_server.sh
 ```
 
