@@ -5,7 +5,7 @@
 让一台 2019 年的小米 AI 音箱（MDZ-25-DA / S12A）接上现代大模型：
 
 - **原生能做的，继续交给小爱**：唤醒、开关灯、音量、天气、闹钟等走小米原生链路，体验不打折。
-- **原生不会答的，转给 LLM**：拦截"我还在学习中"这类失败播报，把小米已经识别出的文本转给 Mac 上的服务端，由 DeepSeek / MiniMax / Claude / OpenAI 回答，EdgeTTS 合成后在音箱播放。
+- **原生不会答的，转给 LLM**：拦截"我还在学习中"这类失败播报，**音箱自己直连 LLM**（DeepSeek / MiniMax / Claude / OpenAI）拿回答，再合成语音播放。主线由音箱独立完成，Mac 仅作可选的 TTS 服务；也保留"经 Mac 调 LLM"作为辅助/回退。
 
 实际体验：
 
@@ -23,18 +23,37 @@
   → 小米原生 ASR/NLP 先处理
   → native_first_client.sh（音箱端，纯 shell）读取原生结构化结果
        → 原生成功 domain（家电/天气/音量…）：交回原生，replay 播报
-       → 原生不支持：冻结失败播报，把识别文本 POST 给 Mac 服务端
-  → Mac 服务端（FastAPI）：LLM 流式生成 → 逐句 EdgeTTS
-  → 音箱边收边播
+       → 原生不支持：冻结失败播报，音箱自己直连 LLM 拿回答（主线）
+  → 逐段文本送 TTS（EdgeTTS 微服务，离线降级原生 TTS）→ 音箱边收边播
 ```
+
+主线是**音箱直连 LLM**（`LLM_PIPELINE=native`）：音箱脱离开发 Mac 独立运行，Mac 仅作可选 TTS 服务；另保留**经 Mac 调 LLM**（`server`）作开发联调 / 回退。两条链路对比见 [docs/concepts/native-first.md](docs/concepts/native-first.md)。
 
 这条 **native-first（原生优先）** 路线的核心判断：不要替换小爱，而是复用它最稳的部分——高质量唤醒、原生 ASR 和家电控制——只接管它不擅长的开放问答。路由依据是小米 NLP 的结构化 `domain/action` 字段，不是文本关键词猜测。详见 [docs/concepts/native-first.md](docs/concepts/native-first.md)。
 
 ## 硬件与风险声明
 
-- 适用设备：小米 AI 音箱 **MDZ-25-DA**（内部代号 S12A，Amlogic A113X，128MB NAND）。其他型号思路可参考，但命令不能照搬。
-- 需要 **拆机焊接 TTL 串口线**（TX/RX/GND 三个触点），这是打通 SSH 之前唯一的控制通道，也是刷写出错后唯一的救援通道。
-- 过程涉及 **读写 NAND 系统分区**，操作失误可能导致设备无法启动（变砖）。本仓库的操作手册都附带了备份和回退步骤，但请确保理解每条命令再执行，风险自担。
+**适用设备**：小米 AI 音箱（本项目实测机型，其他型号思路可参考但命令不能照搬）。实测硬件参数：
+
+| 项 | 值 |
+|---|---|
+| 产品型号 | MDZ-25-DA |
+| 系统 hostname / 内部代号 | S12A |
+| PCB 丝印 | `DKSND-S12C-ECHO-AB-20180820` |
+| 主控 SoC | Amlogic A113X（四核 Cortex-A53） |
+| 内核 | Linux 4.9.61 (aarch64) |
+| WiFi / 蓝牙 | Marvell 88W8977-NMV2，双频 Wi-Fi 4 (802.11 a/b/g/n) + Bluetooth 5.2（含 BLE） |
+| 存储 | 江波龙（Longsys）FORESEE 品牌 SPI NAND，1Gb（128MB），存 OS / 固件 / 启动代码（分区布局见 [docs/concepts/boot-and-partitions.md](docs/concepts/boot-and-partitions.md)） |
+| 音频 ADC | ES7243 |
+| 麦克风采集 | PDM，设备 `/dev/snd/pcmC0D2c`（被 `mipns` 独占） |
+| 调试串口 | 主板 JST 插座，115200 8N1 |
+
+> 型号标识有不一致：PCB 丝印是 `S12C-ECHO`、系统 hostname 是 `S12A`、产品型号是 `MDZ-25-DA`。这里如实并列，以实测为准。
+
+**风险声明**：
+
+- **需要拆机接串口，但不用焊接**——主板上有现成的 JST 串口插座,用杜邦线把 USB‑TTL 模块（如 CH340）的 `TXD/RXD/GND` 插上去即可。串口是打通 SSH 之前唯一的控制通道，也是刷写出错后唯一的救援通道。
+- 过程涉及 **读写 NAND 系统分区**，操作失误可能导致设备无法启动（变砖）。本仓库操作手册都附带了备份和回退步骤，但请确保理解每条命令再执行，风险自担。
 - 改造不影响小爱原有功能，但显然会失去保修。
 
 ## 从哪里开始读
@@ -45,7 +64,7 @@
 | SSH 已可用，想快速跑起来 | [docs/getting-started/quickstart.md](docs/getting-started/quickstart.md) |
 | 想先理解原理再动手 | [docs/concepts/native-first.md](docs/concepts/native-first.md) + [docs/concepts/boot-and-partitions.md](docs/concepts/boot-and-partitions.md) |
 | 日常操作 / 出了问题 | [docs/runbooks/operations.md](docs/runbooks/operations.md) / [docs/runbooks/troubleshooting.md](docs/runbooks/troubleshooting.md) |
-| 想看这一切是怎么一步步摸索出来的 | [docs/history/journey.md](docs/history/journey.md) —— 从焊串口到 native-first 的完整探索历程 |
+| 想看这一切是怎么一步步摸索出来的 | [docs/history/journey.md](docs/history/journey.md) —— 从接串口到 native-first 的完整探索历程 |
 
 完整文档地图和阅读路径见 [docs/README.md](docs/README.md)。
 
@@ -87,15 +106,15 @@ tail -f /tmp/native_first_client.log /tmp/native_first_events.log
 
 ## 服务端能力
 
-- 接收音箱 fallback 文本，调用 DeepSeek / MiniMax / OpenAI / Claude（`config.yaml` 配置，`.env` 放 key）。
-- LLM 流式输出按中文句子边界切分，逐句 EdgeTTS 合成（默认音色 `zh-CN-YunjianNeural`），首句即可开播。
+- **TTS 服务（native 主线用）**：纯文本 → 流式 WAV，按中文句子边界切分逐句 EdgeTTS 合成（默认音色 `zh-CN-YunjianNeural`），首句即可开播。
+- **LLM + TTS 一体（server 辅助模式用）**：接收音箱 fallback 文本，调 DeepSeek / MiniMax / OpenAI / Claude（`config.yaml` 配置，`.env` 放 key）后流式合成。
 - 保留 Whisper ASR 接口，作为历史路线、测试和兜底能力。
 
 | 端点 | 用途 |
 |---|---|
 | `GET /` | 健康检查 |
-| `POST /api/v1/stream/text_chat` | native-first 主链路：文本进 LLM，流式返回 TTS 音频 |
-| `POST /api/v1/tts/stream` | 纯文本→流式 WAV（不含 LLM），供音箱直连模式 / 可移植迷你 TTS 服务 |
+| `POST /api/v1/tts/stream` | **native 主线 TTS**：纯文本→流式 WAV（不含 LLM），供音箱直连 / 可移植迷你 TTS 服务 |
+| `POST /api/v1/stream/text_chat` | server 辅助链路：文本进 LLM，流式返回 TTS 音频 |
 | `POST /api/v1/route/asr` | 录音 ASR + 路由（测试/兜底） |
 | `POST /api/v1/stream/chat` | 录音上传 → ASR → LLM → TTS 一体化（历史接口） |
 
@@ -111,8 +130,8 @@ tests/manual_native_first_cases.md        # 真实音箱人工用例
 ## 当前边界
 
 - native-first 首轮 fallback 是稳定主线；boot0 与 boot1 两套系统（2019/2023 ROM）均已适配。
-- 音箱可选**独立直连模式**（`LLM_PIPELINE=native`）：LLM 由音箱 shell 直接调用，Mac 只提供 TTS（可换成任意常驻设备上的迷你服务），微服务离线时降级原生 TTS。让音箱脱离开发 Mac 独立运行。详见 [docs/concepts/native-first.md](docs/concepts/native-first.md)。
-- 连续追问（LLM 回答后不喊唤醒词直接追问）还不是最终形态：boot0 有实验性的本地录音方案，boot1 默认关闭。原生 ASR reopen 方向已多次验证未打通，下一步更值得探索"获取小米处理后的干净音频"。详见 [docs/history/followup-exploration.md](docs/history/followup-exploration.md)。
+- **音箱直连 LLM（`LLM_PIPELINE=native`）是当前主线**：LLM 由音箱 shell 直接调用，Mac 仅提供 TTS（可换成任意常驻设备上的迷你服务），离线降级原生 TTS，音箱脱离开发 Mac 独立运行。`server` 模式（经 Mac 调 LLM）保留作开发联调 / 回退。详见 [docs/concepts/native-first.md](docs/concepts/native-first.md)。
+- 连续追问（LLM 回答后不喊唤醒词直接追问）**未解决**：boot1 上免唤醒开麦的设备端手段（oneshot / event_notify / continuous reopen）经对照实验确认不通，唯一可工作的 ExpectSpeech 归云端控制；boot0 有实验性本地录音方案。详见 [docs/history/followup-exploration.md](docs/history/followup-exploration.md)。
 
 ## 相关项目
 

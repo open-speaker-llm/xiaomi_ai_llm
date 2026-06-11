@@ -6,7 +6,7 @@
 
 ## 1. 从这里开始
 
-- [journey.md](journey.md) —— **完整探索叙事**：从拆机焊串口、获取 root、squashfs 注入、KWS 弯路，到 native-first 成型、boot1 兼容、追问探索。想理解"为什么是现在这样"，读它。
+- [journey.md](journey.md) —— **完整探索叙事**：从拆机接串口、获取 root、squashfs 注入、KWS 弯路，到 native-first 成型、boot1 兼容、追问探索。想理解"为什么是现在这样"，读它。
 - [followup-exploration.md](followup-exploration.md) —— 连续追问的专题记录：本地录音 vs 原生 reopen，试过哪些方向、为什么没打通。
 
 ## 2. 归档快照

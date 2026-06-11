@@ -29,7 +29,7 @@ docs/
 
 **路径 C：我只想看故事**
 
-- [history/journey.md](history/journey.md) —— 从拆机焊串口到 native-first 的完整探索历程：密码绕过的七次失败、failsafe 丢失事故、squashfs 注入 v1–v6、KWS 弯路、追问探索
+- [history/journey.md](history/journey.md) —— 从拆机接串口到 native-first 的完整探索历程：密码绕过的七次失败、failsafe 丢失事故、squashfs 注入 v1–v6、KWS 弯路、追问探索
 
 ## 按任务查找
 

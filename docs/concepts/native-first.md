@@ -125,16 +125,18 @@ Mac 服务端（FastAPI）做三件事：
 3. `POST /api/v1/tts/stream` 纯文本→流式 WAV（不含 LLM），供音箱直连模式使用，也是可移植迷你 TTS 服务的核心。
 4. 保留 Whisper ASR 端点（`/api/v1/route/asr`、`/api/v1/stream/chat`）作为历史路线、测试和兜底。
 
-## 7. 两种 LLM 链路：经 Mac vs 音箱直连
+## 7. 两种 LLM 链路：音箱直连（主线）vs 经 Mac（辅助）
 
-fallback 到 LLM 时走哪条链路由 `LLM_PIPELINE` 决定：
+fallback 到 LLM 时走哪条链路由 `LLM_PIPELINE` 决定。**当前主线是音箱直连 LLM（`native`），经 Mac 调 LLM（`server`）作为辅助 / 回退**：
 
-| 模式 | 链路 | Mac 角色 |
-|---|---|---|
-| `server`（默认） | 音箱把文本 POST 给 `/api/v1/stream/text_chat`，Mac 调 LLM + EdgeTTS 流式返回 | 调 LLM + TTS |
-| `native` | 音箱 shell 自己直连 LLM 拿回答 → 整段发 `/api/v1/tts/stream` → EdgeTTS 流式返回；微服务不可用时降级原生 `mibrain` TTS | 只出 TTS（甚至可换成路由器/NAS/云函数上的迷你服务） |
+| 模式 | 定位 | 链路 | Mac 角色 |
+|---|---|---|---|
+| `native` | **主线** | 音箱 shell 自己直连 LLM 拿回答 → 整段发 `/api/v1/tts/stream` → EdgeTTS 流式返回；微服务不可用时降级原生 `mibrain` TTS | 只出 TTS（可换成路由器/NAS/云函数上的迷你服务，甚至不需要） |
+| `server` | 辅助 / 回退 | 音箱把文本 POST 给 `/api/v1/stream/text_chat`，Mac 调 LLM + EdgeTTS 流式返回 | 调 LLM + TTS |
 
-`native` 模式让音箱脱离开发 Mac 独立运行——唤醒、ASR、NLP 全是小米原生，LLM 由音箱直连，TTS 优先用 EdgeTTS 微服务（好音色、和小爱区分）、离线退回原生 TTS（不哑）。
+`native` 作为主线的理由：音箱脱离开发 Mac 独立运行——唤醒、ASR、NLP 全是小米原生，LLM 由音箱直连，TTS 优先用 EdgeTTS 微服务（好音色、和小爱区分）、离线退回原生 TTS（不哑）。`server` 保留用于：开发联调时方便、或音箱侧不便放 key 时的回退。
+
+> 配置说明：默认 `LLM_PIPELINE=native`（主线）。native 模式必须在 `/data/native_first.env` 填 `DEEPSEEK_API_KEY`，否则无法直连 LLM。要回退到经 Mac 调 LLM，设 `LLM_PIPELINE=server`。
 
 关键设计点（都是实测踩坑后定的）：
 
