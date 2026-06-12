@@ -34,6 +34,22 @@ zig cc -target aarch64-linux-musl -static -Os -o down_proxy down_proxy.c
 | 0x02 | 例行帧（每轮都有，非继续信号） |
 | 0x04 | asr timeout |
 
-## 为什么不可达
+## 上行流（mipns→aivs）= 干净 PCM，可截获自用
+
+上行音频走 `mipns -> sendto(/tmp/mico_aivs_lab/usock/speech.usock)`（同样带显式路径，可 MITM）。报文是三层嵌套 protobuf，最内层是音频负载：
+
+```
+\x08\x00 \x12\x8a\x0f{ \x08\x03 \x22\x85\x0f{ \x08\x02 \x12\x80\x0f <1920字节音频> }}
+```
+
+- **音频格式：裸 PCM S16LE / 16kHz / 单声道**，每帧 1920B = 960 采样 = 60ms（虽然 mipns 支持 `opus32`，实际传未压缩 PCM）。
+- 这是 mipns 经 **AEC + 7 路 Knowles 阵列波束成形**处理后的定向单声道，**ASR 级质量**：实测拼 3.66s 喂服务端 Whisper，转写"帮我讲讲杭州西湖的历史"一字不差；电平 -27dB 峰值 / -36dB RMS，不削波、底噪低。
+- 对比：`arecord` 抓原始麦 `Device busy`（mipns 独占）；音箱自存的 `/data/mipns/audio/wakeup/*/audio.flac` 是 **7 声道原始阵列**（`meta.json: channel:7`），未经波束，又弱又吵——这才是"原始多麦质量差"的根因。
+
+解码方法：strace aivs 的 `recvfrom(8)`（用 `-s 2000` 拿全 1935B 帧，更大的 4015B 帧需 `-s 4096`），按上面结构剥三层 LEN 取最内层负载，拼接为 `s16le/16000/mono` 即得 WAV。解析脚本思路见会话记录（逐帧走 protobuf 嵌套取最深 LEN）。
+
+> 局限：上行 PCM **只在原生对话期间流动**，波束方向也由唤醒那一刻确定。所以可落地的本地方案是“第一句正常唤醒 → MITM 截获本轮上行 PCM → 喂自己的 ASR/LLM”，省不掉首次唤醒（原因见下）。
+
+## 为什么“无唤醒词追问”不可达
 
 aivs（`mico_aivs_lab`）的 dialog 状态是权威的，`open_mic` 由云端 NLP 响应决定。我们从下行注入 `0x03` 被 mipns 以 `multirounds, no wakeup end!` 拒绝，因为 aivs 自己算的是 `open_mic:0`。即便强行开麦，上行音频发给真 aivs，云端 ASR 也不转写我们伪造的 dialog。
