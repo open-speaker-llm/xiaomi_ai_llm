@@ -50,6 +50,7 @@ SILENCE_LIMIT="${SILENCE_LIMIT:-3}"          # 连续静默 N 秒 = 结束
 MAX_DURATION="${MAX_DURATION:-30}"
 CONTINUE_TIMEOUT="${CONTINUE_TIMEOUT:-10}"
 ARM_FILE="${VAD_ARM_FILE:-}"
+ARM_POLL_SECONDS="${ARM_POLL_SECONDS:-0.03}"
 MIN_RAW_BYTES="${MIN_RAW_BYTES:-16000}"       # 16kHz/16bit/mono 下约 0.5 秒
 WINDOW_CAPTURE_DEV="${WINDOW_CAPTURE_DEV:-$CAPTURE_DEV}"
 WINDOW_CAPTURE_FORMAT="${WINDOW_CAPTURE_FORMAT:-S16_LE}"
@@ -169,9 +170,9 @@ rm -f "$FINAL_WAV" "$RAW_PCM"
 log "[VAD] 模式=$MODE 开始阈值=$SPEECH_THRESHOLD rms=$START_RMS_THRESHOLD active=${START_ACTIVE_PERMILLE}‰ 连续命中=${START_HITS} 候选开头=${IGNORE_INITIAL_CHUNKS}s tail_rms=$TAIL_RMS_THRESHOLD tail_active=${TAIL_ACTIVE_PERMILLE}‰ 结束阈值=$END_THRESHOLD rms=$END_RMS_THRESHOLD active=${END_ACTIVE_PERMILLE}‰ 静默=${SILENCE_LIMIT}s"
 
 if [ -n "$ARM_FILE" ]; then
-    log "[VAD] 等待播放结束后再开始录音检测: $ARM_FILE"
+    log "[VAD] 等待播放结束后再开始录音检测: $ARM_FILE poll=${ARM_POLL_SECONDS}s"
     while [ ! -f "$ARM_FILE" ]; do
-        sleep 0.1
+        sleep "$ARM_POLL_SECONDS"
     done
     log "[VAD] 播放结束，开始录音检测"
 fi
