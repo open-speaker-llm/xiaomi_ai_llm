@@ -67,16 +67,25 @@ FOLLOWUP_PREARM="${FOLLOWUP_PREARM:-1}"
 FOLLOWUP_PREARM_EXTRA="${FOLLOWUP_PREARM_EXTRA:-3}"
 FOLLOWUP_ARM_DELAY="${FOLLOWUP_ARM_DELAY:-0.2}"
 FOLLOWUP_MIN_RAW_BYTES="${FOLLOWUP_MIN_RAW_BYTES:-16000}"
-FOLLOWUP_ASR_ENGINE="${FOLLOWUP_ASR_ENGINE:-mac}"
+FOLLOWUP_ASR_ENGINE="${FOLLOWUP_ASR_ENGINE:-native}"
+FOLLOWUP_NATIVE_ASR_TIMEOUT="${FOLLOWUP_NATIVE_ASR_TIMEOUT:-30}"
+FOLLOWUP_NATIVE_ASR_FALLBACK_MAC="${FOLLOWUP_NATIVE_ASR_FALLBACK_MAC:-0}"
+FOLLOWUP_NATIVE_MIN_QUERY_BYTES="${FOLLOWUP_NATIVE_MIN_QUERY_BYTES:-10}"
 FOLLOWUP_RECORD_MODE="${FOLLOWUP_RECORD_MODE:-window}"
 FOLLOWUP_WINDOW_SECONDS="${FOLLOWUP_WINDOW_SECONDS:-5}"
 FOLLOWUP_WINDOW_CAPTURE_DEV="${FOLLOWUP_WINDOW_CAPTURE_DEV:-Capture}"
 FOLLOWUP_WINDOW_MIN_PEAK="${FOLLOWUP_WINDOW_MIN_PEAK:-300}"
 FOLLOWUP_WINDOW_MIN_RMS_THRESHOLD="${FOLLOWUP_WINDOW_MIN_RMS_THRESHOLD:-40}"
 FOLLOWUP_WINDOW_MIN_ACTIVE_PERMILLE="${FOLLOWUP_WINDOW_MIN_ACTIVE_PERMILLE:-5}"
-FOLLOWUP_WINDOW_CAPTURE_FORMAT="${FOLLOWUP_WINDOW_CAPTURE_FORMAT:-S32_LE}"
-FOLLOWUP_WINDOW_CAPTURE_RATE="${FOLLOWUP_WINDOW_CAPTURE_RATE:-48000}"
-FOLLOWUP_WINDOW_CAPTURE_CHANNELS="${FOLLOWUP_WINDOW_CAPTURE_CHANNELS:-8}"
+if [ "$FOLLOWUP_ASR_ENGINE" = "native" ]; then
+    FOLLOWUP_WINDOW_CAPTURE_FORMAT="${FOLLOWUP_WINDOW_CAPTURE_FORMAT:-S16_LE}"
+    FOLLOWUP_WINDOW_CAPTURE_RATE="${FOLLOWUP_WINDOW_CAPTURE_RATE:-16000}"
+    FOLLOWUP_WINDOW_CAPTURE_CHANNELS="${FOLLOWUP_WINDOW_CAPTURE_CHANNELS:-1}"
+else
+    FOLLOWUP_WINDOW_CAPTURE_FORMAT="${FOLLOWUP_WINDOW_CAPTURE_FORMAT:-S32_LE}"
+    FOLLOWUP_WINDOW_CAPTURE_RATE="${FOLLOWUP_WINDOW_CAPTURE_RATE:-48000}"
+    FOLLOWUP_WINDOW_CAPTURE_CHANNELS="${FOLLOWUP_WINDOW_CAPTURE_CHANNELS:-8}"
+fi
 FOLLOWUP_ARM_FILE="/tmp/native_followup_vad.arm"
 NATIVE_FOLLOWUP_POLL_SECONDS="${NATIVE_FOLLOWUP_POLL_SECONDS:-12}"
 NATIVE_FOLLOWUP_POLL_INTERVAL="${NATIVE_FOLLOWUP_POLL_INTERVAL:-0.2}"
@@ -242,6 +251,9 @@ should_setup_dsnoop() {
 apply_system_defaults() {
     if is_system1_root; then
         FOLLOWUP_ENABLED="$SYSTEM1_FOLLOWUP_ENABLED"
+        if [ "$FOLLOWUP_ASR_ENGINE" = "native" ]; then
+            FOLLOWUP_ASR_ENGINE="$SYSTEM1_FOLLOWUP_ASR_ENGINE"
+        fi
         if [ "$FOLLOWUP_WINDOW_CAPTURE_DEV" = "Capture" ]; then
             FOLLOWUP_WINDOW_CAPTURE_DEV="$SYSTEM1_FOLLOWUP_WINDOW_CAPTURE_DEV"
         fi
@@ -1444,6 +1456,10 @@ send_voice_and_play() {
     rm -f /tmp/stream_fifo
 }
 
+extract_ai_service_asr_query() {
+    LC_ALL=C sed -n 's/.*\\\\\\"query\\\\\\":\\\\\\"\([^\\]*\).*/\1/p' | head -1
+}
+
 transcribe_followup_voice_mac() {
     local voice_file="/tmp/voice.wav"
     local result_file="/tmp/native_followup_asr.env"
@@ -1473,16 +1489,72 @@ transcribe_followup_voice_mac() {
     return 0
 }
 
+transcribe_followup_voice_native() {
+    local voice_file="/tmp/voice.wav"
+    local result_file="/tmp/native_followup_ai_service.json"
+    local req_id payload safe_voice raw code
+
+    FOLLOWUP_TEXT=""
+    FOLLOWUP_ROUTE=""
+    FOLLOWUP_REASON=""
+
+    if [ ! -f "$voice_file" ]; then
+        log "[FOLLOWUP] 追问录音不存在"
+        return 1
+    fi
+
+    req_id="native_followup_$(date +%s)"
+    safe_voice=$(printf '%s' "$voice_file" | json_escape)
+    payload="{\"bypass\":\"\",\"caller\":\"native_first_followup\",\"duration\":0,\"id\":\"$req_id\",\"asr\":1,\"nlp\":1,\"tts\":0,\"asr_audio\":\"$safe_voice\",\"nlp_text\":\"\",\"nlp_execute\":0,\"tts_text\":\"\",\"tts_type\":\"\",\"tts_vendor\":\"\",\"tts_volume\":80,\"tts_codec\":\"mp3\",\"tts_save\":0,\"tts_play\":0}"
+
+    log "[FOLLOWUP] 发送追问录音给小米原生 ASR: $voice_file"
+    raw=$(ubus -t "$FOLLOWUP_NATIVE_ASR_TIMEOUT" call mibrain ai_service "$payload" 2>&1)
+    code=$(printf '%s' "$raw" | grep -o '"code"[[:space:]]*:[[:space:]]*-*[0-9]*' | grep -o -- '-*[0-9]*' | head -1)
+    printf '%s\n' "$raw" > "$result_file"
+
+    FOLLOWUP_TEXT=$(printf '%s' "$raw" | extract_ai_service_asr_query)
+    FOLLOWUP_ROUTE="llm"
+    FOLLOWUP_REASON="native_asr_ok"
+
+    log "[FOLLOWUP] Native ASR code=${code:-unknown} text=${FOLLOWUP_TEXT:-<empty>}"
+    if [ -z "$FOLLOWUP_TEXT" ]; then
+        cp "$voice_file" "/tmp/followup_native_empty_$(date +%s).wav" 2>/dev/null
+        FOLLOWUP_ROUTE="empty"
+        FOLLOWUP_REASON="native_asr_empty"
+        return 1
+    fi
+    if [ "$FOLLOWUP_NATIVE_MIN_QUERY_BYTES" -gt 0 ] 2>/dev/null; then
+        query_bytes=$(printf '%s' "$FOLLOWUP_TEXT" | wc -c 2>/dev/null)
+        query_bytes="${query_bytes:-0}"
+        if [ "$query_bytes" -lt "$FOLLOWUP_NATIVE_MIN_QUERY_BYTES" ] 2>/dev/null; then
+            log "[FOLLOWUP] Native ASR 文本过短，忽略 bytes=$query_bytes min=$FOLLOWUP_NATIVE_MIN_QUERY_BYTES text=$FOLLOWUP_TEXT"
+            FOLLOWUP_ROUTE="empty"
+            FOLLOWUP_REASON="native_asr_short"
+            return 1
+        fi
+    fi
+    return 0
+}
+
 transcribe_followup_voice() {
-    # 文件式原生 ASR（mibrain ai_service asr_audio）已确认被固件硬拒，
-    # 详见 docs/history/followup-exploration.md §5.2。boot0 追问统一走 Mac ASR。
     case "$FOLLOWUP_ASR_ENGINE" in
+        native)
+            if transcribe_followup_voice_native; then
+                return 0
+            fi
+            if [ "$FOLLOWUP_NATIVE_ASR_FALLBACK_MAC" = "1" ]; then
+                log "[FOLLOWUP] Native ASR 无文本，fallback Mac ASR"
+                transcribe_followup_voice_mac
+                return $?
+            fi
+            return 1
+            ;;
         mac|whisper)
             transcribe_followup_voice_mac
             return $?
             ;;
         *)
-            log "[FOLLOWUP] 未知 ASR 引擎: $FOLLOWUP_ASR_ENGINE（仅支持 mac）"
+            log "[FOLLOWUP] 未知 ASR 引擎: $FOLLOWUP_ASR_ENGINE"
             return 1
             ;;
     esac
@@ -1744,7 +1816,7 @@ log "Native result: source=${NATIVE_RESULT_SOURCE} selected=$(select_native_resu
 log "Wake event: max_age=${WAKE_EVENT_MAX_AGE}s"
 log "Wake ignore queries: $WAKE_IGNORE_QUERIES"
 log "Native success: domains=$NATIVE_SUCCESS_DOMAINS replay_speak=$NATIVE_REPLAY_SUCCESS_SPEAK replay_delay=${NATIVE_REPLAY_SUCCESS_DELAY}s replay_cancel_on_wake=$NATIVE_REPLAY_CANCEL_ON_WAKE cancel_domains=$NATIVE_REPLAY_CANCEL_DOMAINS grace=${NATIVE_REPLAY_CANCEL_GRACE}s window=${NATIVE_REPLAY_CANCEL_WINDOW}s"
-log "Followup recorder: enabled=${FOLLOWUP_ENABLED} followup_mode=${FOLLOWUP_MODE} record_mode=${FOLLOWUP_RECORD_MODE} asr=${FOLLOWUP_ASR_ENGINE} native_poll=${NATIVE_FOLLOWUP_POLL_SECONDS}s/${NATIVE_FOLLOWUP_POLL_INTERVAL}s window=${FOLLOWUP_WINDOW_SECONDS}s capture=${FOLLOWUP_WINDOW_CAPTURE_DEV}/${FOLLOWUP_WINDOW_CAPTURE_FORMAT}/${FOLLOWUP_WINDOW_CAPTURE_RATE}/${FOLLOWUP_WINDOW_CAPTURE_CHANNELS}ch audio_setup=${AUDIO_CAPTURE_SETUP} root=$(root_device) window_gate=peak${FOLLOWUP_WINDOW_MIN_PEAK}/rms${FOLLOWUP_WINDOW_MIN_RMS_THRESHOLD}/active${FOLLOWUP_WINDOW_MIN_ACTIVE_PERMILLE}‰ timeout=${FOLLOWUP_TIMEOUT}s arm_delay=${FOLLOWUP_ARM_DELAY}s start=$FOLLOWUP_THRESHOLD/rms=$FOLLOWUP_START_RMS_THRESHOLD/active=${FOLLOWUP_START_ACTIVE_PERMILLE}‰ hits=$FOLLOWUP_START_HITS tail=${FOLLOWUP_IGNORE_INITIAL_CHUNKS}s/rms=$FOLLOWUP_TAIL_RMS_THRESHOLD/active=${FOLLOWUP_TAIL_ACTIVE_PERMILLE}‰ end=$FOLLOWUP_END_THRESHOLD/rms=$FOLLOWUP_END_RMS_THRESHOLD/active=${FOLLOWUP_END_ACTIVE_PERMILLE}‰ silence=${FOLLOWUP_SILENCE_LIMIT}s min_raw=$FOLLOWUP_MIN_RAW_BYTES prearm=$FOLLOWUP_PREARM"
+log "Followup recorder: enabled=${FOLLOWUP_ENABLED} followup_mode=${FOLLOWUP_MODE} record_mode=${FOLLOWUP_RECORD_MODE} asr=${FOLLOWUP_ASR_ENGINE} native_min_bytes=${FOLLOWUP_NATIVE_MIN_QUERY_BYTES} native_poll=${NATIVE_FOLLOWUP_POLL_SECONDS}s/${NATIVE_FOLLOWUP_POLL_INTERVAL}s window=${FOLLOWUP_WINDOW_SECONDS}s capture=${FOLLOWUP_WINDOW_CAPTURE_DEV}/${FOLLOWUP_WINDOW_CAPTURE_FORMAT}/${FOLLOWUP_WINDOW_CAPTURE_RATE}/${FOLLOWUP_WINDOW_CAPTURE_CHANNELS}ch audio_setup=${AUDIO_CAPTURE_SETUP} root=$(root_device) window_gate=peak${FOLLOWUP_WINDOW_MIN_PEAK}/rms${FOLLOWUP_WINDOW_MIN_RMS_THRESHOLD}/active${FOLLOWUP_WINDOW_MIN_ACTIVE_PERMILLE}‰ timeout=${FOLLOWUP_TIMEOUT}s arm_delay=${FOLLOWUP_ARM_DELAY}s start=$FOLLOWUP_THRESHOLD/rms=$FOLLOWUP_START_RMS_THRESHOLD/active=${FOLLOWUP_START_ACTIVE_PERMILLE}‰ hits=$FOLLOWUP_START_HITS tail=${FOLLOWUP_IGNORE_INITIAL_CHUNKS}s/rms=$FOLLOWUP_TAIL_RMS_THRESHOLD/active=${FOLLOWUP_TAIL_ACTIVE_PERMILLE}‰ end=$FOLLOWUP_END_THRESHOLD/rms=$FOLLOWUP_END_RMS_THRESHOLD/active=${FOLLOWUP_END_ACTIVE_PERMILLE}‰ silence=${FOLLOWUP_SILENCE_LIMIT}s min_raw=$FOLLOWUP_MIN_RAW_BYTES prearm=$FOLLOWUP_PREARM"
 log "Fallback: stop=${STOP_NATIVE_SECONDS}s freeze_mediaplayer=${FREEZE_NATIVE_PLAYER_ON_FALLBACK} prefreeze_on_think=${FREEZE_NATIVE_PLAYER_ON_THINK}"
 log "Native ASR pause during LLM: $PAUSE_NATIVE_ASR_DURING_LLM"
 log "Duplicate suppression: ${SUPPRESS_DUP_SECONDS}s"
