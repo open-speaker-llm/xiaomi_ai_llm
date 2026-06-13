@@ -2,7 +2,10 @@
 
 文档类型：历史探索结论  
 适用范围：判断“连续追问到底试过哪些方向”  
-当前结论：原生链路做“无唤醒词追问”在本固件不可达——开麦与云端 ASR 编排都由 aivs 按云端指令掌控，文件式原生 ASR 被固件硬拒（§6.2），本地中间人改写下行流也被 aivs 权威状态否决（§8.4）。现实路线只剩纯本地采音 + 自有 ASR（§8.5）。摸清的机制与对照证伪见 §5–§8。
+当前结论：
+- **文件式原生 ASR（`ai_service asr_audio`）在 boot0 可用、在 boot1 不支持**（§6.2 + §10 实测勘误）。boot0 追问就靠它，是工作路径，不要删。
+- **“无唤醒词追问”（不靠录音、让原生链路重新开麦）在两个 ROM 都不可达**——开麦与云端 ASR 编排由 aivs/mipns 按云端指令掌控，本地中间人改写下行流也被 aivs 权威状态否决（§8.4）。
+- 摸清的机制与对照证伪见 §5–§10。
 
 ## 1. 背景
 
@@ -130,22 +133,20 @@ mipns-xiaomi(pid)  --DGRAM-->  /tmp/mico_aivs_lab/usock/speech.usock  -->  mico_
 
 原生 ASR 的最终文本以 `RecognizeResult`（`namespace:SpeechRecognizer`）事件落在 `/tmp/mico_aivs_lab/instruction.log`，质量与原生一致。
 
-### 6.2 确定的死路：`mibrain ai_service` 文件式 ASR 不被固件支持
+### 6.2 `mibrain ai_service` 文件式 ASR 在 **boot1 不支持**（boot0 支持，见 §10 勘误）
+
+> ⚠️ 重要勘误：本节最初写成“被固件硬拒、`transcribe_followup_voice_native` 是无效代码”，**这只对 boot1 成立**。2026-06-13 在 boot0 实测该接口完全可用（§10）。**boot0 追问就靠它，不要删。**
 
 仓库里 `native_first_client.sh` 的 `transcribe_followup_voice_native()` 用
 `ubus call mibrain ai_service '{"asr":1,"asr_audio":"/tmp/voice.wav",...}'`
-想把录音文件交给小米原生 ASR。**本轮证明这条路在该固件上永远走不通**：
+把录音文件交给小米原生 ASR。**在 boot1（system1，2023 ROM）上走不通**：
 
 - 任何带 `asr=1` + `asr_audio=<文件>` 的调用都返回 `{"code":-1,"info":"{ }"}`。
-- strace 显示 mibrain **根本没 open 那个文件**就返回了。
-- syslog（`/var/log/messages`）里 mibrain 明确打出：
-  ```text
-  enter aivs asr req process!
-  aivs asr req not support!
-  ```
-- 二进制里对应字符串：`asr req need audio file!`（asr=1 但没给文件）、`aivs asr req not support!`（给了文件——该固件未实现文件式 ASR）。
+- strace 显示 boot1 的 mibrain **根本没 open 那个文件**就返回了。
+- syslog（`/var/log/messages`）里 boot1 mibrain 打出 `enter aivs asr req process!` → `aivs asr req not support!`。
+- boot1 二进制字符串：`aivs asr req not support!`（给了文件——boot1 固件未实现文件式 ASR）。
 
-结论：`transcribe_followup_voice_native` 应视为无效代码，不要再依赖它。WAV/裸 PCM、`duration` 取 0 或真实长度都试过，结果一致。
+但 **boot0（system0，2019 ROM）的 mibrain 是另一套二进制**，有 `enter mibrain ai service asr audio fill!` 正向路径、**没有** `aivs asr req not support!`，实测返回 `code:0` + 正确 `query`（§10）。所以这是**按 ROM 区分**的能力，不是普遍死路。
 
 ### 6.3 `ai_service` 的 NLP 入口反而可用（附带能力）
 
@@ -304,4 +305,30 @@ strace aivs 的 `recvfrom(8)`（mipns→aivs 上行），帧是三层嵌套 prot
 ### 9.3 对“现实路线”的影响
 
 干净音频**存在且可截获**（上行 sendto-with-path 可 MITM），自有 Whisper 能完美转写——**本地 ASR 追问在音质上完全可行**。瓶颈仍只是“无唤醒词时无法让 mipns 进入采集+波束状态”（§8）。故可落地方案：**第一句正常唤醒 → MITM 截获本轮上行 PCM → 喂自己的 ASR/LLM**，拿原生级音质、控制权回到本地，但省不掉首次唤醒。工具与格式见 `device/followup_probe/README.md`。
+
+## 10. 2026-06-13 勘误：文件式原生 ASR 在 boot0 是支持的
+
+§6.2 最初把“`ai_service asr_audio` 不支持”写成了普遍结论，并据此（错误地）删了 `transcribe_followup_voice_native`。复查发现**那只是 boot1 的特性**，已 `git revert` 还原。
+
+**关键事实：这是 boot0/boot1 两套 ROM 的差异，必须分开记。**
+
+| | boot0 / system0（2019 ROM，root=`/dev/mtdblock4`） | boot1 / system1（2023 ROM，root=`/dev/mtdblock5`） |
+|---|---|---|
+| `mico_aivs_lab` 进程 | 无 | 有 |
+| `ai_service asr_audio` 文件式 ASR | **支持** | 不支持 |
+| mibrain 二进制特征串 | `enter mibrain ai service asr audio fill!`，无 `not support` | `aivs asr req not support!` |
+
+boot0 实测（2026-06-13，设备恰好跑在 system0）：
+
+```sh
+# /tmp/voice.wav = 16k/单声道/S16_LE，内容“明天天气怎么样”
+ubus call mibrain ai_service '{"asr":1,"nlp":1,"tts":0,"asr_audio":"/tmp/voice.wav",...}'
+# -> code:0, asr_result.query = "明天天气怎么样"（一字不差，还顺带跑了 weather NLP）
+```
+
+所以：
+
+- **boot0 追问就靠 `ai_service asr_audio`（`FOLLOWUP_ASR_ENGINE=native`），是工作路径，保留。**
+- boot1 追问本就由 `SYSTEM1_FOLLOWUP_ENABLED=0` 整体关闭，根本不会调到这条；其文件式 ASR 不支持只是顺带结论，不影响主线。
+- 教训：跨 ROM 的能力结论，必须标注是在哪个 system 上测的；boot1 上的 `not support` 不能外推到 boot0。
 
