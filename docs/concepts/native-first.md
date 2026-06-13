@@ -157,3 +157,22 @@ fallback 到 LLM 时走哪条链路由 `LLM_PIPELINE` 决定。**当前主线是
 - 更值得继续探索的是从小米链路获取处理后的干净音频。
 
 完整探索记录见 [../history/followup-exploration.md](../history/followup-exploration.md)。
+
+## 9. 状态灯反馈
+
+灯效用颜色区分"现在是原生小爱还是 LLM 在处理"，让用户不看屏也能判断进度。由 `native_first_client.sh` 直接写 LED sysfs（`/sys/devices/i2c-1/1-003c/led_rgb`），设备不支持时静默跳过、不影响主流程；可用 `LED_FEEDBACK_ENABLED=0` 整体关闭。
+
+| 阶段 | 灯效 | 含义 |
+|---|---|---|
+| 唤醒瞬间 | 蓝灯常亮（hook 按住 `LED_WAKE_HOLD_SECONDS`，默认 4s） | 听到"小爱同学"，已唤醒 |
+| 原生处理中 | 蓝灯常亮 | 小米原生 ASR/NLP 在判定，可能原生直接答 |
+| 转 LLM | 绿色快闪 3 下后转绿 | 原生答不了，已接管转大模型 |
+| LLM 生成/播放 | 绿色转圈 | 大模型在生成 / 逐句播放回答 |
+| 等待追问 | 绿灯常亮 | 回答播完，`FOLLOWUP_TIMEOUT` 内可继续追问 |
+| 追问识别成功 | 绿色快闪 3 下后转绿 | 追问录音 ASR 出文本，转下一轮 LLM |
+| 出错/无文本 | 橙色快闪 3 下后灭 | LLM 调用失败 / 追问录音失败 / ASR 空，本轮结束 |
+| 回到待机 | 灭灯 | 对话结束，交还原生小爱 |
+
+颜色约定：蓝=原生小爱，绿=LLM（整个 LLM 链路统一绿色系），橙=出错。原生 `think` 转圈灯效在接管期间默认抑制（`SUPPRESS_NATIVE_THINK_LED=1`），避免"确认转 LLM"前出现一段语义不清的蓝色转圈。
+
+闪烁/转圈节奏由 `LED_BLINK_ON_SECONDS`、`LED_CHASE_DELAY_SECONDS`、`LED_SOLID_REFRESH_SECONDS` 等参数控制，默认值见 [device/native_first.env.example](../../device/native_first.env.example)。

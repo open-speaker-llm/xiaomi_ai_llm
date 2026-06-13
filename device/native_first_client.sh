@@ -137,7 +137,6 @@ LED_BLINK_ON_SECONDS="${LED_BLINK_ON_SECONDS:-0.12}"
 LED_BLINK_OFF_SECONDS="${LED_BLINK_OFF_SECONDS:-0.12}"
 LED_CHASE_DELAY_SECONDS="${LED_CHASE_DELAY_SECONDS:-0.08}"
 LED_SOLID_REFRESH_SECONDS="${LED_SOLID_REFRESH_SECONDS:-0.3}"
-LED_LLM_THINKING_DELAY_SECONDS="${LED_LLM_THINKING_DELAY_SECONDS:-1.5}"
 LED_WAKE_HOLD_SECONDS="${LED_WAKE_HOLD_SECONDS:-4}"
 LED_WAKE_HOLD_REFRESH_SECONDS="${LED_WAKE_HOLD_REFRESH_SECONDS:-0.1}"
 MASTER_RESTORE_VALUE=""
@@ -275,70 +274,6 @@ led_chase_loop() {
     done
 }
 
-led_blink_then_chase_async() {
-    local count="$1"
-    local blink_color="${2:-$LED_BLUE}"
-    local chase_color="${3:-$LED_BLUE}"
-    local token
-
-    [ "$LED_FEEDBACK_ENABLED" = "1" ] || return 0
-    [ "$count" -gt 0 ] 2>/dev/null || return 0
-    [ -w "$LED_RGB" ] || return 0
-
-    led_feedback_cancel
-    token=$(led_animation_token "blink_chase_$count")
-    printf '%s\n' "$token" > "$LED_FEEDBACK_TOKEN_FILE" 2>/dev/null
-    (
-        i=0
-        while [ "$i" -lt "$count" ]; do
-            led_token_is_active "$token" || exit 0
-            led_set_all "$blink_color"
-            sleep "$LED_BLINK_ON_SECONDS"
-            led_token_is_active "$token" || exit 0
-            led_set_all 0
-            sleep "$LED_BLINK_OFF_SECONDS"
-            i=$((i + 1))
-        done
-        led_chase_loop "$token" "$chase_color" "$LED_CHASE_DELAY_SECONDS"
-    ) &
-    LED_FEEDBACK_PID=$!
-}
-
-led_blink_then_delayed_chase_async() {
-    local count="$1"
-    local blink_color="${2:-$LED_BLUE}"
-    local solid_color="${3:-$LED_BLUE}"
-    local chase_color="${4:-$LED_BLUE}"
-    local delay_before_chase="${5:-$LED_LLM_THINKING_DELAY_SECONDS}"
-    local token
-
-    [ "$LED_FEEDBACK_ENABLED" = "1" ] || return 0
-    [ "$count" -gt 0 ] 2>/dev/null || return 0
-    [ -w "$LED_RGB" ] || return 0
-
-    led_feedback_cancel
-    token=$(led_animation_token "blink_delay_chase_$count")
-    printf '%s\n' "$token" > "$LED_FEEDBACK_TOKEN_FILE" 2>/dev/null
-    (
-        i=0
-        while [ "$i" -lt "$count" ]; do
-            led_token_is_active "$token" || exit 0
-            led_set_all "$blink_color"
-            sleep "$LED_BLINK_ON_SECONDS"
-            led_token_is_active "$token" || exit 0
-            led_set_all 0
-            sleep "$LED_BLINK_OFF_SECONDS"
-            i=$((i + 1))
-        done
-        led_token_is_active "$token" || exit 0
-        led_set_all "$solid_color"
-        sleep "$delay_before_chase"
-        led_token_is_active "$token" || exit 0
-        led_chase_loop "$token" "$chase_color" "$LED_CHASE_DELAY_SECONDS"
-    ) &
-    LED_FEEDBACK_PID=$!
-}
-
 led_chase_async() {
     local color="${1:-$LED_BLUE}"
     local token
@@ -414,11 +349,6 @@ led_feedback_llm_followup_listening() {
 led_feedback_llm_accept() {
     led_feedback_log "llm_accept" "green_blink_${LED_LLM_ACCEPT_BLINKS}_then_green_solid"
     led_blink_then_solid_async "$LED_LLM_ACCEPT_BLINKS" "$LED_GREEN" "$LED_GREEN"
-}
-
-led_feedback_llm_thinking() {
-    led_feedback_log "llm_thinking" "green_chase delay=${LED_CHASE_DELAY_SECONDS}s"
-    led_chase_async "$LED_GREEN"
 }
 
 led_feedback_llm_playing() {
@@ -2128,7 +2058,7 @@ log "Native result: source=${NATIVE_RESULT_SOURCE} selected=$(select_native_resu
 log "Wake event: max_age=${WAKE_EVENT_MAX_AGE}s"
 log "Wake ignore queries: $WAKE_IGNORE_QUERIES"
 log "Native success: domains=$NATIVE_SUCCESS_DOMAINS replay_speak=$NATIVE_REPLAY_SUCCESS_SPEAK replay_delay=${NATIVE_REPLAY_SUCCESS_DELAY}s replay_cancel_on_wake=$NATIVE_REPLAY_CANCEL_ON_WAKE cancel_domains=$NATIVE_REPLAY_CANCEL_DOMAINS grace=${NATIVE_REPLAY_CANCEL_GRACE}s window=${NATIVE_REPLAY_CANCEL_WINDOW}s"
-log "LED feedback: enabled=${LED_FEEDBACK_ENABLED} native_wait=blue_solid llm_accept=green_blink_${LED_LLM_ACCEPT_BLINKS}_then_green_solid llm_followup_wait=green_solid asr_ok=green_blink_${LED_FOLLOWUP_ASR_OK_BLINKS}_then_green_solid error_blinks=${LED_ERROR_BLINKS} blink=${LED_BLINK_ON_SECONDS}/${LED_BLINK_OFF_SECONDS}s chase=${LED_CHASE_DELAY_SECONDS}s solid_refresh=${LED_SOLID_REFRESH_SECONDS}s thinking_delay=${LED_LLM_THINKING_DELAY_SECONDS}s wake_hold=${LED_WAKE_HOLD_SECONDS}s/${LED_WAKE_HOLD_REFRESH_SECONDS}s playing=green_chase"
+log "LED feedback: enabled=${LED_FEEDBACK_ENABLED} native_wait=blue_solid llm_accept=green_blink_${LED_LLM_ACCEPT_BLINKS}_then_green_solid llm_followup_wait=green_solid asr_ok=green_blink_${LED_FOLLOWUP_ASR_OK_BLINKS}_then_green_solid error_blinks=${LED_ERROR_BLINKS} blink=${LED_BLINK_ON_SECONDS}/${LED_BLINK_OFF_SECONDS}s chase=${LED_CHASE_DELAY_SECONDS}s solid_refresh=${LED_SOLID_REFRESH_SECONDS}s wake_hold=${LED_WAKE_HOLD_SECONDS}s/${LED_WAKE_HOLD_REFRESH_SECONDS}s playing=green_chase"
 log "Followup recorder: enabled=${FOLLOWUP_ENABLED} followup_mode=${FOLLOWUP_MODE} record_mode=${FOLLOWUP_RECORD_MODE} asr=${FOLLOWUP_ASR_ENGINE} native_min_bytes=${FOLLOWUP_NATIVE_MIN_QUERY_BYTES} native_poll=${NATIVE_FOLLOWUP_POLL_SECONDS}s/${NATIVE_FOLLOWUP_POLL_INTERVAL}s window=${FOLLOWUP_WINDOW_SECONDS}s capture=${FOLLOWUP_WINDOW_CAPTURE_DEV}/${FOLLOWUP_WINDOW_CAPTURE_FORMAT}/${FOLLOWUP_WINDOW_CAPTURE_RATE}/${FOLLOWUP_WINDOW_CAPTURE_CHANNELS}ch audio_setup=${AUDIO_CAPTURE_SETUP} root=$(root_device) window_gate=peak${FOLLOWUP_WINDOW_MIN_PEAK}/rms${FOLLOWUP_WINDOW_MIN_RMS_THRESHOLD}/active${FOLLOWUP_WINDOW_MIN_ACTIVE_PERMILLE}‰ timeout=${FOLLOWUP_TIMEOUT}s arm_delay=${FOLLOWUP_ARM_DELAY}s arm_poll=${FOLLOWUP_ARM_POLL_SECONDS}s start=$FOLLOWUP_THRESHOLD/rms=$FOLLOWUP_START_RMS_THRESHOLD/active=${FOLLOWUP_START_ACTIVE_PERMILLE}‰ hits=$FOLLOWUP_START_HITS tail=${FOLLOWUP_IGNORE_INITIAL_CHUNKS}s/rms=$FOLLOWUP_TAIL_RMS_THRESHOLD/active=${FOLLOWUP_TAIL_ACTIVE_PERMILLE}‰ end=$FOLLOWUP_END_THRESHOLD/rms=$FOLLOWUP_END_RMS_THRESHOLD/active=${FOLLOWUP_END_ACTIVE_PERMILLE}‰ silence=${FOLLOWUP_SILENCE_LIMIT}s min_raw=$FOLLOWUP_MIN_RAW_BYTES prearm=$FOLLOWUP_PREARM"
 log "Fallback: stop=${STOP_NATIVE_SECONDS}s freeze_mediaplayer=${FREEZE_NATIVE_PLAYER_ON_FALLBACK} prefreeze_on_think=${FREEZE_NATIVE_PLAYER_ON_THINK}"
 log "Native ASR pause during LLM: $PAUSE_NATIVE_ASR_DURING_LLM"

@@ -77,7 +77,6 @@ class ShellConfigTest(unittest.TestCase):
             "LED_BLINK_OFF_SECONDS": "0.12",
             "LED_CHASE_DELAY_SECONDS": "0.08",
             "LED_SOLID_REFRESH_SECONDS": "0.3",
-            "LED_LLM_THINKING_DELAY_SECONDS": "1.5",
             "LED_WAKE_HOLD_SECONDS": "4",
             "LED_WAKE_HOLD_REFRESH_SECONDS": "0.1",
         }
