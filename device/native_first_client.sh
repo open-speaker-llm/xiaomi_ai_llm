@@ -2068,6 +2068,14 @@ case "$1" in
         ls -l "$LOG_FILE" "$EVENT_LOG" 2>/dev/null || true
         exit 0
         ;;
+    tts_test)
+        # 手动验证 TTS 链路：按当前 TTS_ENGINE（server/device）走，失败兜底原生 mibrain。
+        # 用法: native_first_client.sh tts_test "要合成的文本"
+        echo "TTS_ENGINE=$TTS_ENGINE DEVICE_TTS_BIN=$DEVICE_TTS_BIN"
+        tts_play_text "${2:-端侧语音合成测试，现在走的是音箱端 EdgeTTS。}"
+        echo "tts_test done rc=$?"
+        exit 0
+        ;;
     parse_test)
         source=$(select_native_result_source)
         get_native_result "$source" || true
