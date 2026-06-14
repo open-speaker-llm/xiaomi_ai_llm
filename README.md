@@ -5,7 +5,7 @@
 让一台 2019 年的小米 AI 音箱（MDZ-25-DA / S12A）接上现代大模型：
 
 - **原生能做的，继续交给小爱**：唤醒、开关灯、音量、天气、闹钟等走小米原生链路，体验不打折。
-- **原生不会答的，转给 LLM**：拦截"我还在学习中"这类失败播报，**音箱自己直连 LLM**（DeepSeek / MiniMax / Claude / OpenAI）拿回答，再合成语音播放。主线由音箱独立完成；不想部署 Mac 服务端时走小爱原生 `mibrain` TTS，想要 EdgeTTS/更多音色时再部署可选 TTS 服务。也保留"经 Mac 调 LLM"作为辅助/回退。
+- **原生不会答的，转给 LLM**：拦截"我还在学习中"这类失败播报，**音箱自己直连 LLM**（DeepSeek / MiniMax / Claude / OpenAI）拿回答，再合成语音播放。TTS 独立选择：可走 Mac/迷你服务端 EdgeTTS，也可走音箱端 `ettsc` 直连 EdgeTTS，失败时兜底小爱原生 `mibrain` TTS。也保留"经 Mac 调 LLM"作为辅助/回退。
 
 实际体验：
 
@@ -24,10 +24,19 @@
   → native_first_client.sh（音箱端，纯 shell）读取原生结构化结果
        → 原生成功 domain（家电/天气/音量…）：交回原生，replay 播报
        → 原生不支持：冻结失败播报，音箱自己直连 LLM 拿回答（主线）
-  → 逐段文本送 TTS（可选 EdgeTTS 微服务；不可用时自动降级小爱原生 TTS）→ 音箱边收边播
+  → 交给 TTS_ENGINE：server 微服务 / device 端侧 ettsc / 原生 mibrain 兜底
+  → 音箱播放
 ```
 
-主线是**音箱直连 LLM**（`LLM_PIPELINE=native`）：音箱脱离开发 Mac 独立运行，Mac 仅作可选 TTS 服务。默认 `TTS_FALLBACK_NATIVE=1`，服务端没启动时会用小爱原生语音播放；部署 EdgeTTS 服务端的主要收益是更好的音色和更多音色选择。另保留**经 Mac 调 LLM**（`server`）作开发联调 / 回退。两条链路对比见 [docs/concepts/native-first.md](docs/concepts/native-first.md)。
+主线是**音箱直连 LLM**（`LLM_PIPELINE=native`）：音箱脱离开发 Mac 独立运行，TTS 由 `TTS_ENGINE` 决定。两条链路对比见 [docs/concepts/native-first.md](docs/concepts/native-first.md)。
+
+| TTS 路线 | 配置 | 适合场景 |
+|---|---|---|
+| Mac/迷你 TTS 服务端 EdgeTTS | `TTS_ENGINE=server` | 想要服务端切句流式、方便在 Mac 上更新 EdgeTTS 音色 |
+| 音箱端直连 EdgeTTS | `TTS_ENGINE=device` | 不想部署 Mac 服务端，但仍想用 EdgeTTS 音色；需先构建并部署 `/data/ettsc` |
+| 小爱原生 TTS 兜底 | `TTS_FALLBACK_NATIVE=1` | EdgeTTS 服务不可用或端侧失败时保证 LLM 回答不哑 |
+
+另保留**经 Mac 调 LLM**（`LLM_PIPELINE=server`）作开发联调 / 回退。
 
 这条 **native-first（原生优先）** 路线的核心判断：不要替换小爱，而是复用它最稳的部分——高质量唤醒、原生 ASR 和家电控制——只接管它不擅长的开放问答。路由依据是小米 NLP 的结构化 `domain/action` 字段，不是文本关键词猜测。详见 [docs/concepts/native-first.md](docs/concepts/native-first.md)。
 
@@ -100,13 +109,13 @@ start_server.sh         Mac 服务端启动入口
 
 ## 快速启动（已完成部署时）
 
-Mac 服务端（仓库根目录）：
+可选：Mac/迷你 TTS 服务端（`TTS_ENGINE=server` 时使用，仓库根目录）：
 
 ```sh
 ./start_server.sh
 ```
 
-这一步是可选的：不启动服务端时，native 主线仍会直连 LLM，并自动降级到小爱原生 TTS 播放；启动服务端后才使用 EdgeTTS 音色（可在 `config.yaml` 的 `tts.edgetts.voice` 调整）。
+这一步是可选的：也可以用 `TTS_ENGINE=device` 让音箱端 `ettsc` 直连 EdgeTTS；两种 EdgeTTS 失败时都可用 `TTS_FALLBACK_NATIVE=1` 退回小爱原生 TTS。
 
 音箱端（SSH 登录后）：
 
@@ -122,7 +131,7 @@ tail -f /tmp/native_first_client.log /tmp/native_first_events.log
 
 ## 服务端能力
 
-- **TTS 服务（native 主线可选）**：纯文本 → 流式 WAV，按中文句子边界切分逐句 EdgeTTS 合成（默认音色 `zh-CN-YunjianNeural`），首句即可开播。未部署或不可达时，音箱自动走小爱原生 TTS。
+- **TTS 服务（`TTS_ENGINE=server` 用）**：纯文本 → 流式 WAV，按中文句子边界切分逐句 EdgeTTS 合成（默认音色 `zh-CN-YunjianNeural`），首句即可开播。未部署或不可达时，音箱可自动走端侧/原生兜底。
 - **LLM + TTS 一体（server 辅助模式用）**：接收音箱 fallback 文本，调 DeepSeek / MiniMax / OpenAI / Claude（`config.yaml` 配置，`.env` 放 key）后流式合成。
 - 保留 Whisper ASR 接口，作为历史路线、测试和兜底能力。
 
@@ -146,7 +155,7 @@ tests/manual_native_first_cases.md        # 真实音箱人工用例
 ## 当前边界
 
 - native-first 首轮 fallback 是稳定主线；boot0 与 boot1 两套系统（2019/2023 ROM）均已适配。
-- **音箱直连 LLM（`LLM_PIPELINE=native`）是当前主线**：LLM 由音箱 shell 直接调用。若不部署 Mac 服务端，LLM 回答会走小爱原生 TTS；若希望使用 EdgeTTS 或更多音色，再启动可选 TTS 服务（也可换成任意常驻设备上的迷你服务）。`server` 模式（经 Mac 调 LLM）保留作开发联调 / 回退。详见 [docs/concepts/native-first.md](docs/concepts/native-first.md)。
+- **音箱直连 LLM（`LLM_PIPELINE=native`）是当前主线**：LLM 由音箱 shell 直接调用。TTS 可选 `server`（Mac/迷你服务端 EdgeTTS）、`device`（音箱端 `ettsc` 直连 EdgeTTS）或原生 `mibrain` 兜底。`server` 模式（经 Mac 调 LLM）保留作开发联调 / 回退。详见 [docs/concepts/native-first.md](docs/concepts/native-first.md)。
 - 连续追问（LLM 回答后不喊唤醒词直接追问）**未解决**：boot1 上免唤醒开麦的设备端手段（oneshot / event_notify / continuous reopen）经对照实验确认不通，唯一可工作的 ExpectSpeech 归云端控制；boot0 有实验性本地录音方案。详见 [docs/history/followup-exploration.md](docs/history/followup-exploration.md)。
 
 ## 相关项目

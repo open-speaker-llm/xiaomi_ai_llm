@@ -86,24 +86,26 @@ ps | grep -E 'native_first_client|mipns-xiaomi|mediaplayer|curl|aplay|arecord' |
 
 ### 音箱直连 LLM（默认主线，LLM_PIPELINE=native）
 
-**默认就是 native**——音箱直连 LLM、Mac 只出 TTS。`/data/native_first.env` 关键项：
+**默认就是 native**——音箱直连 LLM，TTS 由 `TTS_ENGINE` 独立选择。`/data/native_first.env` 关键项：
 
 ```sh
 LLM_PIPELINE=native                     # 默认；音箱直连 LLM
 DEEPSEEK_API_KEY=sk-...                 # native 模式必填，否则无法直连 LLM
 TTS_SERVER=http://192.168.8.150:8080   # TTS 微服务地址，可指向任意常驻设备
+TTS_ENGINE=server                       # server=Mac/迷你 TTS 服务；device=音箱端 ettsc
 TTS_FALLBACK_NATIVE=1                   # TTS 微服务不可用时走小爱原生 TTS
 LLM_THINKING=disabled                   # deepseek-v4-flash 关思考，首句 ~2s
 ```
 
-启动后日志里会看到 `[LLM-NATIVE] direct → ...`。TTS 有两种用法：
+启动后日志里会看到 `[LLM-NATIVE] direct → ...`。TTS 有三种用法：
 
 | 需求 | 做法 | 效果 |
 |---|---|---|
-| 不想部署 Mac 服务端 | 保持 `TTS_FALLBACK_NATIVE=1`，不启动 `./start_server.sh` 也可以 | LLM 回答走小爱原生 `mibrain` TTS，音色就是原生小爱 |
-| 想要 EdgeTTS 或更多音色 | 启动 `./start_server.sh`，并把 `TTS_SERVER` 指向它 | LLM 回答走 EdgeTTS；音色在 `config.yaml` 的 `tts.edgetts.voice` 调整 |
+| Mac/迷你 TTS 服务端 EdgeTTS | `TTS_ENGINE=server`，启动 `./start_server.sh` 或其他 `/api/v1/tts/stream` 服务 | 端点切句流式返回 WAV，音色在 `config.yaml` 的 `tts.edgetts.voice` 调整 |
+| 音箱端直连 EdgeTTS | `TTS_ENGINE=device`，部署 `/data/ettsc` | 不需要 Mac 服务端，音箱自己连 EdgeTTS 并用原生播放器播放 MP3 |
+| 小爱原生 TTS 兜底 | 保持 `TTS_FALLBACK_NATIVE=1` | EdgeTTS 路线失败时自动走 `mibrain text_to_speech`，保证不哑 |
 
-也就是说，Mac 服务端不是 native 主线的必需项，它主要提供更好的 TTS 音色。TTS 微服务不可用时会自动降级原生 mibrain TTS（原生音色）。原理见 [../concepts/native-first.md](../concepts/native-first.md)。
+也就是说，Mac 服务端不是 native 主线的必需项；想要 EdgeTTS 可以选 Mac/迷你服务端，也可以选音箱端 `ettsc`。原理见 [../concepts/native-first.md](../concepts/native-first.md)。
 
 回退到经 Mac 调 LLM：把 `LLM_PIPELINE` 改成 `server` 重启即可。
 

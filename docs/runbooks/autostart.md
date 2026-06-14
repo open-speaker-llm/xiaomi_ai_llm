@@ -174,7 +174,8 @@ device/data_init_native_first.sh
 - 等待一段启动延迟。
 - 检查 `native_first_client.sh` 是否已存在。
 - 避免重复启动。
-- 等待 Mac 服务端健康检查通过。
+- 按 `SERVER_WAIT_SECONDS` 短暂等待可选 TTS 服务端。
+- 默认 `START_WITHOUT_SERVER=1`，服务端不可达也会启动客户端；`TTS_ENGINE=device` 或原生 TTS 兜底都不依赖 Mac 服务端。
 - 后台启动 `native_first_client.sh`。
 
 ## 6. 验证步骤

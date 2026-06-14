@@ -30,7 +30,7 @@ cargo install cargo-zigbuild
 ./deploy.sh           # scp 到 192.168.8.152:/data/ettsc（可传 host 参数）
 ```
 
-仓库已带一份预编译 `dist/ettsc`，多数情况下直接 `./deploy.sh` 即可，不必本地装工具链。
+`dist/ettsc` 是本地构建产物，不提交到仓库；首次使用端侧 EdgeTTS 前需要先运行 `./build.sh`，再运行 `./deploy.sh`。未来如果发布 GitHub Release，可把预编译二进制作为附件提供，但当前仓库只保存源码和构建脚本。
 
 ## 用法
 

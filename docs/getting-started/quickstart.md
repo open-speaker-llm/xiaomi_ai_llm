@@ -1,14 +1,14 @@
 # 快速上手
 
 文档类型：SSH 已可用后的快速联调
-适用范围：已打通 SSH + 已能向 `/data` 上传文件的小米音箱；Mac TTS 服务端可选
+适用范围：已打通 SSH + 已能向 `/data` 上传文件的小米音箱；TTS 可选 Mac 服务端或音箱端 `ettsc`
 当前结论：如果你还没有 SSH，先读 [bringup.md](bringup.md)
 
 > 示例 IP、`ssh xiaomi` 别名等约定见 [../README.md](../README.md#文档约定)。
 
 ## 0. 前提
 
-- Mac 和音箱在同一网络（如果不部署 EdgeTTS 服务端，只需要 Mac 能通过 SSH 上传文件）。
+- Mac 和音箱在同一网络（如果不部署 Mac TTS 服务端，只需要 Mac 能通过 SSH 上传文件）。
 - 音箱可以 SSH 登录（`~/.ssh/config` 已配置 `xiaomi` 别名）。
 - 音箱 `/data` 可写。
 - 已知道 Mac IP，例如 `192.168.8.150`。
@@ -42,16 +42,25 @@ DEEPSEEK_API_KEY=sk-...
 TTS_FALLBACK_NATIVE=1
 ```
 
-`LLM_PIPELINE=native` 时，音箱自己直连 LLM。若不启动 Mac 服务端，`TTS_FALLBACK_NATIVE=1` 会让 LLM 回答走小爱原生 `mibrain` TTS 播放。
+`LLM_PIPELINE=native` 时，音箱自己直连 LLM。TTS 由 `TTS_ENGINE` 选择，失败时由 `TTS_FALLBACK_NATIVE=1` 退回小爱原生 `mibrain` TTS。
 
-如果希望使用 EdgeTTS 或更多音色，再配置可选的 TTS 服务地址并启动下面的服务端：
+## 2. 选择 TTS 路线
+
+| 路线 | 配置 | 需要做什么 |
+|---|---|---|
+| Mac/迷你 TTS 服务端 EdgeTTS | `TTS_ENGINE=server` | 配置 `TTS_SERVER` 并启动下面的服务端 |
+| 音箱端直连 EdgeTTS | `TTS_ENGINE=device` | 构建并部署 `/data/ettsc`，不需要 Mac 服务端 |
+| 小爱原生 TTS 兜底 | `TTS_FALLBACK_NATIVE=1` | 保持默认，EdgeTTS 失败时自动出声 |
+
+如果使用 Mac/迷你 TTS 服务端：
 
 ```sh
+TTS_ENGINE=server
 SERVER=http://192.168.8.150:8080
 TTS_SERVER=http://192.168.8.150:8080
 ```
 
-## 2. 可选：启动 EdgeTTS 服务端
+启动服务端：
 
 ```sh
 ./start_server.sh
@@ -70,6 +79,24 @@ tail -f /tmp/server.log | grep -E '📥|🎤|🌐|🔊|🤖|✅|⚠️'
 ```
 
 EdgeTTS 音色在 `config.yaml` 的 `tts.edgetts.voice` 配置，默认是 `zh-CN-YunjianNeural`。
+
+如果使用音箱端直连 EdgeTTS：
+
+```sh
+cd device/ettsc
+./build.sh
+./deploy.sh 192.168.8.152
+```
+
+音箱配置：
+
+```sh
+TTS_ENGINE=device
+DEVICE_TTS_BIN=/data/ettsc
+DEVICE_TTS_VOICE=zh-CN-YunjianNeural
+```
+
+`dist/ettsc` 是本地构建产物，不提交到仓库；如果不想使用 EdgeTTS，保持 `TTS_FALLBACK_NATIVE=1` 即可退回小爱原生 TTS。
 
 ## 3. 启动音箱客户端
 

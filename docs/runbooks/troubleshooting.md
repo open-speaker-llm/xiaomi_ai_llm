@@ -155,7 +155,27 @@ SYSTEM1_FOLLOWUP_ENABLED=0
 
 追问探索历史见 [../history/followup-exploration.md](../history/followup-exploration.md)。
 
-## 9. TTS 超时
+## 9. TTS 路线排障
+
+先看当前配置：
+
+```sh
+grep -E 'TTS_ENGINE|TTS_SERVER|TTS_FALLBACK_NATIVE|DEVICE_TTS' /data/native_first.env
+```
+
+也可以直接手动测当前 TTS 链路：
+
+```sh
+sh /data/native_first_client.sh tts_test "TTS 链路测试。"
+```
+
+### 9.1 Mac/迷你 TTS 服务端不通
+
+`TTS_ENGINE=server` 时，音箱会访问 `TTS_SERVER/api/v1/tts/stream`。先在音箱上测健康检查：
+
+```sh
+curl -sS -m 5 "$TTS_SERVER/"
+```
 
 Mac 日志里如果出现 EdgeTTS 连接错误：
 
@@ -164,5 +184,25 @@ Cannot connect to host speech.platform.bing.com
 Connection timeout
 ```
 
-这是 TTS 网络连接问题，不是 DeepSeek 模型本身超时。可以稍后重试，或后续考虑加入备用 TTS。
+这是 TTS 网络连接问题，不是 DeepSeek 模型本身超时。可以稍后重试、升级 Mac 端 `edge-tts`，或临时改用 `TTS_ENGINE=device` / 原生兜底。
 
+### 9.2 音箱端 EdgeTTS 失败
+
+`TTS_ENGINE=device` 时，先确认二进制存在：
+
+```sh
+ls -l /data/ettsc
+/data/ettsc probe
+```
+
+如果日志里看到 `403`，通常是微软提高了 EdgeTTS 的 Chromium / `Sec-MS-GEC-Version` 要求。按 [device/ettsc/README.md](../../device/ettsc/README.md) 更新 `DEVICE_TTS_GEC_VERSION` / `DEVICE_TTS_UA` / `DEVICE_TTS_ORIGIN`，无需重编。
+
+### 9.3 原生 mibrain 兜底
+
+保持：
+
+```sh
+TTS_FALLBACK_NATIVE=1
+```
+
+当 `server` 或 `device` 路线失败时，脚本会退回 `mibrain text_to_speech`。如果听到原生小爱音色，说明兜底生效；如果完全无声，再看日志中的 `[TTS] 微服务不可用，降级原生 mibrain`、`native fallback playback started/finished`。
