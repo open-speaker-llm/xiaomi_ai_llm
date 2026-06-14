@@ -131,12 +131,28 @@ fallback 到 LLM 时走哪条链路由 `LLM_PIPELINE` 决定。**当前主线是
 
 | 模式 | 定位 | 链路 | Mac 角色 |
 |---|---|---|---|
-| `native` | **主线** | 音箱 shell 自己直连 LLM 拿回答 → 整段发 `/api/v1/tts/stream` → EdgeTTS 流式返回；微服务不可用时降级原生 `mibrain` TTS | 只出 TTS（可换成路由器/NAS/云函数上的迷你服务，甚至不需要） |
+| `native` | **主线** | 音箱 shell 自己直连 LLM 拿回答 → 交给 TTS（见下 `TTS_ENGINE`）；失败降级原生 `mibrain` | 默认只出 TTS（可换路由器/NAS/云函数）；`TTS_ENGINE=device` 时连 TTS 都不需要 Mac |
 | `server` | 辅助 / 回退 | 音箱把文本 POST 给 `/api/v1/stream/text_chat`，Mac 调 LLM + EdgeTTS 流式返回 | 调 LLM + TTS |
 
 `native` 作为主线的理由：音箱脱离开发 Mac 独立运行——唤醒、ASR、NLP 全是小米原生，LLM 由音箱直连，TTS 优先用 EdgeTTS 微服务（好音色、和小爱区分）、离线退回原生 TTS（不哑）。`server` 保留用于：开发联调时方便、或音箱侧不便放 key 时的回退。
 
 > 配置说明：默认 `LLM_PIPELINE=native`（主线）。native 模式必须在 `/data/native_first.env` 填 `DEEPSEEK_API_KEY`，否则无法直连 LLM。要回退到经 Mac 调 LLM，设 `LLM_PIPELINE=server`。
+
+### TTS 引擎：Mac 微服务 vs 音箱端直连（与 LLM 链路正交）
+
+"谁出声"是和 `LLM_PIPELINE` 独立的另一维度，由 `TTS_ENGINE` 决定。`native` LLM 链路下两种都能用：
+
+| `TTS_ENGINE` | 链路 | 依赖 | 失败兜底 |
+|---|---|---|---|
+| `server`（默认） | 整段发 Mac `/api/v1/tts/stream`，端点 Python 切句、EdgeTTS 流式返回 WAV → `aplay` | 需要 Mac/迷你 TTS 微服务在线 | 微服务 ping 不通 → 原生 `mibrain` |
+| `device` | 音箱端 `ettsc` 自己 wss 连微软 EdgeTTS、Sec-MS-GEC 鉴权、拿整段 MP3 → 原生 `miplayer` | **不需要任何 helper**，音箱独立完成 | ettsc 失败（如 403）→ 原生 `mibrain` |
+
+`device` 档让音箱连 TTS 微服务都不再需要——真正脱离任何外部服务独立出声。实现见 [`device/ettsc/README.md`](../../device/ettsc/README.md)，两条实测定下的硬约束：
+
+- **纯阻塞 IO，不用 tokio**：tokio 的 epoll 异步 reactor 在这台音箱（musl 静态 / kernel 4.9 / zig 构建）上不工作——TCP 内核层能连上但 `connect().await` 永不返回。换 `std::net::TcpStream` 阻塞 + 同步 `tungstenite` + `native-tls`（vendored OpenSSL 静态）后正常。
+- **TLS 用 OpenSSL 而非 rustls**：ClientHello 同源于 curl，稳过本地网络。
+
+> 维护点：EdgeTTS 的 `Sec-MS-GEC-Version` 跟着 Chromium 版本走，微软抬高最低版本会 `403`（和 Mac 端 edge-tts 同性质，Mac 靠 `pip -U` 白嫖更新）。端侧把版本号/UA/Origin 做成配置（`DEVICE_TTS_GEC_VERSION` 等），过期时改 `/data/native_first.env` 一行、不必重编。
 
 关键设计点（都是实测踩坑后定的）：
 
