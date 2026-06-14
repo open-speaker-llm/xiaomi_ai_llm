@@ -2,6 +2,8 @@
 
 > Bring your own LLM to a Xiaomi AI Speaker — keep "小爱同学" for what it's good at, route everything else to DeepSeek / MiniMax / Claude. Documentation is in Chinese.
 
+<img src="docs/assets/xiaomi-ai-speaker-mdz-25-da.jpg" alt="小米 AI 音箱 MDZ-25-DA 实物照片" width="420">
+
 让一台 2019 年的小米 AI 音箱（MDZ-25-DA / S12A）接上现代大模型：
 
 - **原生能做的，继续交给小爱**：唤醒、开关灯、音量、天气、闹钟等走小米原生链路，体验不打折。
@@ -56,6 +58,10 @@
 | 音频 ADC | ES7243 |
 | 麦克风采集 | PDM，设备 `/dev/snd/pcmC0D2c`（被 `mipns` 独占） |
 | 调试串口 | 主板 JST 插座，115200 8N1 |
+
+![小米 AI 音箱 S12A 主板上的 JST 串口插座位置](docs/assets/s12a-mainboard-uart-jst.jpg)
+
+上图是拆开后的 S12A 主板参考，左上方白色 JST 插座为调试串口位置；不同批次的丝印和插座朝向可能略有差异，接线前先确认 `TX/RX/GND`。
 
 > 型号标识有不一致：PCB 丝印是 `S12C-ECHO`、系统 hostname 是 `S12A`、产品型号是 `MDZ-25-DA`。这里如实并列，以实测为准。
 
