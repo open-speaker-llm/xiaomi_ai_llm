@@ -76,4 +76,10 @@ Host xiaomi
 ssh -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa root@192.168.8.152
 ```
 
+需要直接通过 SSH 切到 `boot1` 时：
+
+```sh
+ssh -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa root@192.168.8.152 'fw_env -s boot_part boot1 && sync && reboot'
+```
+
 高风险操作手册（boot0-ssh / boot1-ssh）中保留完整命令形式，保证在没有任何本地配置的环境里也能照着做。

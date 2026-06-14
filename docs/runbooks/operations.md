@@ -38,6 +38,12 @@ curl http://127.0.0.1:8080/
 ssh xiaomi
 ```
 
+不配 `~/.ssh/config` 别名时，用完整命令：
+
+```sh
+ssh -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa root@192.168.8.152
+```
+
 如果提示 host key 冲突：
 
 ```sh
@@ -125,6 +131,18 @@ ssh xiaomi 'fw_env -p 2>&1 | grep -A1 "key: \[boot_part\]"'
 ```sh
 ssh xiaomi 'fw_env -s boot_part boot0 && reboot'
 ssh xiaomi 'fw_env -s boot_part boot1 && reboot'
+```
+
+不配 `ssh xiaomi` 别名时，切到 `boot1` 的完整命令：
+
+```sh
+ssh -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa root@192.168.8.152 'fw_env -s boot_part boot1 && sync && reboot'
+```
+
+重启完成后再次连接，并确认根分区是 `system1`：
+
+```sh
+ssh -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa root@192.168.8.152 'fw_env -p 2>&1 | grep -A1 "key: \[boot_part\]"; mount | grep " on / "'
 ```
 
 说明：
