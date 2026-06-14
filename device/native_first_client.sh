@@ -122,7 +122,7 @@ TTS_FALLBACK_NATIVE="${TTS_FALLBACK_NATIVE:-1}"   # TTS 失败时降级原生 mi
 TTS_HEALTH_TIMEOUT="${TTS_HEALTH_TIMEOUT:-2}"
 # 端侧 EdgeTTS（TTS_ENGINE=device）。版本号/UA/Origin 可配，微软抬版本导致 403 时只改这里、不必重编。
 DEVICE_TTS_BIN="${DEVICE_TTS_BIN:-/data/ettsc}"
-DEVICE_TTS_VOICE="${DEVICE_TTS_VOICE:-zh-CN-YunyangNeural}"
+DEVICE_TTS_VOICE="${DEVICE_TTS_VOICE:-zh-CN-YunjianNeural}"
 DEVICE_TTS_CA="${DEVICE_TTS_CA:-/etc/ssl/certs/ca-certificates.crt}"
 DEVICE_TTS_OUT="${DEVICE_TTS_OUT:-/tmp/ettsc_out.mp3}"
 DEVICE_TTS_TIMEOUT="${DEVICE_TTS_TIMEOUT:-30}"
@@ -1484,6 +1484,7 @@ device_tts_play_text() {
         >/dev/null 2>&1
 
     if [ -s "$DEVICE_TTS_OUT" ]; then
+        log "[TTS] 端侧 EdgeTTS 出声: $(wc -c < "$DEVICE_TTS_OUT" 2>/dev/null) bytes, voice=$DEVICE_TTS_VOICE"
         miplayer --file "$DEVICE_TTS_OUT" >/dev/null 2>&1
         return 0
     fi
