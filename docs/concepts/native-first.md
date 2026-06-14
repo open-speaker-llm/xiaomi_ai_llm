@@ -27,7 +27,8 @@ LLM 只接管小米原生不擅长的开放问答。
   → native_first_client.sh 读取结果
        → 成功 domain：交回原生/replay speak
        → 不支持 domain 或失败文案：拦截原生播报，转 LLM
-  → Mac 服务端：LLM 流式生成 → 逐句 EdgeTTS
+  → 音箱直连 LLM 拿回答
+  → TTS 播放：优先可选 EdgeTTS 服务；不可用时走原生 mibrain TTS
   → 音箱播放
 ```
 
@@ -131,10 +132,10 @@ fallback 到 LLM 时走哪条链路由 `LLM_PIPELINE` 决定。**当前主线是
 
 | 模式 | 定位 | 链路 | Mac 角色 |
 |---|---|---|---|
-| `native` | **主线** | 音箱 shell 自己直连 LLM 拿回答 → 交给 TTS（见下 `TTS_ENGINE`）；失败降级原生 `mibrain` | 默认只出 TTS（可换路由器/NAS/云函数）；`TTS_ENGINE=device` 时连 TTS 都不需要 Mac |
+| `native` | **主线** | 音箱 shell 自己直连 LLM 拿回答 → 交给 TTS（见下 `TTS_ENGINE`）；失败降级原生 `mibrain` | 可选 TTS 服务；`TTS_ENGINE=device` 或原生兜底时不需要 Mac |
 | `server` | 辅助 / 回退 | 音箱把文本 POST 给 `/api/v1/stream/text_chat`，Mac 调 LLM + EdgeTTS 流式返回 | 调 LLM + TTS |
 
-`native` 作为主线的理由：音箱脱离开发 Mac 独立运行——唤醒、ASR、NLP 全是小米原生，LLM 由音箱直连，TTS 优先用 EdgeTTS 微服务（好音色、和小爱区分）、离线退回原生 TTS（不哑）。`server` 保留用于：开发联调时方便、或音箱侧不便放 key 时的回退。
+`native` 作为主线的理由：音箱脱离开发 Mac 独立运行——唤醒、ASR、NLP 全是小米原生，LLM 由音箱直连。TTS 是可选增强：不部署 Mac 服务端时，可以用音箱端 EdgeTTS（`TTS_ENGINE=device`），失败再退回小爱原生 `mibrain` TTS；如果希望用 Mac/路由器/NAS 上的 TTS 微服务，则用 `/api/v1/tts/stream`（音色在 `config.yaml` 的 `tts.edgetts.voice` 配置）。`server` 保留用于：开发联调时方便、或音箱侧不便放 key 时的回退。
 
 > 配置说明：默认 `LLM_PIPELINE=native`（主线）。native 模式必须在 `/data/native_first.env` 填 `DEEPSEEK_API_KEY`，否则无法直连 LLM。要回退到经 Mac 调 LLM，设 `LLM_PIPELINE=server`。
 

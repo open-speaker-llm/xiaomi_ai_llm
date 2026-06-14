@@ -5,7 +5,7 @@
 让一台 2019 年的小米 AI 音箱（MDZ-25-DA / S12A）接上现代大模型：
 
 - **原生能做的，继续交给小爱**：唤醒、开关灯、音量、天气、闹钟等走小米原生链路，体验不打折。
-- **原生不会答的，转给 LLM**：拦截"我还在学习中"这类失败播报，**音箱自己直连 LLM**（DeepSeek / MiniMax / Claude / OpenAI）拿回答，再合成语音播放。主线由音箱独立完成，Mac 仅作可选的 TTS 服务；也保留"经 Mac 调 LLM"作为辅助/回退。
+- **原生不会答的，转给 LLM**：拦截"我还在学习中"这类失败播报，**音箱自己直连 LLM**（DeepSeek / MiniMax / Claude / OpenAI）拿回答，再合成语音播放。主线由音箱独立完成；不想部署 Mac 服务端时走小爱原生 `mibrain` TTS，想要 EdgeTTS/更多音色时再部署可选 TTS 服务。也保留"经 Mac 调 LLM"作为辅助/回退。
 
 实际体验：
 
@@ -24,10 +24,10 @@
   → native_first_client.sh（音箱端，纯 shell）读取原生结构化结果
        → 原生成功 domain（家电/天气/音量…）：交回原生，replay 播报
        → 原生不支持：冻结失败播报，音箱自己直连 LLM 拿回答（主线）
-  → 逐段文本送 TTS（EdgeTTS 微服务，离线降级原生 TTS）→ 音箱边收边播
+  → 逐段文本送 TTS（可选 EdgeTTS 微服务；不可用时自动降级小爱原生 TTS）→ 音箱边收边播
 ```
 
-主线是**音箱直连 LLM**（`LLM_PIPELINE=native`）：音箱脱离开发 Mac 独立运行，Mac 仅作可选 TTS 服务；另保留**经 Mac 调 LLM**（`server`）作开发联调 / 回退。两条链路对比见 [docs/concepts/native-first.md](docs/concepts/native-first.md)。
+主线是**音箱直连 LLM**（`LLM_PIPELINE=native`）：音箱脱离开发 Mac 独立运行，Mac 仅作可选 TTS 服务。默认 `TTS_FALLBACK_NATIVE=1`，服务端没启动时会用小爱原生语音播放；部署 EdgeTTS 服务端的主要收益是更好的音色和更多音色选择。另保留**经 Mac 调 LLM**（`server`）作开发联调 / 回退。两条链路对比见 [docs/concepts/native-first.md](docs/concepts/native-first.md)。
 
 这条 **native-first（原生优先）** 路线的核心判断：不要替换小爱，而是复用它最稳的部分——高质量唤醒、原生 ASR 和家电控制——只接管它不擅长的开放问答。路由依据是小米 NLP 的结构化 `domain/action` 字段，不是文本关键词猜测。详见 [docs/concepts/native-first.md](docs/concepts/native-first.md)。
 
@@ -55,6 +55,20 @@
 - **需要拆机接串口，但不用焊接**——主板上有现成的 JST 串口插座,用杜邦线把 USB‑TTL 模块（如 CH340）的 `TXD/RXD/GND` 插上去即可。串口是打通 SSH 之前唯一的控制通道，也是刷写出错后唯一的救援通道。
 - 过程涉及 **读写 NAND 系统分区**，操作失误可能导致设备无法启动（变砖）。本仓库操作手册都附带了备份和回退步骤，但请确保理解每条命令再执行，风险自担。
 - 改造不影响小爱原有功能，但显然会失去保修。
+
+## 开源与法律免责声明
+
+本项目是个人自有设备的本地研究和学习项目，**不隶属于、关联于或代表小米/小爱官方**。仓库中的“小米”“小爱同学”等名称仅用于说明兼容设备和技术背景。
+
+请在使用或二次分发前理解以下边界：
+
+- 仅在你拥有或已获授权的设备上使用本项目。不要用于未经授权的设备访问、批量控制、绕过他人设备安全限制或任何商业化远程控制服务。
+- 本仓库不应包含、分发或托管任何小米固件镜像、系统分区 dump、私有二进制、模型文件、证书、密钥、账号 token、设备序列号或其他非公开资产。
+- 本项目可能改变设备启动流程、启用 SSH、修改系统分区或调用本地原生服务；这些操作可能导致设备不可用、数据丢失、保修失效或违反相关服务条款，风险由使用者自行承担。
+- 语音、文本、设备控制请求可能被发送到你自行配置的第三方 LLM/TTS/ASR 服务。请在使用前理解对应服务的数据处理和隐私政策，避免上传敏感语音、家庭信息、儿童信息或他人个人信息。
+- 请勿将本项目用于攻击、扫描、入侵、破坏、干扰他人设备或服务；如发现安全问题，建议遵循负责任披露原则。
+
+如果你计划公开分发修改版，请只发布自己编写的代码、配置模板和研究说明；不要把从设备中提取的小米原厂文件或个人隐私数据一并发布。
 
 ## 从哪里开始读
 
@@ -92,6 +106,8 @@ Mac 服务端（仓库根目录）：
 ./start_server.sh
 ```
 
+这一步是可选的：不启动服务端时，native 主线仍会直连 LLM，并自动降级到小爱原生 TTS 播放；启动服务端后才使用 EdgeTTS 音色（可在 `config.yaml` 的 `tts.edgetts.voice` 调整）。
+
 音箱端（SSH 登录后）：
 
 ```sh
@@ -106,7 +122,7 @@ tail -f /tmp/native_first_client.log /tmp/native_first_events.log
 
 ## 服务端能力
 
-- **TTS 服务（native 主线用）**：纯文本 → 流式 WAV，按中文句子边界切分逐句 EdgeTTS 合成（默认音色 `zh-CN-YunjianNeural`），首句即可开播。
+- **TTS 服务（native 主线可选）**：纯文本 → 流式 WAV，按中文句子边界切分逐句 EdgeTTS 合成（默认音色 `zh-CN-YunjianNeural`），首句即可开播。未部署或不可达时，音箱自动走小爱原生 TTS。
 - **LLM + TTS 一体（server 辅助模式用）**：接收音箱 fallback 文本，调 DeepSeek / MiniMax / OpenAI / Claude（`config.yaml` 配置，`.env` 放 key）后流式合成。
 - 保留 Whisper ASR 接口，作为历史路线、测试和兜底能力。
 
@@ -130,7 +146,7 @@ tests/manual_native_first_cases.md        # 真实音箱人工用例
 ## 当前边界
 
 - native-first 首轮 fallback 是稳定主线；boot0 与 boot1 两套系统（2019/2023 ROM）均已适配。
-- **音箱直连 LLM（`LLM_PIPELINE=native`）是当前主线**：LLM 由音箱 shell 直接调用，Mac 仅提供 TTS（可换成任意常驻设备上的迷你服务），离线降级原生 TTS，音箱脱离开发 Mac 独立运行。`server` 模式（经 Mac 调 LLM）保留作开发联调 / 回退。详见 [docs/concepts/native-first.md](docs/concepts/native-first.md)。
+- **音箱直连 LLM（`LLM_PIPELINE=native`）是当前主线**：LLM 由音箱 shell 直接调用。若不部署 Mac 服务端，LLM 回答会走小爱原生 TTS；若希望使用 EdgeTTS 或更多音色，再启动可选 TTS 服务（也可换成任意常驻设备上的迷你服务）。`server` 模式（经 Mac 调 LLM）保留作开发联调 / 回退。详见 [docs/concepts/native-first.md](docs/concepts/native-first.md)。
 - 连续追问（LLM 回答后不喊唤醒词直接追问）**未解决**：boot1 上免唤醒开麦的设备端手段（oneshot / event_notify / continuous reopen）经对照实验确认不通，唯一可工作的 ExpectSpeech 归云端控制；boot0 有实验性本地录音方案。详见 [docs/history/followup-exploration.md](docs/history/followup-exploration.md)。
 
 ## 相关项目

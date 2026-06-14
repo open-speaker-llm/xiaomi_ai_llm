@@ -22,6 +22,7 @@ venv/
 *.pid
 tmp/
 logs/
+docs/agents/interaction-log.md
 
 # 音箱/固件镜像和本地大文件
 system*.img

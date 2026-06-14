@@ -1,14 +1,14 @@
 # 快速上手
 
 文档类型：SSH 已可用后的快速联调
-适用范围：Mac 服务端 + 已打通 SSH + 已能向 `/data` 上传文件的小米音箱
+适用范围：已打通 SSH + 已能向 `/data` 上传文件的小米音箱；Mac TTS 服务端可选
 当前结论：如果你还没有 SSH，先读 [bringup.md](bringup.md)
 
 > 示例 IP、`ssh xiaomi` 别名等约定见 [../README.md](../README.md#文档约定)。
 
 ## 0. 前提
 
-- Mac 和音箱在同一网络。
+- Mac 和音箱在同一网络（如果不部署 EdgeTTS 服务端，只需要 Mac 能通过 SSH 上传文件）。
 - 音箱可以 SSH 登录（`~/.ssh/config` 已配置 `xiaomi` 别名）。
 - 音箱 `/data` 可写。
 - 已知道 Mac IP，例如 `192.168.8.150`。
@@ -35,12 +35,23 @@ chmod +x /data/native_first_client.sh /data/vad_record.sh /data/data_init_native
 编辑配置 `vi /data/native_first.env`，至少确认：
 
 ```sh
-SERVER=http://192.168.8.150:8080
 BACKEND=deepseek
 NATIVE_RESULT_SOURCE=auto
+LLM_PIPELINE=native
+DEEPSEEK_API_KEY=sk-...
+TTS_FALLBACK_NATIVE=1
 ```
 
-## 2. 启动 Mac 服务端
+`LLM_PIPELINE=native` 时，音箱自己直连 LLM。若不启动 Mac 服务端，`TTS_FALLBACK_NATIVE=1` 会让 LLM 回答走小爱原生 `mibrain` TTS 播放。
+
+如果希望使用 EdgeTTS 或更多音色，再配置可选的 TTS 服务地址并启动下面的服务端：
+
+```sh
+SERVER=http://192.168.8.150:8080
+TTS_SERVER=http://192.168.8.150:8080
+```
+
+## 2. 可选：启动 EdgeTTS 服务端
 
 ```sh
 ./start_server.sh
@@ -57,6 +68,8 @@ curl http://127.0.0.1:8080/
 ```sh
 tail -f /tmp/server.log | grep -E '📥|🎤|🌐|🔊|🤖|✅|⚠️'
 ```
+
+EdgeTTS 音色在 `config.yaml` 的 `tts.edgetts.voice` 配置，默认是 `zh-CN-YunjianNeural`。
 
 ## 3. 启动音箱客户端
 
