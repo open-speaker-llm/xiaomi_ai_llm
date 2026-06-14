@@ -111,10 +111,24 @@ LLM_DIRECT_TIMEOUT="${LLM_DIRECT_TIMEOUT:-40}"
 LLM_HISTORY_TURNS="${LLM_HISTORY_TURNS:-6}"
 LLM_HISTORY_DIR="${LLM_HISTORY_DIR:-/tmp/native_first_llm_hist}"
 LLM_SYSTEM_PROMPT="${LLM_SYSTEM_PROMPT:-你是一个语音助手，请用纯文本口语直接回答，不要复述问题，不要使用任何 Markdown 格式或列表，说完整的句子。}"
+# TTS 引擎选择：
+#   server（默认）= Mac TTS 微服务（EdgeTTS，端点切句流式）→ aplay；
+#   device        = 音箱端 ettsc 直连 EdgeTTS 拿整段 MP3 → miplayer（不需要 Mac）。
+# 两者都在失败时降级原生 mibrain（TTS_FALLBACK_NATIVE=1）。
+TTS_ENGINE="${TTS_ENGINE:-server}"
 # TTS 微服务（默认与 SERVER 同地址；可指向独立部署的迷你 TTS 服务）
 TTS_SERVER="${TTS_SERVER:-$SERVER}"
-TTS_FALLBACK_NATIVE="${TTS_FALLBACK_NATIVE:-1}"   # TTS 微服务不可用时降级原生 mibrain TTS
+TTS_FALLBACK_NATIVE="${TTS_FALLBACK_NATIVE:-1}"   # TTS 失败时降级原生 mibrain TTS
 TTS_HEALTH_TIMEOUT="${TTS_HEALTH_TIMEOUT:-2}"
+# 端侧 EdgeTTS（TTS_ENGINE=device）。版本号/UA/Origin 可配，微软抬版本导致 403 时只改这里、不必重编。
+DEVICE_TTS_BIN="${DEVICE_TTS_BIN:-/data/ettsc}"
+DEVICE_TTS_VOICE="${DEVICE_TTS_VOICE:-zh-CN-YunyangNeural}"
+DEVICE_TTS_CA="${DEVICE_TTS_CA:-/etc/ssl/certs/ca-certificates.crt}"
+DEVICE_TTS_OUT="${DEVICE_TTS_OUT:-/tmp/ettsc_out.mp3}"
+DEVICE_TTS_TIMEOUT="${DEVICE_TTS_TIMEOUT:-30}"
+DEVICE_TTS_GEC_VERSION="${DEVICE_TTS_GEC_VERSION:-1-143.0.3650.75}"
+DEVICE_TTS_UA="${DEVICE_TTS_UA:-}"            # 留空用 ettsc 内置默认
+DEVICE_TTS_ORIGIN="${DEVICE_TTS_ORIGIN:-}"    # 留空用 ettsc 内置默认
 LLM_DIRECT_ANSWER=""
 NATIVE_SUCCESS_DOMAINS="${NATIVE_SUCCESS_DOMAINS:-smartMiot soundboxControl time weather music player alarm timer system volume}"
 NATIVE_REPLAY_SUCCESS_SPEAK="${NATIVE_REPLAY_SUCCESS_SPEAK:-1}"
@@ -1455,10 +1469,38 @@ tts_service_online() {
     curl -sf -m "$TTS_HEALTH_TIMEOUT" "$TTS_SERVER/" -o /dev/null 2>/dev/null
 }
 
-# 整段文本 → TTS。微服务在线走 EdgeTTS（端点 Python 切句流式）；否则降级原生 mibrain。
+# 端侧 EdgeTTS：ettsc 直连微软拿整段 MP3 → miplayer。成功返回 0，失败返回 1（交由上层兜底）。
+device_tts_play_text() {
+    local text="$1"
+    [ -n "$text" ] || return 1
+    [ -x "$DEVICE_TTS_BIN" ] || { log "[TTS] 端侧 ettsc 不存在: $DEVICE_TTS_BIN"; return 1; }
+
+    rm -f "$DEVICE_TTS_OUT"
+    SSL_CERT_FILE="$DEVICE_TTS_CA" \
+    ETTSC_GEC_VERSION="$DEVICE_TTS_GEC_VERSION" \
+    ETTSC_UA="$DEVICE_TTS_UA" \
+    ETTSC_ORIGIN="$DEVICE_TTS_ORIGIN" \
+        timeout -t "$DEVICE_TTS_TIMEOUT" "$DEVICE_TTS_BIN" "$text" "$DEVICE_TTS_OUT" "$DEVICE_TTS_VOICE" \
+        >/dev/null 2>&1
+
+    if [ -s "$DEVICE_TTS_OUT" ]; then
+        miplayer --file "$DEVICE_TTS_OUT" >/dev/null 2>&1
+        return 0
+    fi
+    log "[TTS] 端侧 EdgeTTS 失败（可能版本过期 403，见 DEVICE_TTS_GEC_VERSION）"
+    return 1
+}
+
+# 整段文本 → TTS。按 TTS_ENGINE 选择端侧 ettsc 或 Mac 微服务；失败统一降级原生 mibrain。
 tts_play_text() {
     local text="$1"
     [ -n "$text" ] || return 1
+
+    if [ "$TTS_ENGINE" = "device" ]; then
+        device_tts_play_text "$text" && return 0
+        [ "$TTS_FALLBACK_NATIVE" = "1" ] && native_tts_speak "$text"
+        return 0
+    fi
 
     if [ "$TTS_FALLBACK_NATIVE" = "1" ] && ! tts_service_online; then
         log "[TTS] 微服务不可用，降级原生 mibrain"

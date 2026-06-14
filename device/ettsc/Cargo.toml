@@ -1,0 +1,24 @@
+[package]
+name = "ettsc"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ettsc"
+path = "src/main.rs"
+
+[dependencies]
+# 纯阻塞实现，不用 tokio：该设备上 tokio 的 epoll reactor 不工作
+tungstenite = { version = "0.21", default-features = false, features = ["handshake"] }
+native-tls = "0.2"
+openssl = { version = "0.10", features = ["vendored"] }
+sha2 = "0.10"
+getrandom = "0.2"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+base64 = "0.22"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
