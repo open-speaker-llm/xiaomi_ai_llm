@@ -120,6 +120,17 @@ TTS_ENGINE="${TTS_ENGINE:-server}"
 TTS_SERVER="${TTS_SERVER:-$SERVER}"
 TTS_FALLBACK_NATIVE="${TTS_FALLBACK_NATIVE:-1}"   # TTS 失败时降级原生 mibrain TTS
 TTS_HEALTH_TIMEOUT="${TTS_HEALTH_TIMEOUT:-2}"
+TTS_NATIVE_WAIT_ENABLED="${TTS_NATIVE_WAIT_ENABLED:-1}"
+TTS_NATIVE_WAIT_MIN_SECONDS="${TTS_NATIVE_WAIT_MIN_SECONDS:-2}"
+TTS_NATIVE_WAIT_MAX_SECONDS="${TTS_NATIVE_WAIT_MAX_SECONDS:-30}"
+TTS_NATIVE_WAIT_BYTES_PER_SECOND="${TTS_NATIVE_WAIT_BYTES_PER_SECOND:-24}"
+TTS_NATIVE_WAIT_EXTRA_SECONDS="${TTS_NATIVE_WAIT_EXTRA_SECONDS:-1}"
+TTS_NATIVE_STATUS_WAIT_ENABLED="${TTS_NATIVE_STATUS_WAIT_ENABLED:-1}"
+TTS_NATIVE_STATUS_START_TIMEOUT_SECONDS="${TTS_NATIVE_STATUS_START_TIMEOUT_SECONDS:-4}"
+TTS_NATIVE_STATUS_MAX_SECONDS="${TTS_NATIVE_STATUS_MAX_SECONDS:-120}"
+TTS_NATIVE_STATUS_IDLE_HITS="${TTS_NATIVE_STATUS_IDLE_HITS:-2}"
+TTS_NATIVE_STATUS_POLL_SECONDS="${TTS_NATIVE_STATUS_POLL_SECONDS:-0.2}"
+TTS_NATIVE_LED_SUPPRESS_INTERVAL_SECONDS="${TTS_NATIVE_LED_SUPPRESS_INTERVAL_SECONDS:-0.3}"
 # 端侧 EdgeTTS（TTS_ENGINE=device）。版本号/UA/Origin 可配，微软抬版本导致 403 时只改这里、不必重编。
 DEVICE_TTS_BIN="${DEVICE_TTS_BIN:-/data/ettsc}"
 DEVICE_TTS_VOICE="${DEVICE_TTS_VOICE:-zh-CN-YunjianNeural}"
@@ -1161,6 +1172,96 @@ native_tts_speak() {
         >/dev/null 2>&1
 }
 
+native_tts_player_status() {
+    ubus -t 1 call mediaplayer player_get_play_status 2>/dev/null \
+        | sed -n 's/.*\\"status\\":[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+        | head -n 1
+}
+
+wait_native_tts_status() {
+    local text="$1"
+    local start_deadline end now status started idle_hits
+
+    [ "$TTS_NATIVE_WAIT_ENABLED" = "1" ] || return 0
+    [ "$TTS_NATIVE_STATUS_WAIT_ENABLED" = "1" ] || return 1
+    [ -n "$text" ] || return 0
+
+    start_deadline=$(( $(date +%s) + TTS_NATIVE_STATUS_START_TIMEOUT_SECONDS ))
+    end=$(( $(date +%s) + TTS_NATIVE_STATUS_MAX_SECONDS ))
+    started=0
+    idle_hits=0
+    log "[TTS] wait native fallback playback by status poll=${TTS_NATIVE_STATUS_POLL_SECONDS}s start_timeout=${TTS_NATIVE_STATUS_START_TIMEOUT_SECONDS}s idle_hits=${TTS_NATIVE_STATUS_IDLE_HITS} max=${TTS_NATIVE_STATUS_MAX_SECONDS}s"
+
+    while true; do
+        now=$(date +%s)
+        status=$(native_tts_player_status)
+        led_native_shut_all
+
+        if [ "$status" = "1" ]; then
+            if [ "$started" != "1" ]; then
+                log "[TTS] native fallback playback started"
+            fi
+            started=1
+            idle_hits=0
+        elif [ "$started" = "1" ]; then
+            idle_hits=$((idle_hits + 1))
+            if [ "$idle_hits" -ge "$TTS_NATIVE_STATUS_IDLE_HITS" ]; then
+                log "[TTS] native fallback playback finished by status"
+                return 0
+            fi
+        elif [ "$now" -ge "$start_deadline" ]; then
+            log "[TTS] native playback status did not enter playing, fallback to estimate"
+            return 1
+        fi
+
+        if [ "$now" -ge "$end" ]; then
+            log "[TTS] native playback status wait timeout after ${TTS_NATIVE_STATUS_MAX_SECONDS}s"
+            return 0
+        fi
+        sleep "$TTS_NATIVE_STATUS_POLL_SECONDS"
+    done
+}
+
+wait_native_tts_estimated() {
+    local text="$1"
+    local bytes seconds end now
+
+    [ "$TTS_NATIVE_WAIT_ENABLED" = "1" ] || return 0
+    [ -n "$text" ] || return 0
+
+    bytes=$(printf '%s' "$text" | wc -c 2>/dev/null)
+    bytes="${bytes:-0}"
+    seconds=$(awk \
+        -v bytes="$bytes" \
+        -v bps="$TTS_NATIVE_WAIT_BYTES_PER_SECOND" \
+        -v extra="$TTS_NATIVE_WAIT_EXTRA_SECONDS" \
+        -v min="$TTS_NATIVE_WAIT_MIN_SECONDS" \
+        -v max="$TTS_NATIVE_WAIT_MAX_SECONDS" \
+        'BEGIN {
+            if (bps <= 0) bps = 11
+            s = int((bytes + bps - 1) / bps) + extra
+            if (s < min) s = min
+            if (s > max) s = max
+            printf "%d", s
+        }')
+    seconds="${seconds:-$TTS_NATIVE_WAIT_MIN_SECONDS}"
+    log "[TTS] wait native fallback playback estimate=${seconds}s bytes=$bytes suppress_native_led=${TTS_NATIVE_LED_SUPPRESS_INTERVAL_SECONDS}s"
+    end=$(( $(date +%s) + seconds ))
+    while true; do
+        now=$(date +%s)
+        [ "$now" -ge "$end" ] && break
+        led_native_shut_all
+        sleep "$TTS_NATIVE_LED_SUPPRESS_INTERVAL_SECONDS"
+    done
+}
+
+wait_native_tts_playback() {
+    local text="$1"
+
+    wait_native_tts_status "$text" && return 0
+    wait_native_tts_estimated "$text"
+}
+
 native_tts_speak_cancellable() {
     local text="$1"
 
@@ -1497,13 +1598,20 @@ tts_play_text() {
 
     if [ "$TTS_ENGINE" = "device" ]; then
         device_tts_play_text "$text" && return 0
-        [ "$TTS_FALLBACK_NATIVE" = "1" ] && native_tts_speak "$text"
+        if [ "$TTS_FALLBACK_NATIVE" = "1" ]; then
+            log "[TTS] 端侧 EdgeTTS 失败，降级原生 mibrain"
+            resume_native_player 1
+            native_tts_speak "$text"
+            wait_native_tts_playback "$text"
+        fi
         return 0
     fi
 
     if [ "$TTS_FALLBACK_NATIVE" = "1" ] && ! tts_service_online; then
         log "[TTS] 微服务不可用，降级原生 mibrain"
+        resume_native_player 1
         native_tts_speak "$text"
+        wait_native_tts_playback "$text"
         return 0
     fi
 
@@ -2108,6 +2216,7 @@ log "Wake event: max_age=${WAKE_EVENT_MAX_AGE}s"
 log "Wake ignore queries: $WAKE_IGNORE_QUERIES"
 log "Native success: domains=$NATIVE_SUCCESS_DOMAINS replay_speak=$NATIVE_REPLAY_SUCCESS_SPEAK replay_delay=${NATIVE_REPLAY_SUCCESS_DELAY}s replay_cancel_on_wake=$NATIVE_REPLAY_CANCEL_ON_WAKE cancel_domains=$NATIVE_REPLAY_CANCEL_DOMAINS grace=${NATIVE_REPLAY_CANCEL_GRACE}s window=${NATIVE_REPLAY_CANCEL_WINDOW}s"
 log "LED feedback: enabled=${LED_FEEDBACK_ENABLED} native_wait=blue_solid llm_accept=green_blink_${LED_LLM_ACCEPT_BLINKS}_then_green_solid llm_followup_wait=green_solid asr_ok=green_blink_${LED_FOLLOWUP_ASR_OK_BLINKS}_then_green_solid error_blinks=${LED_ERROR_BLINKS} blink=${LED_BLINK_ON_SECONDS}/${LED_BLINK_OFF_SECONDS}s chase=${LED_CHASE_DELAY_SECONDS}s solid_refresh=${LED_SOLID_REFRESH_SECONDS}s wake_hold=${LED_WAKE_HOLD_SECONDS}s/${LED_WAKE_HOLD_REFRESH_SECONDS}s playing=green_chase"
+log "TTS fallback: native=${TTS_FALLBACK_NATIVE} health_timeout=${TTS_HEALTH_TIMEOUT}s wait=${TTS_NATIVE_WAIT_ENABLED} status_wait=${TTS_NATIVE_STATUS_WAIT_ENABLED} status_start_timeout=${TTS_NATIVE_STATUS_START_TIMEOUT_SECONDS}s status_max=${TTS_NATIVE_STATUS_MAX_SECONDS}s status_idle_hits=${TTS_NATIVE_STATUS_IDLE_HITS} status_poll=${TTS_NATIVE_STATUS_POLL_SECONDS}s estimate_min=${TTS_NATIVE_WAIT_MIN_SECONDS}s estimate_max=${TTS_NATIVE_WAIT_MAX_SECONDS}s bps=${TTS_NATIVE_WAIT_BYTES_PER_SECOND} extra=${TTS_NATIVE_WAIT_EXTRA_SECONDS}s led_suppress=${TTS_NATIVE_LED_SUPPRESS_INTERVAL_SECONDS}s"
 log "Followup recorder: enabled=${FOLLOWUP_ENABLED} followup_mode=${FOLLOWUP_MODE} record_mode=${FOLLOWUP_RECORD_MODE} asr=${FOLLOWUP_ASR_ENGINE} native_min_bytes=${FOLLOWUP_NATIVE_MIN_QUERY_BYTES} native_poll=${NATIVE_FOLLOWUP_POLL_SECONDS}s/${NATIVE_FOLLOWUP_POLL_INTERVAL}s window=${FOLLOWUP_WINDOW_SECONDS}s capture=${FOLLOWUP_WINDOW_CAPTURE_DEV}/${FOLLOWUP_WINDOW_CAPTURE_FORMAT}/${FOLLOWUP_WINDOW_CAPTURE_RATE}/${FOLLOWUP_WINDOW_CAPTURE_CHANNELS}ch audio_setup=${AUDIO_CAPTURE_SETUP} root=$(root_device) window_gate=peak${FOLLOWUP_WINDOW_MIN_PEAK}/rms${FOLLOWUP_WINDOW_MIN_RMS_THRESHOLD}/active${FOLLOWUP_WINDOW_MIN_ACTIVE_PERMILLE}‰ timeout=${FOLLOWUP_TIMEOUT}s arm_delay=${FOLLOWUP_ARM_DELAY}s arm_poll=${FOLLOWUP_ARM_POLL_SECONDS}s start=$FOLLOWUP_THRESHOLD/rms=$FOLLOWUP_START_RMS_THRESHOLD/active=${FOLLOWUP_START_ACTIVE_PERMILLE}‰ hits=$FOLLOWUP_START_HITS tail=${FOLLOWUP_IGNORE_INITIAL_CHUNKS}s/rms=$FOLLOWUP_TAIL_RMS_THRESHOLD/active=${FOLLOWUP_TAIL_ACTIVE_PERMILLE}‰ end=$FOLLOWUP_END_THRESHOLD/rms=$FOLLOWUP_END_RMS_THRESHOLD/active=${FOLLOWUP_END_ACTIVE_PERMILLE}‰ silence=${FOLLOWUP_SILENCE_LIMIT}s min_raw=$FOLLOWUP_MIN_RAW_BYTES prearm=$FOLLOWUP_PREARM"
 log "Fallback: stop=${STOP_NATIVE_SECONDS}s freeze_mediaplayer=${FREEZE_NATIVE_PLAYER_ON_FALLBACK} prefreeze_on_think=${FREEZE_NATIVE_PLAYER_ON_THINK}"
 log "Native ASR pause during LLM: $PAUSE_NATIVE_ASR_DURING_LLM"
