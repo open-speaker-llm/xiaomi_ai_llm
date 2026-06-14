@@ -12,7 +12,9 @@ CONFIG_FILE="${CONFIG_FILE:-/data/native_first.env}"
 SERVER="${SERVER:-http://192.168.8.150:8080}"
 BACKEND="${BACKEND:-deepseek}"
 START_DELAY="${START_DELAY:-20}"
-SERVER_WAIT_SECONDS="${SERVER_WAIT_SECONDS:-90}"
+# 端侧 TTS（TTS_ENGINE=device）不需要 Mac server，开机不必死等它；
+# START_WITHOUT_SERVER=1 会兜底启动，这里调小只为减少开机等待。server 档想等久点可调大。
+SERVER_WAIT_SECONDS="${SERVER_WAIT_SECONDS:-5}"
 START_WITHOUT_SERVER="${START_WITHOUT_SERVER:-1}"
 
 log() {
