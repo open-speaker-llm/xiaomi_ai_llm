@@ -123,7 +123,6 @@ TTS_HEALTH_TIMEOUT="${TTS_HEALTH_TIMEOUT:-2}"
 # 端侧 EdgeTTS（TTS_ENGINE=device）。版本号/UA/Origin 可配，微软抬版本导致 403 时只改这里、不必重编。
 DEVICE_TTS_BIN="${DEVICE_TTS_BIN:-/data/ettsc}"
 DEVICE_TTS_VOICE="${DEVICE_TTS_VOICE:-zh-CN-YunjianNeural}"
-DEVICE_TTS_CA="${DEVICE_TTS_CA:-/etc/ssl/certs/ca-certificates.crt}"
 DEVICE_TTS_OUT="${DEVICE_TTS_OUT:-/tmp/ettsc_out.mp3}"
 DEVICE_TTS_TIMEOUT="${DEVICE_TTS_TIMEOUT:-30}"
 DEVICE_TTS_GEC_VERSION="${DEVICE_TTS_GEC_VERSION:-1-143.0.3650.75}"
@@ -1476,7 +1475,6 @@ device_tts_play_text() {
     [ -x "$DEVICE_TTS_BIN" ] || { log "[TTS] 端侧 ettsc 不存在: $DEVICE_TTS_BIN"; return 1; }
 
     rm -f "$DEVICE_TTS_OUT"
-    SSL_CERT_FILE="$DEVICE_TTS_CA" \
     ETTSC_GEC_VERSION="$DEVICE_TTS_GEC_VERSION" \
     ETTSC_UA="$DEVICE_TTS_UA" \
     ETTSC_ORIGIN="$DEVICE_TTS_ORIGIN" \
