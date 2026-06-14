@@ -164,6 +164,23 @@ tests/manual_native_first_cases.md        # 真实音箱人工用例
 - **音箱直连 LLM（`LLM_PIPELINE=native`）是当前主线**：LLM 由音箱 shell 直接调用。TTS 可选 `server`（Mac/迷你服务端 EdgeTTS）、`device`（音箱端 `ettsc` 直连 EdgeTTS）或原生 `mibrain` 兜底。`server` 模式（经 Mac 调 LLM）保留作开发联调 / 回退。详见 [docs/concepts/native-first.md](docs/concepts/native-first.md)。
 - 连续追问（LLM 回答后不喊唤醒词直接追问）**未解决**：boot1 上免唤醒开麦的设备端手段（oneshot / event_notify / continuous reopen）经对照实验确认不通，唯一可工作的 ExpectSpeech 归云端控制；boot0 有实验性本地录音方案。详见 [docs/history/followup-exploration.md](docs/history/followup-exploration.md)。
 
+## 与同类项目对比
+
+小爱接入 LLM 大致有三条路线：**云账号**（[mi-gpt](https://github.com/idootop/mi-gpt) / [xiaogpt](https://github.com/yihong0618/xiaogpt)，不碰硬件、用账号当遥控器）、**刷机接管**（[open-xiaoai](https://github.com/idootop/open-xiaoai)，夺麦克风/扬声器）、**本机原生优先**（本项目，音箱本机读小米 NLP 结果、只接管它答不了的）。
+
+| 维度 | **本项目** | open-xiaoai | mi-gpt | xiaogpt |
+|---|---|---|---|---|
+| 接入原理 | 本机 shell 读原生 NLP 结构化结果 | 刷机接管麦克风/扬声器 | 云账号 API 控制 | 云账号轮询对话记录 |
+| 需要 root/刷机 | 拿 root，不全量刷机 | **全量刷机** | 不需要 | 不需要 |
+| 需要常驻电脑 | **不需要** | 需要 Server | 需要 PC/NAS | 需要 PC/Docker |
+| 依赖小米云账号 | **不依赖** | 不依赖 | 依赖 | 依赖 |
+| 支持设备 | 仅 MDZ-25-DA/S12A 老机 | 仅 2 款新机 | 多数机型 | 多数机型 |
+| 路由策略 | **按 NLP domain/action 分流** | 全量接管 | 关键词触发 | 关键词触发 |
+| 连续对话 | boot0 本地录音（实验性） | 真打断 | ✅ | ✅ |
+| 维护状态 | 活跃 | 已停更 | 已停更 | 活跃 |
+
+本项目的取舍：**自治度最高**（不要电脑、不要云账号、不过小米云），代价是**最难装**（拆机接串口）且**只支持一款老机**——定位是给被主流方案抛弃的老音箱续命。完整对比（三种哲学、独有优势、可借鉴方向）见 [docs/concepts/comparison.md](docs/concepts/comparison.md)。
+
 ## 相关项目
 
 本项目在探索过程中参考了这些开源工作，特此致谢：

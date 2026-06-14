@@ -44,6 +44,7 @@ docs/
 | 没响应/串台/音量异常/追问失败 | [runbooks/troubleshooting.md](runbooks/troubleshooting.md) |
 | 理解 native-first 怎么路由 | [concepts/native-first.md](concepts/native-first.md) |
 | 理解 boot0/boot1/system0/system1 | [concepts/boot-and-partitions.md](concepts/boot-and-partitions.md) |
+| 和 open-xiaoai/mi-gpt/xiaogpt 有什么不同 | [concepts/comparison.md](concepts/comparison.md) |
 | 查术语：KWS、VAD、ALSA、rootfs… | [concepts/glossary.md](concepts/glossary.md) |
 | 测试怎么跑 | [../TESTING.md](../TESTING.md) / [../tests/manual_native_first_cases.md](../tests/manual_native_first_cases.md) |
 | 某条路线是否已经试过 | [history/README.md](history/README.md) |
