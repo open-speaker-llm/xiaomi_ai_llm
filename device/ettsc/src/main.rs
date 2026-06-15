@@ -16,6 +16,9 @@ const HOST: &str = "speech.platform.bing.com";
 const DEFAULT_GEC_VERSION: &str = "1-143.0.3650.75";
 const DEFAULT_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0";
 const DEFAULT_ORIGIN: &str = "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold";
+// 输出格式：默认 MP3（兼容老用法）；句级流式连播用 raw PCM（headerless，可直接灌 aplay）。
+// 可用 ETTSC_FORMAT 覆盖，如 raw-24khz-16bit-mono-pcm。
+const DEFAULT_FORMAT: &str = "audio-24khz-48kbitrate-mono-mp3";
 
 fn env_or(key: &str, default: &str) -> String {
     match std::env::var(key) {
@@ -103,8 +106,9 @@ fn main() {
     let date = chrono::Utc::now()
         .format("%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)")
         .to_string();
+    let fmt = env_or("ETTSC_FORMAT", DEFAULT_FORMAT);
     let cfg = format!(
-        "X-Timestamp:{date}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n{{\"context\":{{\"synthesis\":{{\"audio\":{{\"metadataoptions\":{{\"sentenceBoundaryEnabled\":\"false\",\"wordBoundaryEnabled\":\"false\"}},\"outputFormat\":\"audio-24khz-48kbitrate-mono-mp3\"}}}}}}}}"
+        "X-Timestamp:{date}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n{{\"context\":{{\"synthesis\":{{\"audio\":{{\"metadataoptions\":{{\"sentenceBoundaryEnabled\":\"false\",\"wordBoundaryEnabled\":\"false\"}},\"outputFormat\":\"{fmt}\"}}}}}}}}"
     );
     ws.send(Message::Text(cfg)).unwrap();
     let ssml = format!(
@@ -142,9 +146,41 @@ fn main() {
             }
         }
     }
-    std::fs::write(&out, &audio).unwrap();
-    eprintln!("[+] done: {frames} frames, {} bytes -> {out}", audio.len());
-    if audio.is_empty() {
-        std::process::exit(3);
+    // ETTSC_PCM=1：本地把 mp3 解码成裸 PCM(S16LE) 输出，供 aplay 连续播放（句级流式无缝）。
+    // 默认仍输出原始 mp3（兼容 miplayer --file 老用法）。
+    if env_or("ETTSC_PCM", "") == "1" {
+        let pcm = decode_mp3_to_pcm(&audio);
+        std::fs::write(&out, &pcm).unwrap();
+        eprintln!("[+] done: {frames} frames, {} mp3 bytes -> {} pcm bytes -> {out}", audio.len(), pcm.len());
+        if pcm.is_empty() {
+            std::process::exit(3);
+        }
+    } else {
+        std::fs::write(&out, &audio).unwrap();
+        eprintln!("[+] done: {frames} frames, {} bytes -> {out}", audio.len());
+        if audio.is_empty() {
+            std::process::exit(3);
+        }
     }
+}
+
+// mp3 → 裸 PCM(S16LE 交织)。EdgeTTS 输出为单声道 24kHz，故 PCM 也是 24kHz/mono。
+fn decode_mp3_to_pcm(mp3: &[u8]) -> Vec<u8> {
+    let mut dec = minimp3::Decoder::new(mp3);
+    let mut out: Vec<u8> = Vec::new();
+    loop {
+        match dec.next_frame() {
+            Ok(minimp3::Frame { data, .. }) => {
+                for s in data {
+                    out.extend_from_slice(&s.to_le_bytes());
+                }
+            }
+            Err(minimp3::Error::Eof) => break,
+            Err(e) => {
+                eprintln!("[!] mp3 decode err: {e:?}");
+                break;
+            }
+        }
+    }
+    out
 }

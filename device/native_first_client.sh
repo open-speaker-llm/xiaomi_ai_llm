@@ -139,6 +139,11 @@ DEVICE_TTS_TIMEOUT="${DEVICE_TTS_TIMEOUT:-30}"
 DEVICE_TTS_GEC_VERSION="${DEVICE_TTS_GEC_VERSION:-1-143.0.3650.75}"
 DEVICE_TTS_UA="${DEVICE_TTS_UA:-}"            # 留空用 ettsc 内置默认
 DEVICE_TTS_ORIGIN="${DEVICE_TTS_ORIGIN:-}"    # 留空用 ettsc 内置默认
+# 句级流式：1=LLM 边流式输出边按句合成播放（首句即开声，LLM 慢时收益大）；0=整段收完再合成播放。
+DEVICE_TTS_STREAM="${DEVICE_TTS_STREAM:-1}"
+# 流式播放采样率：ettsc(ETTSC_PCM=1) 把 mp3 解成裸 PCM，单个常驻 aplay 连续播，句间无缝。
+# EdgeTTS 输出为 24kHz 单声道，故 24000。
+DEVICE_TTS_PCM_RATE="${DEVICE_TTS_PCM_RATE:-24000}"
 LLM_DIRECT_ANSWER=""
 NATIVE_SUCCESS_DOMAINS="${NATIVE_SUCCESS_DOMAINS:-smartMiot soundboxControl time weather music player alarm timer system volume}"
 NATIVE_REPLAY_SUCCESS_SPEAK="${NATIVE_REPLAY_SUCCESS_SPEAK:-1}"
@@ -852,7 +857,8 @@ extract_first_value() {
     # Input is the raw nlp_result_get output. Values are nested as escaped JSON,
     # for example: domain\\\": \\\"smartMiot\\\".
     local key="$1"
-    grep -o "${key}[^,}]*: [^,}]*" | head -1 | awk -F'\\\\\\"' '{print $3}' | sed 's/\\*$//'
+    # key 后须紧跟转义引号(\\)，否则 query 会被 query_norm/query_receptance 等同前缀长键抢匹配（baike 域）。
+    grep -o "${key}\\\\[^,}]*: [^,}]*" | head -1 | awk -F'\\\\\\"' '{print $3}' | sed 's/\\*$//'
 }
 
 json_escape() {
@@ -1584,6 +1590,7 @@ device_tts_play_text() {
 
     if [ -s "$DEVICE_TTS_OUT" ]; then
         log "[TTS] 端侧 EdgeTTS 出声: $(wc -c < "$DEVICE_TTS_OUT" 2>/dev/null) bytes, voice=$DEVICE_TTS_VOICE"
+        DEVICE_TTS_PLAY_START_MS=$(monotonic_ms)   # 开播瞬间，供上层算首声延迟
         miplayer --file "$DEVICE_TTS_OUT" >/dev/null 2>&1
         return 0
     fi
@@ -1658,15 +1665,35 @@ llm_direct_answer() {
     messages=$(llm_build_messages "$sid" "$user")
     req="{\"model\":\"$LLM_MODEL\",\"messages\":[$messages],\"stream\":true,\"thinking\":{\"type\":\"$LLM_THINKING\"}}"
 
-    answer=$(curl -sS -N -m "$LLM_DIRECT_TIMEOUT" "$LLM_API_BASE/chat/completions" \
+    # 流式读取：记录首个 content 到达时刻（TTFT）+ 逐片累积答案。
+    # 这样能把"卡在首字之前"和"逐字生成慢"区分开（埋点用，不改播放行为：仍整段收完再播）。
+    local t_req ttft_file ans_file
+    t_req=$(monotonic_ms)
+    ttft_file="/tmp/native_first_llm_ttft"
+    ans_file="/tmp/native_first_llm_ans"
+    rm -f "$ttft_file" "$ans_file"
+
+    curl -sS -N -m "$LLM_DIRECT_TIMEOUT" "$LLM_API_BASE/chat/completions" \
         -H "Authorization: Bearer $LLM_API_KEY" \
         -H "Content-Type: application/json" \
         -d "$req" 2>/dev/null \
         | grep '^data:' \
         | sed -n 's/.*"content":"\([^"]*\)".*/\1/p' \
-        | tr -d '\n')
+        | while IFS= read -r piece; do
+            [ -n "$piece" ] || continue
+            [ -f "$ttft_file" ] || monotonic_ms > "$ttft_file"
+            printf '%s' "$piece" >> "$ans_file"
+        done
 
+    answer=$(cat "$ans_file" 2>/dev/null)
     LLM_DIRECT_ANSWER="$answer"
+    LLM_DIRECT_GEN_S=$(elapsed_s "$t_req")
+    if [ -f "$ttft_file" ]; then
+        LLM_DIRECT_TTFT=$(awk -v a="$(cat "$ttft_file")" -v b="$t_req" 'BEGIN { printf "%.2f", (a - b) / 1000 }')
+    else
+        LLM_DIRECT_TTFT=""
+    fi
+    rm -f "$ttft_file" "$ans_file"
     [ -n "$answer" ] || return 1
 
     # 追加到会话历史（存已转义文本，构造请求时直接复用）
@@ -1677,12 +1704,145 @@ llm_direct_answer() {
     return 0
 }
 
+# 后台播放消费者：一个常驻 aplay 读 FIFO，按序号把各句 PCM(NNNN.pcm) 顺序灌进同一条流。
+# 写端常开，aplay 排空时阻塞等待而非 EOF（miplayer 做不到这点），于是句间真正无缝——
+# 对应 Mac 端"ffmpeg 解码 mp3→PCM 连续下发给 aplay"。done 出现且下一句不存在 → 收尾。
+stream_play_worker() {
+    local wd="$1"
+    local fifo="$wd/play.fifo"
+    local idx=1 n ap
+    rm -f "$fifo"
+    mkfifo "$fifo" 2>/dev/null || mknod "$fifo" p 2>/dev/null
+    aplay -r "$DEVICE_TTS_PCM_RATE" -f S16_LE -c 1 "$fifo" >/dev/null 2>&1 &
+    ap=$!
+    exec 8>"$fifo"   # 保持写端常开，避免 aplay 在句间排空时 EOF 退出
+    while :; do
+        n=$(printf "%04d" "$idx")
+        if [ -f "$wd/$n.rdy" ]; then
+            if [ ! -f "$wd/$n.skip" ] && [ -s "$wd/$n.pcm" ]; then
+                [ -f "$wd/first" ] || monotonic_ms > "$wd/first"
+                cat "$wd/$n.pcm" >&8
+            fi
+            idx=$((idx + 1))
+            continue
+        fi
+        [ -f "$wd/done" ] && break
+        sleep 0.05
+    done
+    exec 8>&-        # 关闭写端 → aplay 播完剩余 PCM 后 EOF 退出
+    wait "$ap" 2>/dev/null
+}
+
+# 句级流式（仿 Mac Server StreamingPipeline）：LLM 边流式输出边按 。！？ 切句。
+# 生产者只做"切句→ettsc 合成为 NNNN.mp3→置 NNNN.rdy"，播放交给后台 stream_play_worker，
+# 于是"合成下一句"与"播放当前句"重叠，句间无空档。整段答案存 LLM_DIRECT_ANSWER 供历史/去重。
+# 产出：LLM_DIRECT_TTFT(首字s)/LLM_DIRECT_GEN_S(LLM流时长s)/LLM_STREAM_FIRST_SOUND(首声s)/LLM_STREAM_SEGS(成功句数)
+llm_stream_answer_and_play() {
+    local sid="$1"
+    local user="$2"
+    local t0="$3"
+    local messages req t_req seq n play_pid
+    local wd="/tmp/native_first_stream"
+
+    if [ -z "$LLM_API_KEY" ]; then
+        log "[LLM-NATIVE] 缺少 LLM_API_KEY（在 /data/native_first.env 配 DEEPSEEK_API_KEY）"
+        return 1
+    fi
+    rm -rf "$wd" 2>/dev/null
+    mkdir -p "$wd" "$LLM_HISTORY_DIR"
+
+    messages=$(llm_build_messages "$sid" "$user")
+    req="{\"model\":\"$LLM_MODEL\",\"messages\":[$messages],\"stream\":true,\"thinking\":{\"type\":\"$LLM_THINKING\"}}"
+    t_req=$(monotonic_ms)
+
+    stream_play_worker "$wd" &
+    play_pid=$!
+
+    # 生产者管道：LLM 流 → 抽 content → tee 原始(供历史) → awk 即时切句 → 逐句 ettsc 合成。
+    # awk 首片写 ttft，END 写 genend(=LLM 流结束时刻)；切句规则与服务端一致(。！？，含标点)。
+    seq=0
+    curl -sS -N -m "$LLM_DIRECT_TIMEOUT" "$LLM_API_BASE/chat/completions" \
+        -H "Authorization: Bearer $LLM_API_KEY" \
+        -H "Content-Type: application/json" \
+        -d "$req" 2>/dev/null \
+        | grep '^data:' \
+        | sed -n 's/.*"content":"\([^"]*\)".*/\1/p' \
+        | tee "$wd/raw" \
+        | awk -v wd="$wd" '
+            NR == 1 { getline up < "/proc/uptime"; close("/proc/uptime"); split(up, a, " "); print a[1] > (wd "/ttft"); close(wd "/ttft") }
+            { buf = buf $0
+              do { p = nb(buf); if (p > 0) { s = substr(buf, 1, p); buf = substr(buf, p + 1); gsub(/^[ \t]+|[ \t]+$/, "", s); if (length(s) > 3) { print s; fflush() } } } while (p > 0) }
+            END { getline ue < "/proc/uptime"; close("/proc/uptime"); split(ue, e, " "); print e[1] > (wd "/genend"); close(wd "/genend");
+                  gsub(/^[ \t]+|[ \t]+$/, "", buf); if (length(buf) > 0) { print buf; fflush() } }
+            function nb(t,   x, y, z, m) { x = index(t, "。"); y = index(t, "！"); z = index(t, "？"); m = 0; if (x > 0) m = x; if (y > 0 && (m == 0 || y < m)) m = y; if (z > 0 && (m == 0 || z < m)) m = z; if (m == 0) return 0; return m + 2 }
+        ' \
+        | while IFS= read -r sentence; do
+            [ -n "$sentence" ] || continue
+            seq=$((seq + 1))
+            n=$(printf "%04d" "$seq")
+            rm -f "$wd/$n.pcm"
+            ETTSC_GEC_VERSION="$DEVICE_TTS_GEC_VERSION" \
+            ETTSC_UA="$DEVICE_TTS_UA" \
+            ETTSC_ORIGIN="$DEVICE_TTS_ORIGIN" \
+            ETTSC_PCM=1 \
+                timeout -t "$DEVICE_TTS_TIMEOUT" "$DEVICE_TTS_BIN" "$sentence" "$wd/$n.pcm" "$DEVICE_TTS_VOICE" \
+                >/dev/null 2>&1
+            if [ -s "$wd/$n.pcm" ]; then
+                echo x >> "$wd/segs"
+                log "[TTS] 端侧流式合成 $n($(wc -c < "$wd/$n.pcm" 2>/dev/null)B pcm): $sentence"
+            else
+                : > "$wd/$n.skip"
+                log "[TTS] 端侧流式合成失败 $n，跳过: $sentence"
+            fi
+            : > "$wd/$n.rdy"
+        done
+
+    : > "$wd/done"
+    wait "$play_pid" 2>/dev/null
+
+    LLM_DIRECT_ANSWER=$(tr -d '\n' < "$wd/raw" 2>/dev/null)
+    if [ -s "$wd/genend" ]; then
+        LLM_DIRECT_GEN_S=$(awk -v u="$(cat "$wd/genend")" -v r="$t_req" 'BEGIN { printf "%.2f", u - r / 1000 }')
+    else
+        LLM_DIRECT_GEN_S=$(elapsed_s "$t_req")
+    fi
+    LLM_STREAM_SEGS=$(wc -l < "$wd/segs" 2>/dev/null | tr -d ' ')
+    LLM_STREAM_SEGS="${LLM_STREAM_SEGS:-0}"
+    if [ -s "$wd/ttft" ]; then
+        LLM_DIRECT_TTFT=$(awk -v u="$(cat "$wd/ttft")" -v r="$t_req" 'BEGIN { printf "%.2f", u - r / 1000 }')
+    else
+        LLM_DIRECT_TTFT=""
+    fi
+    if [ -s "$wd/first" ]; then
+        LLM_STREAM_FIRST_SOUND=$(awk -v a="$(cat "$wd/first")" -v b="$t0" 'BEGIN { printf "%.2f", (a - b) / 1000 }')
+    else
+        LLM_STREAM_FIRST_SOUND=""
+    fi
+
+    [ -n "$LLM_DIRECT_ANSWER" ] || return 1
+    log "[LLM-NATIVE] answer(llm_ttft=${LLM_DIRECT_TTFT:-?}s llm_gen=${LLM_DIRECT_GEN_S}s segs=${LLM_STREAM_SEGS}): $LLM_DIRECT_ANSWER"
+
+    # 一句都没成功播放（全合成失败）→ 降级原生整段，避免静默
+    if [ "$LLM_STREAM_SEGS" = "0" ] && [ "$TTS_FALLBACK_NATIVE" = "1" ]; then
+        log "[TTS] 流式全部失败，降级原生 mibrain 整段"
+        resume_native_player 1
+        native_tts_speak "$LLM_DIRECT_ANSWER"
+        wait_native_tts_playback "$LLM_DIRECT_ANSWER"
+    fi
+
+    {
+        printf 'user\t%s\n' "$(printf '%s' "$user" | json_escape)"
+        printf 'assistant\t%s\n' "$(printf '%s' "$LLM_DIRECT_ANSWER" | json_escape)"
+    } >> "$LLM_HISTORY_DIR/$sid"
+    return 0
+}
+
 # native 链路主流程：音箱直连 LLM → 整段发 TTS（微服务/原生兜底）→ 播放
 send_text_native() {
     local session_id="$1"
     local text="$2"
     local cleanup_mode="${3:-now}"
-    local t0 t1 t2
+    local t0 t2 first_sound
 
     if [ -z "$text" ]; then
         log "[LLM-NATIVE] 无 query，跳过"
@@ -1700,7 +1860,35 @@ send_text_native() {
     set_busy "llm_playing"
     apply_llm_master_volume
     freeze_native_player
-    t0=$(date +%s)
+    t0=$(monotonic_ms)
+    DEVICE_TTS_PLAY_START_MS=""   # device_tts_play_text 会在开播瞬间写入
+
+    # 句级流式：仅端侧 EdgeTTS 且开关打开时启用（边生成边按句播，降首声延迟）。
+    if [ "$TTS_ENGINE" = "device" ] && [ "$DEVICE_TTS_STREAM" = "1" ]; then
+        led_feedback_llm_playing
+        if [ "$cleanup_mode" = "defer" ]; then
+            start_followup_vad_prearm
+        fi
+        if ! llm_stream_answer_and_play "$session_id" "$text" "$t0"; then
+            log "[LLM-NATIVE] 流式空回答/调用失败，结束"
+            led_feedback_error
+            sleep 1
+            finish_llm_playback
+            return 1
+        fi
+        t2=$(elapsed_s "$t0")
+        if [ "$cleanup_mode" = "defer" ]; then
+            arm_followup_vad
+        fi
+        log "[LLM-NATIVE] streamed in ${t2}s (首声=${LLM_STREAM_FIRST_SOUND:-?}s llm_ttft=${LLM_DIRECT_TTFT:-?}s llm_gen=${LLM_DIRECT_GEN_S:-?}s segs=${LLM_STREAM_SEGS:-0})"
+        if [ "$cleanup_mode" = "defer" ]; then
+            log "[LLM-NATIVE] playback done, defer cleanup for followup"
+            set_state "FOLLOWUP_WINDOW"
+        else
+            finish_llm_playback
+        fi
+        return 0
+    fi
 
     if ! llm_direct_answer "$session_id" "$text"; then
         log "[LLM-NATIVE] 空回答/调用失败，结束"
@@ -1709,19 +1897,23 @@ send_text_native() {
         finish_llm_playback
         return 1
     fi
-    t1=$(date +%s)
-    log "[LLM-NATIVE] answer(${t1}-${t0}=$((t1 - t0))s): $LLM_DIRECT_ANSWER"
+    log "[LLM-NATIVE] answer(llm_ttft=${LLM_DIRECT_TTFT:-?}s llm_gen=${LLM_DIRECT_GEN_S:-?}s): $LLM_DIRECT_ANSWER"
 
     led_feedback_llm_playing
     if [ "$cleanup_mode" = "defer" ]; then
         start_followup_vad_prearm
     fi
     tts_play_text "$LLM_DIRECT_ANSWER"
-    t2=$(date +%s)
+    t2=$(elapsed_s "$t0")
     if [ "$cleanup_mode" = "defer" ]; then
         arm_followup_vad
     fi
-    log "[LLM-NATIVE] played in $((t2 - t0))s (llm=$((t1 - t0))s)"
+    first_sound="?"
+    if [ -n "$DEVICE_TTS_PLAY_START_MS" ]; then
+        first_sound=$(awk -v a="$DEVICE_TTS_PLAY_START_MS" -v b="$t0" 'BEGIN { printf "%.2f", (a - b) / 1000 }')
+    fi
+    # 首声=从触发LLM到音箱开口（=llm_gen+tts合成）；llm_ttft=首字延迟，能看出是否卡在首字前
+    log "[LLM-NATIVE] played in ${t2}s (首声=${first_sound}s llm_ttft=${LLM_DIRECT_TTFT:-?}s llm_gen=${LLM_DIRECT_GEN_S:-?}s)"
     if [ "$cleanup_mode" = "defer" ]; then
         log "[LLM-NATIVE] playback done, defer cleanup for followup"
         set_state "FOLLOWUP_WINDOW"

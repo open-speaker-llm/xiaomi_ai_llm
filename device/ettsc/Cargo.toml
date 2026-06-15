@@ -15,6 +15,8 @@ sha2 = "0.10"
 getrandom = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 base64 = "0.22"
+# 端侧 mp3→PCM 解码（EdgeTTS 端点只给 mp3，设备无 ffmpeg）。ETTSC_PCM=1 时输出裸 PCM 供 aplay 连播。
+minimp3 = "0.5"
 
 [profile.release]
 opt-level = "z"
