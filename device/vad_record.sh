@@ -177,7 +177,102 @@ if [ -n "$ARM_FILE" ]; then
     log "[VAD] 播放结束，开始录音检测"
 fi
 
+if [ "$MODE" = "stream" ]; then
+    # 连续后台录音(无块间空档) + 轮询文件尾部 RMS：等你开口才算起、检测到说完静默就停，
+    # 并有最长上限。解决 window 盲录满 8s 要傻等、且最长只 8s 的问题。
+    POLL_CS=30                                    # 轮询 0.3s（厘秒）
+    TAIL_BYTES=12800                              # 尾部 ~0.4s @16k/16bit
+    sil_to=$(( SILENCE_LIMIT * 100 / POLL_CS ))   # 说完静默（迭代数）
+    max_to=$(( MAX_DURATION * 100 / POLL_CS ))    # 最长语音（迭代数）
+    # 预热：跳过录音启动瞬间的 ALSA 冷启动爆音 + TTS 残响，期间只录音不判起。
+    warmup_it=$(( IGNORE_INITIAL_CHUNKS * 100 / POLL_CS ))
+    [ "$warmup_it" -lt 4 ] && warmup_it=4         # 至少 ~1.2s
+    onset_to=$(( warmup_it + TIMEOUT * 100 / POLL_CS ))  # 等开口超时（预热之后再给 TIMEOUT 秒）
+    hard=$(( TIMEOUT + MAX_DURATION + 4 ))        # arecord 硬上限（兜底）
+    cap="$TMP_DIR/cap.wav"
+    log "[VAD] 流式录音 dev=$WINDOW_CAPTURE_DEV 预热=$((warmup_it*POLL_CS/100))s 等开口=${TIMEOUT}s 最长=${MAX_DURATION}s start_rms=$START_RMS_THRESHOLD end_rms=$END_RMS_THRESHOLD 静默=${SILENCE_LIMIT}s"
+    arecord -D "$WINDOW_CAPTURE_DEV" -f S16_LE -r "$WINDOW_CAPTURE_RATE" -c 1 -d "$hard" "$cap" 2>/dev/null &
+    AREC_PID=$!
+    it=0; sil=0; onset_it=0; started=0; onset_hits=0
+    while kill -0 "$AREC_PID" 2>/dev/null; do
+        sleep 0.3
+        it=$((it + 1))
+        [ -f "$cap" ] || continue
+        rms=$(tail -c "$TAIL_BYTES" "$cap" 2>/dev/null | hexdump -v -e '1/2 "%d\n"' 2>/dev/null \
+            | awk '{ v=$1; if (v<0) v=-v; s+=v*v; n++ } END { print (n>0)? int(sqrt(s/n)) : 0 }')
+        rms="${rms:-0}"
+        if [ "$started" -eq 0 ]; then
+            if [ "$it" -gt "$warmup_it" ] && [ "$rms" -ge "$START_RMS_THRESHOLD" ]; then
+                onset_hits=$((onset_hits + 1))                # 要求连续 2 次，滤掉单次尖峰/爆音
+                if [ "$onset_hits" -ge 2 ]; then
+                    started=1; onset_it=$it
+                    log "[VAD] 检测到语音开始 rms=$rms"
+                fi
+            else
+                onset_hits=0
+                if [ "$it" -ge "$onset_to" ]; then
+                    log "[VAD] ${TIMEOUT}s 无语音，超时退出"
+                    kill "$AREC_PID" 2>/dev/null; wait "$AREC_PID" 2>/dev/null
+                    rm -rf "$TMP_DIR"; rm -f "$FINAL_WAV"; exit 124
+                fi
+            fi
+        else
+            if [ "$rms" -lt "$END_RMS_THRESHOLD" ]; then
+                sil=$((sil + 1))
+                if [ "$sil" -ge "$sil_to" ]; then
+                    log "[VAD] 说完(静默${SILENCE_LIMIT}s)，停止录音 rms=$rms"
+                    break
+                fi
+            else
+                sil=0
+            fi
+            if [ $((it - onset_it)) -ge "$max_to" ]; then
+                log "[VAD] 达最长 ${MAX_DURATION}s，停止录音"
+                break
+            fi
+        fi
+    done
+    kill "$AREC_PID" 2>/dev/null; wait "$AREC_PID" 2>/dev/null
+    if [ ! -f "$cap" ]; then
+        log "[VAD] 流式录音失败"; rm -rf "$TMP_DIR"; rm -f "$FINAL_WAV"; exit 1
+    fi
+    dd if="$cap" bs=44 skip=1 2>/dev/null > "$RAW_PCM"
+    data_bytes=$(wc -c < "$RAW_PCM" 2>/dev/null); data_bytes="${data_bytes:-0}"
+    if [ "$data_bytes" -lt "$MIN_RAW_BYTES" ]; then
+        log "[VAD] 流式录音过短 ${data_bytes}B，退出"
+        rm -rf "$TMP_DIR"; rm -f "$FINAL_WAV"; exit 124
+    fi
+    write_wav_header "$FINAL_WAV" "$data_bytes"
+    cat "$RAW_PCM" >> "$FINAL_WAV"
+    rm -rf "$TMP_DIR"
+    log "[VAD] 录音完成: $FINAL_WAV ($(wc -c < "$FINAL_WAV") bytes)"
+    exit 0
+fi
+
 if [ "$MODE" = "window" ]; then
+    # S32 采集 + micnorm 归一化：解决安静追问被 S16 直采砍到 ~8bit、云端识别不了的问题。
+    # 仅在 micnorm 可用且目标为 S16/1ch（追问场景）时启用；否则回退老 S16 直采。
+    MICNORM="${MICNORM_BIN:-/data/micnorm}"
+    if [ -x "$MICNORM" ] && [ "$WINDOW_CAPTURE_FORMAT" = "S16_LE" ] && [ "$WINDOW_CAPTURE_CHANNELS" = "1" ]; then
+        cap="$TMP_DIR/cap_s32.wav"
+        log "[VAD] 固定窗口录音(S32+归一化) ${TIMEOUT}s dev=$WINDOW_CAPTURE_DEV rate=$WINDOW_CAPTURE_RATE..."
+        arecord -D "$WINDOW_CAPTURE_DEV" -f S32_LE -r "$WINDOW_CAPTURE_RATE" -c 1 -d "$TIMEOUT" "$cap" 2>/dev/null
+        if [ ! -f "$cap" ] || [ "$(wc -c < "$cap" 2>/dev/null)" -lt 1000 ]; then
+            log "[VAD] 录音失败"; rm -rf "$TMP_DIR"; exit 1
+        fi
+        "$MICNORM" "$cap" "$FINAL_WAV" "${MICNORM_TARGET_PEAK:-18000}" "${MICNORM_MIN_PEAK:-1200000}" "${MICNORM_MAX_BOOST:-1}" 2>&1
+        ret=$?
+        rm -rf "$TMP_DIR"
+        if [ "$ret" = "124" ]; then
+            log "[VAD] 窗口无有效语音(micnorm)，超时退出"; rm -f "$FINAL_WAV"; exit 124
+        fi
+        if [ "$ret" != "0" ] || [ ! -s "$FINAL_WAV" ]; then
+            log "[VAD] micnorm 失败 ret=$ret，本轮放弃"; rm -f "$FINAL_WAV"; exit 1
+        fi
+        log "[VAD] 录音完成: $FINAL_WAV ($(wc -c < "$FINAL_WAV") bytes)"
+        exit 0
+    fi
+
     log "[VAD] 固定窗口录音 ${TIMEOUT}s dev=$WINDOW_CAPTURE_DEV format=$WINDOW_CAPTURE_FORMAT rate=$WINDOW_CAPTURE_RATE channels=$WINDOW_CAPTURE_CHANNELS..."
     arecord -D "$WINDOW_CAPTURE_DEV" \
         -f "$WINDOW_CAPTURE_FORMAT" \

@@ -149,7 +149,9 @@ fn main() {
     // ETTSC_PCM=1：本地把 mp3 解码成裸 PCM(S16LE) 输出，供 aplay 连续播放（句级流式无缝）。
     // 默认仍输出原始 mp3（兼容 miplayer --file 老用法）。
     if env_or("ETTSC_PCM", "") == "1" {
-        let pcm = decode_mp3_to_pcm(&audio);
+        // aplay 经 Master 衰减后比 miplayer 偏小，用 ETTSC_GAIN 数字增益追平（默认 1.0 不变）。
+        let gain: f32 = env_or("ETTSC_GAIN", "1.0").parse().unwrap_or(1.0);
+        let pcm = decode_mp3_to_pcm(&audio, gain);
         std::fs::write(&out, &pcm).unwrap();
         eprintln!("[+] done: {frames} frames, {} mp3 bytes -> {} pcm bytes -> {out}", audio.len(), pcm.len());
         if pcm.is_empty() {
@@ -165,14 +167,26 @@ fn main() {
 }
 
 // mp3 → 裸 PCM(S16LE 交织)。EdgeTTS 输出为单声道 24kHz，故 PCM 也是 24kHz/mono。
-fn decode_mp3_to_pcm(mp3: &[u8]) -> Vec<u8> {
+// gain：数字增益（>1 放大），超出 i16 范围则削顶（clamp），避免溢出。
+fn decode_mp3_to_pcm(mp3: &[u8], gain: f32) -> Vec<u8> {
     let mut dec = minimp3::Decoder::new(mp3);
     let mut out: Vec<u8> = Vec::new();
+    let apply = (gain - 1.0).abs() > 0.001;
+    let mut peak: i32 = 0;
     loop {
         match dec.next_frame() {
             Ok(minimp3::Frame { data, .. }) => {
                 for s in data {
-                    out.extend_from_slice(&s.to_le_bytes());
+                    let a = (s as i32).abs();
+                    if a > peak {
+                        peak = a;
+                    }
+                    let v = if apply {
+                        (s as f32 * gain).round().clamp(-32768.0, 32767.0) as i16
+                    } else {
+                        s
+                    };
+                    out.extend_from_slice(&v.to_le_bytes());
                 }
             }
             Err(minimp3::Error::Eof) => break,
@@ -182,5 +196,7 @@ fn decode_mp3_to_pcm(mp3: &[u8]) -> Vec<u8> {
             }
         }
     }
+    let headroom = if peak > 0 { 32767.0 / peak as f32 } else { 0.0 };
+    eprintln!("[*] pcm peak={peak}/32767 ({:.0}%), 无削顶最大增益≈{headroom:.2}x", peak as f32 / 32767.0 * 100.0);
     out
 }
