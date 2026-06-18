@@ -38,3 +38,8 @@ asset/*.safetensors
 htmlcov/
 dist/
 build/
+
+# 本地工具/技能安装产物（HyperFrames 等，经 npx skills add 装入，不入库）
+.agents/
+.claude/
+skills-lock.json
