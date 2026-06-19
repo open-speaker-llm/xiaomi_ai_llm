@@ -2,6 +2,8 @@
 
 > Bring your own LLM to a Xiaomi AI Speaker — keep "小爱同学" for what it's good at, route everything else to DeepSeek / MiniMax / Claude. Documentation is in Chinese.
 
+▶️ [B 站视频演示：让小米 AI 音箱接上现代大模型](https://www.bilibili.com/video/BV1Vzja69ELB/)
+
 <img src="docs/assets/xiaomi-ai-speaker-mdz-25-da.jpg" alt="小米 AI 音箱 MDZ-25-DA 实物照片" width="420">
 
 让一台 2019 年的小米 AI 音箱（MDZ-25-DA / S12A）接上现代大模型：
