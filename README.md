@@ -100,6 +100,7 @@
 | 手里有音箱，想从零打通 | [docs/getting-started/bringup.md](docs/getting-started/bringup.md) —— 串口 → SSH → 部署 → 第一次 LLM 响应的完整路线图 |
 | SSH 已可用，想快速跑起来 | [docs/getting-started/quickstart.md](docs/getting-started/quickstart.md) |
 | 想先理解原理再动手 | [docs/concepts/native-first.md](docs/concepts/native-first.md) + [docs/concepts/boot-and-partitions.md](docs/concepts/boot-and-partitions.md) |
+| SSH 突然失联 / 控制自动升级 | [双系统 SSH 与受控升级](docs/runbooks/owner-maintenance.md) / [2026-09-05 恢复实测](docs/history/2026-09-05-ssh-ota-recovery.md) |
 | 日常操作 / 出了问题 | [docs/runbooks/operations.md](docs/runbooks/operations.md) / [docs/runbooks/troubleshooting.md](docs/runbooks/troubleshooting.md) |
 | 想看这一切是怎么一步步摸索出来的 | [docs/history/journey.md](docs/history/journey.md) —— 从接串口到 native-first 的完整探索历程 |
 

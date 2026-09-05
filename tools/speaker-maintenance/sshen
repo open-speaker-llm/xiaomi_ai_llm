@@ -1,0 +1,14 @@
+#!/bin/sh /etc/rc.common
+START=45
+
+start() {
+    # Use the owner's existing keys, never provision vendor/default keys.
+    if [ ! -s /data/dropbear/authorized_keys ]; then
+        logger -t owner-ssh 'Missing owner authorized_keys; refusing to enable SSH'
+        return 1
+    fi
+    chmod 700 /data/dropbear || return 1
+    chmod 600 /data/dropbear/authorized_keys || return 1
+    mount --bind /data/dropbear/authorized_keys /etc/dropbear/authorized_keys || return 1
+    echo 1 > /tmp/ssh_en
+}

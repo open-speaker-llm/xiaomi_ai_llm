@@ -40,6 +40,8 @@ docs/
 | 日常启动/停止/看日志/切 boot | [runbooks/operations.md](runbooks/operations.md) |
 | boot0 打通 SSH（串口/failsafe） | [runbooks/boot0-ssh.md](runbooks/boot0-ssh.md) |
 | boot1 打通 SSH（镜像注入） | [runbooks/boot1-ssh.md](runbooks/boot1-ssh.md) |
+| 保持双系统 SSH、关闭原生 OTA、手动升级 | [runbooks/owner-maintenance.md](runbooks/owner-maintenance.md) |
+| 查看 2026-09-05 SSH 恢复与双系统验证结果 | [history/2026-09-05-ssh-ota-recovery.md](history/2026-09-05-ssh-ota-recovery.md) |
 | 断电重启后自动运行 | [runbooks/autostart.md](runbooks/autostart.md) |
 | 没响应/串台/音量异常/追问失败 | [runbooks/troubleshooting.md](runbooks/troubleshooting.md) |
 | 理解 native-first 怎么路由 | [concepts/native-first.md](concepts/native-first.md) |

@@ -9,6 +9,8 @@
 - [journey.md](journey.md) —— **完整探索叙事**：从拆机接串口、获取 root、squashfs 注入、KWS 弯路，到 native-first 成型、boot1 兼容、追问探索。想理解"为什么是现在这样"，读它。
 - [followup-exploration.md](followup-exploration.md) —— 连续追问的专题记录：本地录音 vs 原生 reopen，试过哪些方向、为什么没打通。
 
+- [2026-09-05-ssh-ota-recovery.md](2026-09-05-ssh-ota-recovery.md) —— 实机 boot1 SSH 恢复、两套系统原生 OTA 拦截与重启验证；最终 boot0 唤醒和回复由用户确认正常。
+
 ## 2. 归档快照
 
 文档重构前的完整 Markdown 原文在：
