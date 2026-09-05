@@ -122,6 +122,10 @@ vi /data/native_first.env
 
 ## 5. boot 分区切换
 
+2026-09-05 本项目实机已验证两套系统公钥 SSH 与原生 OTA 拦截，默认回到 boot0，用户确认唤醒和回复正常。其他设备或后来刷入的镜像需单独核验。维护策略和验证命令见 [双系统 SSH 与受控升级](owner-maintenance.md)。
+
+切换前确认目标系统已具备 SSH；SSH 可用不代表助手已配置自启动。本次未向 system1 额外添加 `/data/init.sh` 启动入口。
+
 查看当前启动分区：
 
 ```sh
