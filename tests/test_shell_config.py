@@ -158,7 +158,6 @@ start_followup_vad_prearm
             "LLM_MASTER_CURRENT_SCALE": "100",
             "LLM_MASTER_MAX": "160",
             "LLM_PIPELINE": "native",
-            "LLM_MODEL": "deepseek-v4-flash",
             "LLM_THINKING": "disabled",
             "TTS_FALLBACK_NATIVE": "1",
             "TTS_NATIVE_WAIT_ENABLED": "1",

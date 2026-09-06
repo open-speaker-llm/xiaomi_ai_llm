@@ -14,12 +14,13 @@ class MiniMaxClient:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "MiniMax-Text-01",
-        base_url: str = "https://api.minimax.chat/v1",
+        model: str = "MiniMax-M2.7",
+        base_url: str = "https://api.minimaxi.com/v1",
         max_tokens: int = 1024,
         temperature: float = 0.7,
         timeout: float = 45.0,
         max_retries: int = 1,
+        reasoning_effort: str = "low",
     ):
         self.api_key = api_key or os.environ.get("MINIMAX_API_KEY")
         if not self.api_key:
@@ -36,6 +37,16 @@ class MiniMaxClient:
         self.temperature = temperature
         self.timeout = timeout
         self.max_retries = max_retries
+        self.request_options = {}
+        if self.model == "kimi-k2.6":
+            self.temperature = 0.6
+            self.request_options = {"extra_body": {"thinking": {"type": "disabled"}}}
+        elif self.model.startswith("MiniMax-"):
+            self.request_options = {"extra_body": {"reasoning_split": True}}
+        elif self.model.lower() == "glm-5.3-flash":
+            self.request_options = {"extra_body": {
+                "thinking": {"type": "enabled"}, "reasoning_effort": reasoning_effort,
+            }}
 
     async def chat(
         self,
@@ -66,6 +77,7 @@ class MiniMaxClient:
             max_tokens=self.max_tokens,
             temperature=self.temperature,
             messages=messages,
+            **self.request_options,
         )
 
         return response.choices[0].message.content
@@ -104,10 +116,11 @@ class MiniMaxClient:
             temperature=self.temperature,
             messages=messages,
             stream=True,
+            **self.request_options,
         )
 
         async for chunk in stream:
-            if chunk.choices[0].delta.content:
+            if chunk.choices and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
 
     async def list_models(self) -> list:

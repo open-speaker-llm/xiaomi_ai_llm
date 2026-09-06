@@ -147,6 +147,10 @@ def is_likely_assistant_echo(text: str, session_id: str) -> tuple[bool, str]:
 
 def llm_display_name(client) -> str:
     if isinstance(client, MiniMaxClient):
+        if client is llm_clients.get("kimi"):
+            return f"kimi ({client.model})"
+        if client is llm_clients.get("glm"):
+            return f"glm ({client.model})"
         if client is llm_clients.get("deepseek"):
             return f"deepseek ({client.model})"
         return f"minimax ({client.model})"
@@ -162,7 +166,7 @@ def get_llm_client(backend: str = "default"):
         client = llm_clients.get(backend)
         if client:
             return client
-        if backend not in ("minimax", "deepseek", "claude", "openai"):
+        if backend not in ("minimax", "glm", "kimi", "deepseek", "claude", "openai"):
             print(f"WARNING: Unknown backend '{backend}', using default LLM")
         else:
             print(f"WARNING: Backend '{backend}' not configured, using default LLM")
@@ -213,7 +217,7 @@ async def lifespan(app: FastAPI):
         llm_clients["minimax"] = MiniMaxClient(
             api_key=config["llm"]["minimax"]["api_key"],
             model=config["llm"]["minimax"]["model"],
-            base_url=config["llm"]["minimax"].get("base_url", "https://api.minimax.chat/v1"),
+            base_url=config["llm"]["minimax"].get("base_url", "https://api.minimaxi.com/v1"),
             max_tokens=config["llm"]["minimax"]["max_tokens"],
             temperature=config["llm"]["minimax"]["temperature"],
             timeout=config["llm"]["minimax"].get("timeout", 45.0),
@@ -231,6 +235,31 @@ async def lifespan(app: FastAPI):
             max_retries=config["llm"]["deepseek"].get("max_retries", 1),
         )
         print(f"DeepSeek client initialized with model: {config['llm']['deepseek']['model']}")
+    if config["llm"].get("glm", {}).get("api_key"):
+        glm_config = config["llm"]["glm"]
+        llm_clients["glm"] = MiniMaxClient(
+            api_key=glm_config["api_key"],
+            model=glm_config.get("model", "glm-5.3-flash"),
+            base_url=glm_config.get("base_url", "https://open.bigmodel.cn/api/paas/v4"),
+            max_tokens=glm_config.get("max_tokens", 4096),
+            temperature=glm_config.get("temperature", 0.7),
+            timeout=glm_config.get("timeout", 45.0),
+            max_retries=glm_config.get("max_retries", 1),
+            reasoning_effort=glm_config.get("reasoning_effort", "low"),
+        )
+        print(f"GLM client initialized with model: {llm_clients['glm'].model}")
+    if config["llm"].get("kimi", {}).get("api_key"):
+        kimi_config = config["llm"]["kimi"]
+        llm_clients["kimi"] = MiniMaxClient(
+            api_key=kimi_config["api_key"],
+            model=kimi_config.get("model", "kimi-k2.6"),
+            base_url=kimi_config.get("base_url", "https://api.moonshot.cn/v1"),
+            max_tokens=kimi_config.get("max_tokens", 1024),
+            temperature=kimi_config.get("temperature", 0.6),
+            timeout=kimi_config.get("timeout", 45.0),
+            max_retries=kimi_config.get("max_retries", 1),
+        )
+        print(f"Kimi client initialized with model: {llm_clients['kimi'].model}")
     if config["llm"]["claude"]["api_key"]:
         llm_clients["claude"] = ClaudeClient(
             api_key=config["llm"]["claude"]["api_key"],
@@ -248,12 +277,10 @@ async def lifespan(app: FastAPI):
         )
         print(f"OpenAI client initialized with model: {config['llm']['openai']['model']}")
 
-    for name in ("minimax", "deepseek", "claude", "openai"):
-        if name in llm_clients:
-            llm_client = llm_clients[name]
-            break
-    else:
-        print("WARNING: No LLM API key configured")
+    default_backend = config["llm"].get("default_backend", "deepseek")
+    llm_client = llm_clients.get(default_backend)
+    if llm_client is None:
+        print(f"WARNING: Default LLM backend '{default_backend}' is not configured")
 
     # 初始化 ASR
     asr_provider = config["asr"]["provider"]

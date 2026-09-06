@@ -117,10 +117,25 @@ DIRECT_LLM_QUERY_PATTERNS="${DIRECT_LLM_QUERY_PATTERNS:-DEEPSEEK|DeepSeek|deepse
 # LLM_PIPELINE=native: 音箱直连 LLM 拿文本 → 整段发 TTS 微服务（端点切句）/原生兜底（默认，主线）
 # LLM_PIPELINE=server: 经 Mac /stream/text_chat（Mac 调 LLM+TTS，辅助/回退）
 LLM_PIPELINE="${LLM_PIPELINE:-native}"
-LLM_API_BASE="${LLM_API_BASE:-https://api.deepseek.com}"
-LLM_API_KEY="${LLM_API_KEY:-${DEEPSEEK_API_KEY}}"
-LLM_MODEL="${LLM_MODEL:-deepseek-v4-flash}"
+if [ "$BACKEND" = "minimax" ]; then
+    LLM_API_BASE="${LLM_API_BASE:-https://api.minimaxi.com/v1}"
+    LLM_API_KEY="${LLM_API_KEY:-${MINIMAX_API_KEY}}"
+    LLM_MODEL="${LLM_MODEL:-MiniMax-M2.7}"
+elif [ "$BACKEND" = "glm" ]; then
+    LLM_API_BASE="${LLM_API_BASE:-https://open.bigmodel.cn/api/paas/v4}"
+    LLM_API_KEY="${LLM_API_KEY:-${GLM_API_KEY}}"
+    LLM_MODEL="${LLM_MODEL:-glm-5.3-flash}"
+elif [ "$BACKEND" = "kimi" ]; then
+    LLM_API_BASE="${LLM_API_BASE:-https://api.moonshot.cn/v1}"
+    LLM_API_KEY="${LLM_API_KEY:-${KIMI_API_KEY}}"
+    LLM_MODEL="${LLM_MODEL:-kimi-k2.6}"
+else
+    LLM_API_BASE="${LLM_API_BASE:-https://api.deepseek.com}"
+    LLM_API_KEY="${LLM_API_KEY:-${DEEPSEEK_API_KEY}}"
+    LLM_MODEL="${LLM_MODEL:-deepseek-v4-flash}"
+fi
 LLM_THINKING="${LLM_THINKING:-disabled}"          # disabled=关思考(快，~2s首句); enabled=开思考(深，~3s+)
+LLM_REASONING_EFFORT="${LLM_REASONING_EFFORT:-low}" # GLM-5.3-Flash 始终思考，支持 low/high/max
 LLM_DIRECT_TIMEOUT="${LLM_DIRECT_TIMEOUT:-40}"
 LLM_HISTORY_TURNS="${LLM_HISTORY_TURNS:-6}"
 LLM_HISTORY_DIR="${LLM_HISTORY_DIR:-/tmp/native_first_llm_hist}"
@@ -1806,19 +1821,54 @@ llm_build_messages() {
     printf ',{"role":"user","content":"%s"}' "$(printf '%s' "$user" | json_escape)"
 }
 
-# 直连 LLM 流式取回答全文（关思考、只取 content）。结果存 LLM_DIRECT_ANSWER。
+# MiniMax M2.x 不能关闭思考；分离思考字段，只将正式回答送往 TTS。
+llm_build_request() {
+    local messages="$1"
+    case "$LLM_MODEL" in
+        MiniMax-*) printf '{"model":"%s","messages":[%s],"stream":true,"reasoning_split":true}' "$LLM_MODEL" "$messages" ;;
+        kimi-k2.6) printf '{"model":"%s","messages":[%s],"stream":true,"thinking":{"type":"disabled"},"temperature":0.6}' "$LLM_MODEL" "$messages" ;;
+        glm-5.3-flash|GLM-5.3-Flash) printf '{"model":"%s","messages":[%s],"stream":true,"thinking":{"type":"enabled"},"reasoning_effort":"%s"}' "$LLM_MODEL" "$messages" "$LLM_REASONING_EFFORT" ;;
+        *) printf '{"model":"%s","messages":[%s],"stream":true,"thinking":{"type":"%s"}}' "$LLM_MODEL" "$messages" "$LLM_THINKING" ;;
+    esac
+}
+
+# 提取 SSE 的 content 字符串，保留转义引号；换行转为空格以便逐句播报。
+llm_sse_content() {
+    awk '
+        /^data:/ {
+            if (!match($0, /"content"[ \t]*:[ \t]*"([^"\\]|\\.)*"/)) next
+            s = substr($0, RSTART, RLENGTH)
+            sub(/^"content"[ \t]*:[ \t]*"/, "", s)
+            s = substr(s, 1, length(s) - 1)
+            out = ""
+            for (i = 1; i <= length(s); i++) {
+                c = substr(s, i, 1)
+                if (c == "\\" && i < length(s)) {
+                    c = substr(s, ++i, 1)
+                    if (c == "n" || c == "r" || c == "t") c = " "
+                    else if (c == "b" || c == "f") c = ""
+                    else if (c != "\\" && c != "\"" && c != "/") c = "\\" c
+                }
+                out = out c
+            }
+            if (length(out)) { print out; fflush() }
+        }
+    '
+}
+
+# 直连 LLM 流式取回答全文（只取 content）。结果存 LLM_DIRECT_ANSWER。
 llm_direct_answer() {
     local sid="$1"
     local user="$2"
     local messages req answer
 
     if [ -z "$LLM_API_KEY" ]; then
-        log "[LLM-NATIVE] 缺少 LLM_API_KEY（在 /data/native_first.env 配 DEEPSEEK_API_KEY）"
+        log "[LLM-NATIVE] 缺少 LLM_API_KEY（在 /data/native_first.env 配对应后端的 API key）"
         return 1
     fi
     mkdir -p "$LLM_HISTORY_DIR"
     messages=$(llm_build_messages "$sid" "$user")
-    req="{\"model\":\"$LLM_MODEL\",\"messages\":[$messages],\"stream\":true,\"thinking\":{\"type\":\"$LLM_THINKING\"}}"
+    req=$(llm_build_request "$messages")
 
     # 流式读取：记录首个 content 到达时刻（TTFT）+ 逐片累积答案。
     # 这样能把"卡在首字之前"和"逐字生成慢"区分开（埋点用，不改播放行为：仍整段收完再播）。
@@ -1832,8 +1882,7 @@ llm_direct_answer() {
         -H "Authorization: Bearer $LLM_API_KEY" \
         -H "Content-Type: application/json" \
         -d "$req" 2>/dev/null \
-        | grep '^data:' \
-        | sed -n 's/.*"content":"\([^"]*\)".*/\1/p' \
+        | llm_sse_content \
         | while IFS= read -r piece; do
             [ -n "$piece" ] || continue
             [ -f "$ttft_file" ] || monotonic_ms > "$ttft_file"
@@ -1900,14 +1949,14 @@ llm_stream_answer_and_play() {
     local wd="/tmp/native_first_stream"
 
     if [ -z "$LLM_API_KEY" ]; then
-        log "[LLM-NATIVE] 缺少 LLM_API_KEY（在 /data/native_first.env 配 DEEPSEEK_API_KEY）"
+        log "[LLM-NATIVE] 缺少 LLM_API_KEY（在 /data/native_first.env 配对应后端的 API key）"
         return 1
     fi
     rm -rf "$wd" 2>/dev/null
     mkdir -p "$wd" "$LLM_HISTORY_DIR"
 
     messages=$(llm_build_messages "$sid" "$user")
-    req="{\"model\":\"$LLM_MODEL\",\"messages\":[$messages],\"stream\":true,\"thinking\":{\"type\":\"$LLM_THINKING\"}}"
+    req=$(llm_build_request "$messages")
     t_req=$(monotonic_ms)
 
     stream_play_worker "$wd" &
@@ -1920,8 +1969,7 @@ llm_stream_answer_and_play() {
         -H "Authorization: Bearer $LLM_API_KEY" \
         -H "Content-Type: application/json" \
         -d "$req" 2>/dev/null \
-        | grep '^data:' \
-        | sed -n 's/.*"content":"\([^"]*\)".*/\1/p' \
+        | llm_sse_content \
         | tee "$wd/raw" \
         | awk -v wd="$wd" '
             NR == 1 { getline up < "/proc/uptime"; close("/proc/uptime"); split(up, a, " "); print a[1] > (wd "/ttft"); close(wd "/ttft") }
@@ -2009,7 +2057,7 @@ send_text_native() {
         return 0
     fi
 
-    log "[LLM-NATIVE] direct → model=$LLM_MODEL thinking=$LLM_THINKING text=$text"
+    log "[LLM-NATIVE] direct → model=$LLM_MODEL text=$text"
     set_state "LLM_SPEAKING"
     record_llm_query "$text"
     set_busy "llm_playing"

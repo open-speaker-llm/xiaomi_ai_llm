@@ -111,6 +111,39 @@ LLM_THINKING=disabled                   # deepseek-v4-flash 关思考，首句 ~
 
 回退到经 Mac 调 LLM：把 `LLM_PIPELINE` 改成 `server` 重启即可。
 
+### 切换 LLM（默认 DeepSeek）
+
+音箱直连使用 `/data/native_first.env`。各厂商密钥分别保存在
+`DEEPSEEK_API_KEY`、`MINIMAX_API_KEY`、`GLM_API_KEY`、`KIMI_API_KEY`。
+填好所需密钥后，只修改一处 `BACKEND`：
+
+| BACKEND | 默认模型 |
+|---|---|
+| `deepseek` | `deepseek-v4-flash` |
+| `minimax` | `MiniMax-M2.7` |
+| `glm` | `glm-5.3-flash` |
+| `kimi` | `kimi-k2.6` |
+
+保持 `LLM_PIPELINE=native`。不要保留旧的 `LLM_API_BASE`、`LLM_MODEL`、
+`LLM_API_KEY` 赋值；它们是高级覆盖项，非空时优先于后端默认值。
+同一变量只保留一条有效赋值，避免文件末尾的旧配置覆盖前面的修改。
+2026-09-06 实机已清理这些通用覆盖项，保留各厂商密钥，默认切回 DeepSeek。
+
+音箱空闲时重启助手生效：
+
+```sh
+sh /data/native_first_client.sh stop
+sh /data/init.sh
+```
+
+备选模型供用户手动选择，不会在调用失败时自动切换，也不会根据“呼叫 Kimi”等语音自动选择后端。
+DeepSeek 使用 `LLM_THINKING=disabled`；GLM 使用 `LLM_REASONING_EFFORT=low`；
+MiniMax 分离思考内容，Kimi K2.6 使用非思考模式。
+
+经 Mac 调用时，在 `config.yaml` 中设置 `llm.default_backend`（默认 `deepseek`），
+各后端模型和地址在同级配置块中，密钥放 `.env`。重启服务端后生效。
+音箱的显式 `BACKEND` 会随 server 模式请求发送，优先于服务端默认值，切换时应保持一致。
+
 ### boot1 原生连续追问
 
 先按 [组件安装说明](../../device/native_asr/README.md) 安装通过固件校验的 `native_asr`。在音箱上查看：
