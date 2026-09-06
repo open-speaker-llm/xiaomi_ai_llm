@@ -1,7 +1,7 @@
 # 从零打通小爱音箱到 LLM
 
 文档类型：从零接入路线图
-适用范围：手里有一台小米 AI 音箱（MDZ-25-DA / S12A），想让它接入自己的 LLM 服务端
+适用范围：手里有一台小米 AI 音箱（MDZ-25-DA / S12A），想让它接入自己的 LLM 服务
 当前结论：先打通 boot0 SSH，再补齐 boot1 SSH，之后把客户端脚本放到 `/data`，最后配置自启动
 
 > 本文是总路线图：每一步说清"做什么、为什么、怎么判断成功"，写镜像等高风险细节交给对应 runbook。示例 IP 等约定见 [../README.md](../README.md#文档约定)。
@@ -13,8 +13,9 @@
 小爱同学，今天天气怎么样      → 仍然走小米原生，播报天气
 小爱同学，呼叫 DeepSeek     → 小米原生不会处理
                             → native-first 拦截失败播报
-                            → 把"小米识别出的文字"转给 Mac LLM
-                            → 音箱播放 LLM 回答
+                            → 音箱把识别文字直接发给配置的 LLM API
+                            → 音箱合成并播放 LLM 回答
+回答结束后直接追问           → 同一 LLM 上下文（需启用对应系统的追问组件）
 ```
 
 这不是把小爱替换掉，而是让小爱先处理它擅长的事，处理不了再转 LLM。原理见 [../concepts/native-first.md](../concepts/native-first.md)。
@@ -27,16 +28,19 @@
 拆机接串口（TTL，插座免焊）
   → boot0/failsafe 打通 SSH        ← runbooks/boot0-ssh.md
   → 用 SSH 上传脚本到 /data
-  → 启动 Mac 服务端和音箱客户端
+  → 配置音箱端 LLM/TTS 并启动客户端（Mac 服务端可选）
   → 验证 native-first 主流程
   → 打通 boot1 SSH                 ← runbooks/boot1-ssh.md
-  → 验证 boot0/boot1 都能跑
+  → boot1 安装 guard 和原生 ASR 追问组件
+  → 验证 boot0/boot1 主流程和各自的追问路径
   → 配置 /data/init.sh 自启动      ← runbooks/autostart.md
 ```
 
 为什么有两套系统、它们差在哪，见 [../concepts/boot-and-partitions.md](../concepts/boot-and-partitions.md)。
 
 ## 3. 准备 Mac 环境
+
+本机用于 SSH、编译和部署。使用音箱直连 LLM + 设备 TTS + 原生追问时，日常运行不需要 Mac 在线；配置步骤见 [quickstart.md](quickstart.md)。下面的 Python 服务端环境仅用于选择 server 模式或旧 Mac ASR 路线时。
 
 在仓库根目录：
 
@@ -146,6 +150,8 @@ SSH 可用后，按 [quickstart.md](quickstart.md) 完成：上传 `/data` 脚�
 → [../runbooks/boot1-ssh.md](../runbooks/boot1-ssh.md)
 
 打通后切到 boot1，安装 [AIVS 快速拦截器](../../device/aivs_guard/README.md)，重复第 6 步三条用例与 [P3 失败提示拦截用例](../../tests/manual_native_first_cases.md#p3-boot1-失败提示漏播对照)。2026-09-06 已在 S12A 的 boot1/system1（ROM 1.76.54）实测：匹配到的小爱失败提示可被拦截并转 LLM，修正版重启后用户确认正常转接、没有先播失败提示。SSH 下切换 boot 的命令见 [../runbooks/operations.md](../runbooks/operations.md#5-boot-分区切换)。
+
+boot1 的免唤醒上下文追问已实现：按 [原生 ASR 安装说明](../../device/native_asr/README.md) 部署匹配固件的组件，再完成真实追问、静默退出及原生报时对照。boot0 保留本地录音 + 小米文件 ASR，不能复制 boot0 的音频库来替代 boot1 的实现。
 
 ## 8. 配置断电自启动
 

@@ -42,6 +42,19 @@ class AsrQualityTest(unittest.TestCase):
         self.assertFalse(low)
         self.assertEqual(reason, "ok")
 
+    def test_processed_pcm_rejects_observed_low_confidence_turns(self):
+        # Observed during the 2026-09-06 boot1 test. Correct contextual followups
+        # scored -0.36/-0.53/-0.55; nonsense turns scored -0.80 to -0.95.
+        for score, expected_low in [(-0.36, False), (-0.53, False), (-0.55, False),
+                                    (-0.80, True), (-0.91, True), (-0.95, True)]:
+            info = {"text": "测试语音", "avg_logprob": score, "no_speech_prob": 0.1,
+                    "speech_duration": 2, "duration": 8, "speech_active_ratio": 0.1,
+                    "speech_rms": 0.05}
+            low, _ = is_low_confidence_asr(info, min_logprob=-0.75)
+            self.assertEqual(low, expected_low)
+        # Existing raw/boot0 callers retain their original threshold.
+        self.assertFalse(is_low_confidence_asr(info)[0])
+
     def test_low_energy_but_confident_followup_passes_quality_gate(self):
         low, reason = is_low_confidence_asr({
             "text": "电脑怎么重启",

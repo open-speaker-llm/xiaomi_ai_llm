@@ -110,8 +110,8 @@
 ## 仓库结构
 
 ```text
-server/                 Mac FastAPI 服务端：LLM 路由、流式 TTS、Whisper ASR 兜底
-device/                 音箱端脚本：native_first_client.sh 主客户端、配置模板、探索用 probe 脚本
+server/                 可选 FastAPI 服务：LLM/TTS 辅助链路、旧 PCM 路线独立 Whisper ASR
+device/                 主客户端、boot1 native_asr/、失败提示 guard、设备 TTS、旧 PCM/probe 组件
 docs/
   getting-started/      从零打通、快速上手
   concepts/             native-first 架构、启动链路与分区、术语表
@@ -172,9 +172,13 @@ tests/manual_native_first_cases.md        # 真实音箱人工用例
 
 - native-first 首轮 fallback 是主线；boot0 与 boot1 两套系统（2019/2023 ROM）均已适配。2026-09-06 已在 S12A 的 boot1/system1（ROM 1.76.54）实测：匹配到的小爱失败提示可被拦截并转 LLM，修正版重启后用户确认正常转接、没有先播失败提示。见 [实测记录](docs/history/2026-09-06-boot1-fallback-guard.md)。判定仍依赖文本规则，未知文案可能漏判，正常回答含相似词也可能误判；不保证所有文案、时序或固件都无漏音。
 - **音箱直连 LLM（`LLM_PIPELINE=native`）是当前主线**：LLM 由音箱 shell 直接调用。TTS 可选 `server`（Mac/迷你服务端 EdgeTTS）、`device`（音箱端 `ettsc` 直连 EdgeTTS）或原生 `mibrain` 兜底。`server` 模式（经 Mac 调 LLM）保留作开发联调 / 回退。详见 [docs/concepts/native-first.md](docs/concepts/native-first.md)。
-- 连续追问（LLM 回答后不喊唤醒词直接追问）**未解决**：boot1 上免唤醒开麦的设备端手段（oneshot / event_notify / continuous reopen）经对照实验确认不通，唯一可工作的 ExpectSpeech 归云端控制；boot0 有实验性本地录音方案。详见 [docs/history/followup-exploration.md](docs/history/followup-exploration.md)。
+- boot1 原生 ASR 连续追问已实现并安装：LLM 播报结束后创建 ASR-only 会话，将识别文本送入同一个 LLM session，不需要 Mac 识别程序，仍需连接小米云。自动播报→续听→静默退出、重启加载及 42 项测试已通过；现场听觉验收进度见 [实测记录](docs/history/2026-09-06-boot1-native-followup.md)。[构建与安装](device/native_asr/README.md)。用户已完成西湖上下文追问实测；续听“欸”声补丁已部署并通过设备检查，听觉复验待确认。原 PCM + Mac 路线保留供回退；boot0 原录音与小米文件 ASR 保留。
+
+boot0 与 boot1 的核心使用能力已基本齐备：原生小爱、失败转 LLM、设备端 LLM/TTS、免唤醒上下文追问及开机自启动。两套系统的路由和识别路径不同，尚未做完整的同条件速度、准确率与长期稳定性对照；详见 [双系统能力表](docs/concepts/native-first.md#双系统能力对照2026-09-06)。两者都仍需联网访问小米识别服务及所选 LLM/TTS 服务。
 
 ## 与同类项目对比
+
+下表中其他项目沿用 2026-06 的资料，未随本轮能力更新重新核验；它们的最新状态以各自仓库为准。
 
 小爱接入 LLM 大致有三条路线：**云账号**（[mi-gpt](https://github.com/idootop/mi-gpt) / [xiaogpt](https://github.com/yihong0618/xiaogpt)，不碰硬件、用账号当遥控器）、**刷机接管**（[open-xiaoai](https://github.com/idootop/open-xiaoai)，夺麦克风/扬声器）、**本机原生优先**（本项目，音箱本机读小米 NLP 结果、只接管它答不了的）。
 
@@ -183,13 +187,13 @@ tests/manual_native_first_cases.md        # 真实音箱人工用例
 | 接入原理 | 本机读取原生结果：boot0 NLP 字段；boot1 AIVS 文本 + C 拦截器 | 刷机接管麦克风/扬声器 | 云账号 API 控制 | 云账号轮询对话记录 |
 | 需要 root/刷机 | 拿 root，不全量刷机 | **全量刷机** | 不需要 | 不需要 |
 | 需要常驻电脑 | **不需要** | 需要 Server | 需要 PC/NAS | 需要 PC/Docker |
-| 依赖小米云账号 | **不依赖** | 不依赖 | 依赖 | 依赖 |
+| 需要额外配置小米云账号程序 | **不需要；仍使用设备原生小米云服务** | 不依赖 | 依赖 | 依赖 |
 | 支持设备 | 仅 MDZ-25-DA/S12A 老机 | 仅 2 款新机 | 多数机型 | 多数机型 |
 | 路由策略 | boot0 按 domain/action；boot1 按提问/失败文案 | 全量接管 | 关键词触发 | 关键词触发 |
-| 连续对话 | boot0 本地录音（实验性） | 真打断 | ✅ | ✅ |
+| 连续对话 | boot0 录音 + 小米文件 ASR；boot1 原生实时 ASR；均可免唤醒追问，未实现播放中打断 | 真打断 | ✅ | ✅ |
 | 维护状态 | 活跃 | 已停更 | 已停更 | 活跃 |
 
-本项目的取舍：**自治度最高**（不要电脑、不要云账号、不过小米云），代价是**最难装**（拆机接串口）且**只支持一款老机**——定位是给被主流方案抛弃的老音箱续命。完整对比（三种哲学、独有优势、可借鉴方向）见 [docs/concepts/comparison.md](docs/concepts/comparison.md)。
+本项目可在不部署常驻电脑、无需额外配置小米云账号轮询程序的情况下运行；小米云识别、原生服务及所选 LLM/TTS 云服务仍是依赖。代价是需要拆机接串口并适配固件，目前只实测一款老机。完整对比（三种哲学、独有优势、可借鉴方向）见 [docs/concepts/comparison.md](docs/concepts/comparison.md)。
 
 ## 相关项目
 

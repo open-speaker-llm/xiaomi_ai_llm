@@ -92,6 +92,24 @@ NATIVE_REPLAY_CANCEL_DOMAINS="smartMiot soundboxControl volume system"
 | boot0/system0 | `/dev/mtdblock4` | 1.54.8，2019 | `mibrain nlp_result_get` → `ubus_nlp_result` |
 | boot1/system1 | `/dev/mtdblock5` | 1.76.54，2023 | `/tmp/mico_aivs_lab/instruction.log` → `aivs_lab_instruction` |
 
+### 双系统能力对照（2026-09-06）
+
+下表针对本项目 S12A 实测固件和已安装组件；通用模板仍须按安装说明启用相应能力。
+
+| 能力 | boot0 / 1.54.8 | boot1 / 1.76.54 |
+|---|---|---|
+| 原生唤醒、报时、家电等功能 | 保留原生链路 | 保留原生链路 |
+| 首轮转 LLM | domain/action 与失败文本辅助路由 | 提问触发词或失败 Speak 文案；没有已验证的通用失败状态字段 |
+| 失败提示拦截 | think 阶段预冻结播放器 | C guard 发现匹配失败 Speak 后及时暂停；仍可能误判或漏判文案 |
+| LLM 与 TTS 不依赖常驻 Mac | 可用音箱直连 LLM + 设备 TTS | 同样可用 |
+| 免唤醒追问与同一上下文 | 原有录音方案 + 小米文件 ASR，仍标为实验方案 | 原生实时 ASR-only；有声上下文追问已实测 |
+| 追问识别不依赖 Mac | 支持原生文件 ASR，Mac 回退可选 | native_live 不调用 Mac ASR，仍需小米云 |
+| 收听窗口 | 由本地录音配置控制，默认 window 8 秒 | 原生 VAD 判定，空闲收听约 6 秒；20 秒是整轮保护超时 |
+| SSH、自启动、原生 OTA 拦截 | 已配置验证 | 已配置验证，原生追问组件重启后自动加载 |
+| 播放中语音打断 | 未实现 | 未实现 |
+
+核心功能基本齐备不代表两边会对每个问题作相同路由，也不代表速度、识别准确率或长期稳定性相同。本轮未切回 boot0 重新进行完整对照。boot1 续听“欸”声补丁已部署并经设备检查确认命中，最终听觉复验仍待用户确认。证据见 [正式集成记录](../history/2026-09-06-boot1-native-followup.md)。
+
 boot1/system1 上 `mibrain nlp_result_get` 可能不刷新；原生 ASR/TTS 指令会写进 `mico_aivs_lab` 的 `instruction.log`，例如：
 
 ```text
@@ -146,7 +164,7 @@ fallback 到 LLM 时走哪条链路由 `LLM_PIPELINE` 决定。**当前主线是
 | `server`（默认） | 整段发 Mac `/api/v1/tts/stream`，端点 Python 切句、EdgeTTS 流式返回 WAV → `aplay` | 需要 Mac/迷你 TTS 微服务在线 | 微服务 ping 不通 → 原生 `mibrain` |
 | `device` | 音箱端 `ettsc` 自己 wss 连微软 EdgeTTS、Sec-MS-GEC 鉴权、拿整段 MP3 → 原生 `miplayer` | **不需要任何 helper**，音箱独立完成 | ettsc 失败（如 403）→ 原生 `mibrain` |
 
-`device` 档让音箱连 TTS 微服务都不再需要——真正脱离任何外部服务独立出声。实现见 [`device/ettsc/README.md`](../../device/ettsc/README.md)，两条实测定下的硬约束：
+`device` 档不需要常驻 Mac 或自建 TTS 微服务；音箱仍联网调用微软 EdgeTTS。实现见 [`device/ettsc/README.md`](../../device/ettsc/README.md)，两条实测定下的硬约束：
 
 - **纯阻塞 IO，不用 tokio**：tokio 的 epoll 异步 reactor 在这台音箱（musl 静态 / kernel 4.9 / zig 构建）上不工作——TCP 内核层能连上但 `connect().await` 永不返回。换 `std::net::TcpStream` 阻塞 + 同步 `tungstenite` + `native-tls`（vendored OpenSSL 静态）后正常。
 - **TLS 用 OpenSSL 而非 rustls**：ClientHello 同源于 curl，稳过本地网络。
@@ -158,22 +176,22 @@ fallback 到 LLM 时走哪条链路由 `LLM_PIPELINE` 决定。**当前主线是
 - **中文切句放在端点 Python 做**，不在 busybox shell 里——shell 按字节处理 UTF-8 会把 `。！？` 切碎成乱码。音箱只管"整段发 + fifo 流式播放"。
 - **思考型模型要关思考**：`deepseek-v4-flash` 默认输出 `reasoning_content`（思考链），首句要等 ~3s。`LLM_THINKING=disabled` 关掉后首句 ~2s，而且 shell 只取 `content` 字段天然把思考滤掉。
 - **降级探测**：每次 fallback 前快速 ping TTS 微服务（`TTS_HEALTH_TIMEOUT`），在线走 EdgeTTS，离线走原生 `mibrain text_to_speech`（已验证能完整念几百字长文本）。
-- **会话历史**存音箱 `/data`（`LLM_HISTORY_DIR`），保留最近 `LLM_HISTORY_TURNS` 轮多轮上下文。
+- **会话历史**保存在 `LLM_HISTORY_DIR`（默认 `/tmp/native_first_llm_hist`，重启清空，可自行配置持久目录），保留最近 `LLM_HISTORY_TURNS` 轮多轮上下文。
 
 相关配置见 `device/native_first.env.example` 的"音箱端直连 LLM"段。回退随时可做：`LLM_PIPELINE=server` 即切回经 Mac 的老链路。
 
 ## 8. 连续追问状态
 
-首轮失败提示拦截已实测通过；下述限制仅针对 LLM 回答后的免唤醒追问。
+boot1 / S12A ROM 1.76.54 已实现并安装原生 ASR 连续追问：LLM 播报结束后主动创建 NONWAKEUP 会话，在 Recognize 上报中关闭 NLP/TTS，只把该 dialog 的最终识别文本送入当前 LLM session，随后继续播报和续听。无需 Mac Whisper 或外部录音识别程序，仍需小米云服务联网。
 
-当前追问不是最终方案：
+- 采集继续由原生音频前端负责，不抢占 ALSA、不暂停 mipns，也不生成临时 WAV。
+- 脚本提示音在 `wakeup.sh` hook 处跳过；绕过脚本直接播放的本地“欸”等提示音，按本次续听的线程归属将 WAV 读取缓冲区置为静音。普通唤醒保留原样；静默结束后清理原生队列、恢复音量。
+- 本次追问中的原生 NLP/设备动作被隔离；普通首轮唤醒仍走小爱的原生处理。
+- 使用 `SYSTEM1_FOLLOWUP_RECORD_MODE=native_live`，需先安装匹配固件的组件。通用示例仍默认关闭。
+- 原生 VAD 控制句末和静默窗口；20 秒配置是整体保护超时。尚未实现播放中打断，不特别处理结束语。
+- boot0 保留原录音与文件 ASR 方式。此前 [PCM + Mac ASR](../../device/pcm_tap/README.md) 实现保留供回退；旧下行 reopen/文件识别失败结论不适用于新入口。
 
-- boot0：本地录音追问可实验，但稳定性依赖录音链路。
-- boot1：默认关闭追问（`SYSTEM1_FOLLOWUP_ENABLED=0`），保证主流程。
-- 已验证 native multirounds/reopen 方向尚未走通。
-- 更值得继续探索的是从小米链路获取处理后的干净音频。
-
-完整探索记录见 [../history/followup-exploration.md](../history/followup-exploration.md)。
+详见 [原生组件安装](../../device/native_asr/README.md)、[集成验证记录](../history/2026-09-06-boot1-native-followup.md)、[入口研究](../history/2026-09-06-boot1-native-asr-research.md)。
 
 ## 9. 状态灯反馈
 
@@ -185,7 +203,7 @@ fallback 到 LLM 时走哪条链路由 `LLM_PIPELINE` 决定。**当前主线是
 | 原生处理中 | 蓝灯常亮 | 小米原生 ASR/NLP 在判定，可能原生直接答 |
 | 转 LLM | 绿色快闪 3 下后转绿 | 原生答不了，已接管转大模型 |
 | LLM 生成/播放 | 绿色转圈 | 大模型在生成 / 逐句播放回答 |
-| 等待追问 | 绿灯常亮 | 回答播完，`FOLLOWUP_TIMEOUT` 内可继续追问 |
+| 等待追问 | 绿灯常亮 | 回答播完可以继续追问；boot0 按录音配置计时，boot1 native_live 按原生 VAD 判定 |
 | 追问识别成功 | 绿色快闪 3 下后转绿 | 追问录音 ASR 出文本，转下一轮 LLM |
 | 出错/无文本 | 橙色快闪 3 下后灭 | LLM 调用失败 / 追问录音失败 / ASR 空，本轮结束 |
 | 回到待机 | 灭灯 | 对话结束，交还原生小爱 |

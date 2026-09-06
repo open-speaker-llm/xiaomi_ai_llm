@@ -35,6 +35,7 @@ NATIVE_RESULT_SOURCE="${NATIVE_RESULT_SOURCE:-auto}"
 NATIVE_AIVS_LAB_RESULT_SYSTEM1="${NATIVE_AIVS_LAB_RESULT_SYSTEM1:-1}"
 SYSTEM1_NATIVE_WAIT_SECONDS="${SYSTEM1_NATIVE_WAIT_SECONDS:-3}"
 SYSTEM1_FOLLOWUP_ENABLED="${SYSTEM1_FOLLOWUP_ENABLED:-0}"
+SYSTEM1_FOLLOWUP_RECORD_MODE="${SYSTEM1_FOLLOWUP_RECORD_MODE:-}"
 SYSTEM1_FOLLOWUP_CAPTURE_MIPNS="${SYSTEM1_FOLLOWUP_CAPTURE_MIPNS:-0}"
 SYSTEM1_FOLLOWUP_ASR_ENGINE="${SYSTEM1_FOLLOWUP_ASR_ENGINE:-mac}"
 SYSTEM1_FOLLOWUP_WINDOW_CAPTURE_DEV="${SYSTEM1_FOLLOWUP_WINDOW_CAPTURE_DEV:-hw:0,2}"
@@ -80,6 +81,13 @@ FOLLOWUP_NATIVE_ASR_TIMEOUT="${FOLLOWUP_NATIVE_ASR_TIMEOUT:-30}"
 FOLLOWUP_NATIVE_ASR_FALLBACK_MAC="${FOLLOWUP_NATIVE_ASR_FALLBACK_MAC:-0}"
 FOLLOWUP_NATIVE_MIN_QUERY_BYTES="${FOLLOWUP_NATIVE_MIN_QUERY_BYTES:-10}"
 FOLLOWUP_RECORD_MODE="${FOLLOWUP_RECORD_MODE:-window}"
+PCM_CAPTURE_BIN="${PCM_CAPTURE_BIN:-/data/capture_pcm}"
+PCM_TAP_MANAGER="${PCM_TAP_MANAGER:-/data/native_pcm_tap.sh}"
+PCM_CAPTURE_SECONDS="${PCM_CAPTURE_SECONDS:-8}"
+FOLLOWUP_ASR_TIMEOUT="${FOLLOWUP_ASR_TIMEOUT:-30}"
+NATIVE_ASR_MANAGER="${NATIVE_ASR_MANAGER:-/data/native_asr.sh}"
+NATIVE_ASR_CTL="${NATIVE_ASR_CTL:-/data/native_asr_ctl}"
+NATIVE_ASR_LISTEN_TIMEOUT="${NATIVE_ASR_LISTEN_TIMEOUT:-20}"
 FOLLOWUP_WINDOW_SECONDS="${FOLLOWUP_WINDOW_SECONDS:-8}"
 FOLLOWUP_WINDOW_CAPTURE_DEV="${FOLLOWUP_WINDOW_CAPTURE_DEV:-Capture}"
 FOLLOWUP_WINDOW_MIN_PEAK="${FOLLOWUP_WINDOW_MIN_PEAK:-120}"
@@ -186,6 +194,7 @@ HOOK_WATCHDOG_PID=""
 CURRENT_SESSION_ID=""
 LED_FEEDBACK_PID=""
 NATIVE_PLAYER_FROZEN=0
+NATIVE_DRAIN_MUTED=0
 NATIVE_ASR_RESTART_NEEDED=0
 NATIVE_FOLLOWUP_MARKED=0
 STATE="BOOT"
@@ -464,6 +473,7 @@ should_setup_dsnoop() {
 apply_system_defaults() {
     if is_system1_root; then
         FOLLOWUP_ENABLED="$SYSTEM1_FOLLOWUP_ENABLED"
+        [ -z "$SYSTEM1_FOLLOWUP_RECORD_MODE" ] || FOLLOWUP_RECORD_MODE="$SYSTEM1_FOLLOWUP_RECORD_MODE"
         if [ "$FOLLOWUP_ASR_ENGINE" = "native" ]; then
             FOLLOWUP_ASR_ENGINE="$SYSTEM1_FOLLOWUP_ASR_ENGINE"
         fi
@@ -716,6 +726,17 @@ log_ts() {
 }
 
 echo "[$(log_ts)] wakeup.sh $*" >> "$EVENT_LOG"
+
+# This software followup owns its LEDs and has no wakeword prompt. Suppress the
+# native cue at its source so nothing can remain queued after the session ends.
+if [ "${SYSTEM1_FOLLOWUP_RECORD_MODE:-}" = "native_live" ] && [ -f "$BUSY_MARKER" ] &&
+    [ "$(awk '$2 == "/" {print $1;exit}' /proc/mounts)" = /dev/mtdblock5 ]; then
+    case "$1" in
+        WuW|WuW_first|WuW_oneshot|wuw_tips|bf|bf_end|ready|ready_delay|noangle|noangle_end|think|speek|multirounds|command_timeout|mibrain_service_timeout)
+            echo "[$(log_ts)] NATIVE_FOLLOWUP_CUE_SUPPRESSED args=$*" >> "$EVENT_LOG"
+            exit 0;;
+    esac
+fi
 
 hook_led_set_all() {
     local color="$1"
@@ -1441,6 +1462,7 @@ resume_native_player() {
 }
 
 pause_native_asr() {
+    [ "$FOLLOWUP_RECORD_MODE" = "native_live" ] && is_system1_root && return 0
     if [ "$PAUSE_NATIVE_ASR_DURING_LLM" = "1" ]; then
         killall -STOP mipns-xiaomi 2>/dev/null
         log "[NATIVE] mipns paused for LLM followup"
@@ -1465,6 +1487,7 @@ resume_native_asr() {
 }
 
 prepare_followup_capture() {
+    case "$FOLLOWUP_RECORD_MODE" in native_pcm|native_live) return 0;; esac
     if is_system1_root && [ "$SYSTEM1_FOLLOWUP_CAPTURE_MIPNS" = "1" ]; then
         if pidof mipns-xiaomi >/dev/null 2>&1; then
             killall -9 mipns-xiaomi 2>/dev/null
@@ -1472,6 +1495,50 @@ prepare_followup_capture() {
             log "[NATIVE] mipns killed for boot1 followup capture"
             sleep 0.3
         fi
+    fi
+}
+
+setup_native_live_asr() {
+    is_system1_root || return 0
+    [ "$FOLLOWUP_ENABLED" = "1" ] && [ "$FOLLOWUP_RECORD_MODE" = "native_live" ] || return 0
+    if [ -x "$NATIVE_ASR_CTL" ] && [ -f "$NATIVE_ASR_MANAGER" ] && sh "$NATIVE_ASR_MANAGER" start; then
+        PAUSE_NATIVE_ASR_DURING_LLM=0
+        log "[FOLLOWUP] native ASR-only ready; no external recognizer"
+    else
+        FOLLOWUP_ENABLED=0
+        log "[FOLLOWUP] native ASR unavailable; first-turn LLM remains available"
+    fi
+}
+
+wait_native_live_asr() {
+    local ret
+    FOLLOWUP_TEXT=""
+    set_state "FOLLOWUP_LISTENING"
+    led_feedback_llm_followup_listening
+    log "[FOLLOWUP] native live listening; cloud ASR-only; no wakeword required"
+    "$NATIVE_ASR_CTL" listen "$$" "$NATIVE_ASR_LISTEN_TIMEOUT" > /tmp/native_followup_text
+    ret=$?
+    if [ "$ret" -eq 0 ]; then
+        FOLLOWUP_TEXT=$(cat /tmp/native_followup_text)
+        [ -n "$FOLLOWUP_TEXT" ] || ret=124
+    fi
+    rm -f /tmp/native_followup_text
+    if [ "$ret" -eq 0 ]; then
+        log "[FOLLOWUP] native live ASR text=$FOLLOWUP_TEXT"
+    else
+        log "[FOLLOWUP] native live ended ret=$ret"
+    fi
+    return "$ret"
+}
+
+setup_native_pcm_tap() {
+    is_system1_root || return 0
+    [ "$FOLLOWUP_ENABLED" = "1" ] && [ "$FOLLOWUP_RECORD_MODE" = "native_pcm" ] || return 0
+    if [ -f "$PCM_TAP_MANAGER" ] && sh "$PCM_TAP_MANAGER" start; then
+        log "[FOLLOWUP] native PCM tap ready"
+    else
+        FOLLOWUP_ENABLED=0
+        log "[FOLLOWUP] native PCM tap unavailable; keep first-turn LLM without followup"
     fi
 }
 
@@ -1515,13 +1582,38 @@ is_recent_duplicate_llm_query() {
     return 0
 }
 
+begin_native_queue_drain() {
+    is_system1_root && is_native_player_frozen && is_busy || return 0
+    # The frozen player can emit its queued Xiaomi prompt immediately on CONT,
+    # before it processes ubus stop/reset. Mute only while draining that queue.
+    if amixer -c 0 sget 'Hard Mute' 2>/dev/null | grep -q 'Playback.*\[off\]'; then
+        if amixer -c 0 sset 'Hard Mute' on >/dev/null 2>&1; then
+            NATIVE_DRAIN_MUTED=1
+            log "[AUDIO] mute output while draining native queue"
+        fi
+    fi
+}
+
+end_native_queue_drain() {
+    if [ "$NATIVE_DRAIN_MUTED" = "1" ]; then
+        if amixer -c 0 sset 'Hard Mute' off >/dev/null 2>&1; then
+            NATIVE_DRAIN_MUTED=0
+            log "[AUDIO] native queue drained; output restored"
+        fi
+    fi
+}
+
 finish_llm_playback() {
+    begin_native_queue_drain
     resume_native_player 1
     restore_llm_master_volume
+    end_native_queue_drain
     clear_busy
 }
 
 start_followup_vad_prearm() {
+    # The native PCM tap already keeps a short ring; never start an ALSA recorder.
+    case "$FOLLOWUP_RECORD_MODE" in native_pcm|native_live) return 0;; esac
     local timeout
 
     [ "$FOLLOWUP_PREARM" = "1" ] || return 0
@@ -1575,6 +1667,17 @@ arm_followup_vad() {
 
 wait_or_run_followup_vad() {
     local ret timeout
+
+    if [ "$FOLLOWUP_RECORD_MODE" = "native_pcm" ]; then
+        is_system1_root || return 1
+        [ -x "$PCM_CAPTURE_BIN" ] || { log "[FOLLOWUP] PCM capture helper missing"; return 1; }
+        set_state "FOLLOWUP_LISTENING"
+        led_feedback_llm_followup_listening
+        log "[FOLLOWUP] native PCM window=${PCM_CAPTURE_SECONDS}s; no wakeword required"
+        rm -f /tmp/voice.wav
+        "$PCM_CAPTURE_BIN" /tmp/voice.wav "$PCM_CAPTURE_SECONDS"
+        return $?
+    fi
 
     if [ -n "$FOLLOWUP_VAD_PID" ]; then
         set_state "FOLLOWUP_LISTENING"
@@ -2091,6 +2194,8 @@ transcribe_followup_voice_mac() {
     local result_file="/tmp/native_followup_asr.env"
 
     FOLLOWUP_TEXT=""
+    FOLLOWUP_ROUTE=""
+    FOLLOWUP_REASON=""
 
     if [ ! -f "$voice_file" ]; then
         log "[FOLLOWUP] 追问录音不存在"
@@ -2098,10 +2203,14 @@ transcribe_followup_voice_mac() {
     fi
 
     log "[FOLLOWUP] 发送追问录音做 ASR..."
-    curl -s --max-time "$STREAM_TIMEOUT" \
+    if ! curl -fsS --max-time "$FOLLOWUP_ASR_TIMEOUT" \
         -F "session_id=${CURRENT_SESSION_ID}" \
         -F "file=@${voice_file}" \
-        "${SERVER}/api/v1/route/asr" > "$result_file"
+        "${SERVER}/api/v1/route/asr" > "$result_file"; then
+        log "[FOLLOWUP] ASR service unavailable"
+        FOLLOWUP_REASON="service_unavailable"
+        return 1
+    fi
 
     FOLLOWUP_TEXT=$(sed -n 's/^TEXT=//p' "$result_file" | head -1)
     FOLLOWUP_ROUTE=$(sed -n 's/^ROUTE=//p' "$result_file" | head -1)
@@ -2240,6 +2349,28 @@ handle_llm_dialog() {
         return 0
     fi
 
+    if [ "$FOLLOWUP_RECORD_MODE" = "native_live" ] && is_system1_root; then
+        local next_text="$first_text" saved_dup="$SUPPRESS_DUP_SECONDS"
+        while send_text_and_play "$session_id" "$next_text" defer; do
+            if ! wait_native_live_asr; then
+                break
+            fi
+            turn=$((turn + 1))
+            led_feedback_followup_asr_ok
+            log "[TURN $turn] native followup -> LLM: $FOLLOWUP_TEXT"
+            next_text="$FOLLOWUP_TEXT"
+            # A deliberate repeated followup is a new turn, not a duplicate wake.
+            SUPPRESS_DUP_SECONDS=0
+        done
+        SUPPRESS_DUP_SECONDS="$saved_dup"
+        finish_llm_playback
+        led_off
+        resume_native_asr
+        CURRENT_SESSION_ID=""
+        set_state "IDLE"
+        return 0
+    fi
+
     send_text_and_play "$session_id" "$first_text" defer
 
     while true; do
@@ -2260,8 +2391,10 @@ handle_llm_dialog() {
 
         if ! transcribe_followup_voice; then
             log "[FOLLOWUP] ASR 无文本，退出对话"
-            led_feedback_error
-            sleep 1
+            if [ "$FOLLOWUP_ROUTE" != "empty" ]; then
+                led_feedback_error
+                sleep 1
+            fi
             break
         fi
 
@@ -2377,6 +2510,7 @@ handle_wakeup() {
 }
 
 cleanup() {
+    end_native_queue_drain
     stop_aivs_speech_guard
     led_off
     if [ -n "$HOOK_WATCHDOG_PID" ]; then
@@ -2478,10 +2612,14 @@ else
     log "[SETUP] 跳过 dsnoop/libxaudio 覆盖: AUDIO_CAPTURE_SETUP=$AUDIO_CAPTURE_SETUP root=$(root_device)"
 fi
 stop_our_assistants
+setup_native_live_asr
+setup_native_pcm_tap
 : > "$EVENT_LOG"
 mkfifo "$EVENT_FIFO" 2>/dev/null || mknod "$EVENT_FIFO" p 2>/dev/null
 
-curl -s -o /dev/null -m 2 "$SERVER/" && log "服务器连接正常" || log "服务器无法连接"
+if [ "$LLM_PIPELINE" = "server" ] || [ "$TTS_ENGINE" = "server" ] || [ "$FOLLOWUP_ASR_ENGINE" = "mac" ]; then
+    curl -s -o /dev/null -m 2 "$SERVER/" && log "服务器连接正常" || log "服务器无法连接"
+fi
 set_state "IDLE"
 
 start_aivs_speech_guard

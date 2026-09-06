@@ -11,7 +11,7 @@
 - Mac 和音箱在同一网络（如果不部署 Mac TTS 服务端，只需要 Mac 能通过 SSH 上传文件）。
 - 音箱可以 SSH 登录（`~/.ssh/config` 已配置 `xiaomi` 别名）。
 - 音箱 `/data` 可写。
-- 已知道 Mac IP，例如 `192.168.8.150`。
+- 仅在选用 Mac 服务端时需要知道其 IP，例如 `192.168.8.150`。音箱端直连模式仍需要互联网。
 
 如果还没有 SSH，先走完整路线：[bringup.md](bringup.md)。
 
@@ -28,7 +28,7 @@ scp -O device/native_first_client.sh device/native_first.env.example \
 登录音箱后执行：
 
 ```sh
-cp /data/native_first.env.example /data/native_first.env
+[ -f /data/native_first.env ] || cp /data/native_first.env.example /data/native_first.env
 chmod +x /data/native_first_client.sh /data/vad_record.sh /data/data_init_native_first.sh
 ```
 
@@ -149,6 +149,21 @@ tail -f /tmp/native_first_client.log /tmp/native_first_events.log
 boot1 还应执行 P3：用会触发失败提示的问题核对转 LLM 前无失败音，再问时间并重启复测。云端文案会变化，需记录实际文本。
 
 更完整人工用例见 [../../tests/manual_native_first_cases.md](../../tests/manual_native_first_cases.md)。
+
+### boot1 开启原生免唤醒追问
+
+先完成首轮验证并确认设备为 S12A boot1 / ROM 1.76.54。在开发机仓库根目录使用 Zig 构建，再安装：
+
+```sh
+sh device/native_asr/build.sh /tmp/native-asr-build
+python3 tools/speaker-maintenance/install_boot1_native_followup.py --host 192.168.8.152 --build-dir /tmp/native-asr-build
+```
+
+安装器验证固件、备份客户端和配置、启用 `SYSTEM1_FOLLOWUP_RECORD_MODE=native_live` 并重启客户端；无需再手动启动第二个实例。首次 SSH 主机身份须已确认，`/data/native_first.env` 须已配置。失败提示 guard 与设备 `ettsc` 仍按前文分别安装。
+
+回答结束、绿灯续听时直接说下一句；同一 LLM session 保留上下文。空闲收听约 6 秒，由原生 VAD 判定，`NATIVE_ASR_LISTEN_TIMEOUT=20` 仅是整轮保护超时。保持安静后退出，再喊“小爱同学”即可使用原生功能。
+
+选择 `LLM_PIPELINE=native`、`TTS_ENGINE=device` 并部署 `ettsc` 后，LLM、TTS 和追问都不需 Mac 常驻，仍需云服务联网。通用模板默认不启用 boot1 追问；安装器校验通过后才启用。完整验证和回退见 [组件说明](../../device/native_asr/README.md) 与 [人工用例](../../tests/manual_native_first_cases.md)。
 
 ## 6. 之后
 

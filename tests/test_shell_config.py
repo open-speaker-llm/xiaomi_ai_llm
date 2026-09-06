@@ -16,6 +16,7 @@ class ShellConfigTest(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
+            timeout=10,
         )
 
     def test_device_shell_scripts_parse(self):
@@ -70,6 +71,72 @@ class ShellConfigTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "deepseek 1 0")
+
+    def test_pcm_manager_refuses_unknown_firmware_and_foreign_overlay(self):
+        text = (ROOT / 'device/pcm_tap/native_pcm_tap.sh').read_text()
+        functions = text.split('\ncase "${1:-status}"')[0]
+        for overrides, expected in [
+            ('is_boot1() { return 1; };', 'boot0: skip'),
+            ('is_boot1() { return 0; }; verified_audio() { return 1; };', 'hash mismatch'),
+            ('is_boot1() { return 0; }; verified_audio() { return 0; }; '
+             'TAP=/bin/sh; CAPTURE=/bin/sh; owned() { return 1; }; mounted() { return 0; };', 'foreign PNS overlay'),
+        ]:
+            result = self.run_shell(functions + '\n' + overrides + '\nstart_tap')
+            self.assertIn(expected, result.stdout)
+            self.assertEqual(result.returncode, 0 if expected == 'boot0: skip' else 1)
+
+    def test_boot1_queue_is_drained_under_mute_and_prior_mute_is_preserved(self):
+        import re
+        import shlex
+        import tempfile
+        text = (ROOT / 'device/native_first_client.sh').read_text()
+        functions = '\n'.join(re.search(r'^' + name + r'\(\) \{.*?^\}', text, re.M | re.S).group()
+                              for name in ('begin_native_queue_drain', 'end_native_queue_drain',
+                                           'finish_llm_playback'))
+        for root_status, prior, expected in [
+            (0, 'off', ['on', 'resume', 'volume', 'off', 'idle']),
+            (0, 'on', ['resume', 'volume', 'idle']),
+            (1, 'off', ['resume', 'volume', 'idle']),
+        ]:
+            with tempfile.TemporaryDirectory() as d:
+                trace = Path(d) / 'trace'
+                result = self.run_shell(functions + '\n' +
+                    f'trace={shlex.quote(str(trace))}; prior={prior}; NATIVE_DRAIN_MUTED=0; '
+                    f'is_system1_root() {{ return {root_status}; }}; ' + '''
+is_native_player_frozen() { return 0; }; is_busy() { return 0; }
+amixer() { if [ "$3" = sget ]; then echo "Mono: Playback [$prior]"; else echo "$5" >> "$trace"; fi; }
+log() { :; }
+resume_native_player() { echo resume >> "$trace"; }
+restore_llm_master_volume() { echo volume >> "$trace"; }
+clear_busy() { echo idle >> "$trace"; }
+finish_llm_playback
+''')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(trace.read_text().splitlines(), expected)
+
+    def test_native_pcm_leaves_native_capture_and_boot0_defaults_alone(self):
+        import re
+        text = (ROOT / 'device/native_first_client.sh').read_text()
+        functions = '\n'.join(re.search(r'^' + name + r'\(\) \{.*?^\}', text, re.M | re.S).group()
+                              for name in ('apply_system_defaults', 'prepare_followup_capture',
+                                           'start_followup_vad_prearm'))
+        result = self.run_shell(functions + '''
+is_system1_root() { return 1; }
+FOLLOWUP_ENABLED=1; FOLLOWUP_RECORD_MODE=window; FOLLOWUP_ASR_ENGINE=native
+SYSTEM1_FOLLOWUP_ENABLED=1; SYSTEM1_FOLLOWUP_RECORD_MODE=native_pcm
+SYSTEM1_FOLLOWUP_ASR_ENGINE=mac
+apply_system_defaults
+echo "$FOLLOWUP_RECORD_MODE/$FOLLOWUP_ASR_ENGINE"
+is_system1_root() { return 0; }
+apply_system_defaults
+echo "$FOLLOWUP_RECORD_MODE/$FOLLOWUP_ASR_ENGINE"
+SYSTEM1_FOLLOWUP_CAPTURE_MIPNS=1; FOLLOWUP_PREARM=1
+killall() { echo unexpected-kill; }; pidof() { echo 123; }
+prepare_followup_capture
+start_followup_vad_prearm
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ['window/native', 'native_pcm/mac'])
 
     def test_env_example_tracks_key_client_defaults(self):
         env_text = (ROOT / "device/native_first.env.example").read_text()

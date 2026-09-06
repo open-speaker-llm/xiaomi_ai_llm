@@ -8,6 +8,8 @@
 
 > 2026-09-06 后续验证：持久安装客户端与 `/data/aivs_speech_guard` 后，boot1 重启会由客户端自动拉起快速拦截器；用户确认转 LLM 前无失败提示。见 [修复记录](../history/2026-09-06-boot1-fallback-guard.md)。已有 init.sh 入口无需为 guard 单独改写；新设备仍需先安装 helper。
 
+2026-09-06 已验证 boot1 的 native_asr 原生追问组件可随客户端重建服务覆盖并自动加载。只具备 SSH/rc.local 入口不等于已安装组件；安装与健康检查见 [原生追问说明](../../device/native_asr/README.md)。
+
 ## 1. 当前结论
 
 推荐长期方案：

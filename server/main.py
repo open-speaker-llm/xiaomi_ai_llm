@@ -65,7 +65,7 @@ audio_processor = AudioProcessor()
 conversation_histories: dict[str, list[dict]] = {}
 
 
-def is_low_confidence_asr(info: dict) -> tuple[bool, str]:
+def is_low_confidence_asr(info: dict, *, min_logprob: float = -1.0) -> tuple[bool, str]:
     text = (info.get("text") or "").strip()
     compact = "".join(text.split())
     if not compact:
@@ -80,7 +80,7 @@ def is_low_confidence_asr(info: dict) -> tuple[bool, str]:
     speech_duration = float(info.get("speech_duration", duration))
     speech_rms = float(info.get("speech_rms", rms))
 
-    if avg_logprob < -1.0:
+    if avg_logprob < min_logprob:
         return True, f"low_logprob:{avg_logprob:.2f}"
     if no_speech_prob > 0.80:
         return True, f"no_speech:{no_speech_prob:.2f}"
@@ -539,7 +539,9 @@ async def route_asr(file: UploadFile = File(...), session_id: str = Form("shell"
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"ASR error: {str(e)}")
 
-    low_conf, quality_reason = is_low_confidence_asr(asr_info)
+    low_conf, quality_reason = is_low_confidence_asr(
+        asr_info, min_logprob=getattr(asr_client, "quality_min_logprob", -1.0)
+    )
     if low_conf:
         elapsed = _time.time() - t_asr
         print(

@@ -7,8 +7,8 @@
 | 名词 | 全称/来源 | 解释 |
 |---|---|---|
 | KWS | Keyword Spotting | 唤醒词检测。早期路线用开源 KWS 检测“你好小智”，当前主线使用小米原生“小爱同学”。 |
-| ASR | Automatic Speech Recognition | 语音转文字。当前首轮优先使用小米原生 ASR；Mac Whisper 保留为测试和兜底。 |
-| TTS | Text To Speech | 文字转语音。Mac 服务端当前使用 EdgeTTS，默认音色 `zh-CN-YunjianNeural`。 |
+| ASR | Automatic Speech Recognition | 语音转文字。首轮使用小米原生识别；追问时 boot0 使用小米文件 ASR，boot1 native_live 使用原生实时云 ASR。Mac Whisper 仅为可选旧路线。 |
+| TTS | Text To Speech | 文字转语音。可由音箱端或可选 Mac 客户端调用 EdgeTTS 云服务，失败时用小爱原生 TTS；设备直连不等于离线合成。 |
 | VAD | Voice Activity Detection | 语音活动检测，用于判断什么时候开始/停止录音。 |
 | LLM | Large Language Model | 大语言模型，例如 DeepSeek、MiniMax、Claude、OpenAI。 |
 | NLP | Natural Language Processing | 自然语言理解。小米原生把 ASR 文本解析成 `domain`/`action`/`query` 等结构化意图，boot0 可据此路由；boot1 的失败判定使用 AIVS `Speak.text` 文本规则。 |
@@ -20,7 +20,7 @@
 | `mediaplayer` | 小米播放器进程 | 小米原生 TTS/媒体播放相关进程，native-first 会在关键阶段 freeze/resume。 |
 | `mipns-xiaomi`（简称 mipns） | 小米原生语音前端进程 | 负责唤醒词检测、录音、音频前端处理、ASR 上传。**独占麦克风设备** `/dev/snd/pcmC0D2c`，随意暂停/抢占会影响原生唤醒和 ASR（这也是 boot1 自录音追问困难的根因）。 |
 | `mibrain` | 小米大脑服务 | 通过 `ubus call mibrain ...` 暴露部分 ASR/NLP/TTS 能力，例如 `text_to_speech`、`nlp_result_get`、`ai_service`。 |
-| `ai_service` | 小米原生服务接口（mibrain 方法） | 可做 ASR/NLP/TTS 组合调用，但需传入已录好的音频文件（`asr_audio`），不支持自录音。主要用于探索和部分追问方案。 |
+| `ai_service` | 小米原生服务接口（mibrain 方法） | 可做 ASR/NLP/TTS 组合调用，但需传入已录好的音频文件（`asr_audio`），不支持自录音。boot0 追问使用其文件识别能力；boot1 此文件接口不支持，但已通过独立的原生实时入口实现追问。 |
 | `aivs` / `mico_aivs_lab` | 小米 AVS 语音服务进程 | boot1/system1（2023 ROM）的语音处理进程，基于 AVS（Alexa Voice Service）风格协议。原生 ASR/TTS 指令（`RecognizeResult`/`Speak`/`ExpectSpeech` 等）写入 `/tmp/mico_aivs_lab/instruction.log`。boot0/system0 没有它。 |
 | `domain` | 小米 NLP 字段 | 表示原生识别到的能力域，例如 `weather`、`smartMiot`。 |
 | `action` | 小米 NLP 字段 | 表示动作类型，例如 `query`、`operate`。 |
@@ -37,5 +37,7 @@
 | failsafe | OpenWrt 救援模式 | 启动早期进入的救援环境，可用于修复配置、恢复 SSH 等。 |
 | IDLE / idle | 状态机状态 | `native_first_client.sh` 的待机状态，等待原生唤醒词；日志 `[IDLE] 等待原生唤醒词：小爱同学`。其余状态如 `NATIVE_PROCESSING`、`LLM_SPEAKING`、`FOLLOWUP_WINDOW` 表示处理流程的不同阶段。 |
 | `instruction.log` | aivs 指令日志 | `/tmp/mico_aivs_lab/instruction.log`，boot1 上原生 ASR/NLP/TTS 指令的落地日志，native-first 在 boot1 从这里读取 `RecognizeResult` 和 `Speak.text`；JSON 指令结构不等于已提供业务失败状态。会定期清空重写。 |
+| `native_live` / ASR-only | boot1 当前追问模式 | LLM 播放后创建 NONWAKEUP 原生识别会话，关闭该轮 NLP/TTS，只把最终文字送入同一 LLM session；仍用小米云，不需 Mac。 |
+
 | `dialog_id` | aivs 对话标识 | 一轮对话的唯一 id。新 `dialog_id` 出现通常意味着开启了一次新的识别会话。 |
 

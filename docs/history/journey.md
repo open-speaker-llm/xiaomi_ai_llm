@@ -105,18 +105,28 @@ root 到手后，先用最笨的办法验证可行性——failsafe 环境 + 手
 
 之后补上断电自启动（`/etc/rc.local` 注入一行 `/data/init.sh` 入口，方案参考 open-xiaoai），boot0/boot1 都验证了上电自动恢复。期间还排除了两条歧路：`/data/ai-crontab/crontab.dat` 是二进制格式不可直接写；`/etc/crontabs/root` 在只读 rootfs 上。详见 [../runbooks/autostart.md](../runbooks/autostart.md)。
 
-## 阶段 6：连续追问（进行中，未到最终形态）
+## 阶段 6：连续追问的早期探索（2026-09-06 前）
 
 理想体验是 LLM 回答后不用再喊"小爱同学"直接追问。试过两类方案：
 
 - **本地录音 + ASR**：能跑但不稳——多麦克风原始录音弱声/噪声/录到 LLM 尾音，boot1 上麦克风被 `mipns-xiaomi` 占用；
 - **原生 reopen**：尝试了 `pnshelper event_notify`（event=4/6）、`wakeup.sh multirounds`、`oneshot_set open=true` 等八种组合，`instruction.log` 始终只有首轮 dialog，拿不到追问文本。
 
-当前策略：boot0 保留本地录音追问做实验，boot1 默认关闭追问保主流程。下一个值得投入的方向是"获取小米处理后的干净音频"——曾观察到 `/tmp/mipns/usock/speech.usock` 里有 16kHz mono PCM，可能已经过小米前端处理。完整记录见 [followup-exploration.md](followup-exploration.md)。
+当时的策略是 boot0 保留本地录音追问做实验，boot1 默认关闭追问保主流程；随后投入的方向是"获取小米处理后的干净音频"——曾观察到 `/tmp/mipns/usock/speech.usock` 里有 16kHz mono PCM，可能已经过小米前端处理。完整记录见 [followup-exploration.md](followup-exploration.md)。
 
 ## 阶段 7：boot1 失败提示快速拦截（2026-09-06）
 
-2026-09-06 已在 S12A 的 boot1/system1（ROM 1.76.54）实测：匹配到的小爱失败提示可被拦截并转 LLM，修正版重启后用户确认正常转接、没有先播失败提示。此次改善的是失败文案覆盖和播放暂停时机：约 10ms 检查新增 Speak，匹配后暂停 mediaplayer，shell 接手 LLM；没有恢复 boot1 的 think 预冻结，也没有发现新的业务失败状态字段。首版两轮通过后仍漏掉另一种云端文案，修正规则后再次重启验证通过。判定仍依赖文本规则，未知文案可能漏判，正常回答含相似词也可能误判；不保证所有文案、时序或固件都无漏音。证据见 [本次修复记录](2026-09-06-boot1-fallback-guard.md)；连续追问的旧限制仍独立成立。
+2026-09-06 已在 S12A 的 boot1/system1（ROM 1.76.54）实测：匹配到的小爱失败提示可被拦截并转 LLM，修正版重启后用户确认正常转接、没有先播失败提示。此次改善的是失败文案覆盖和播放暂停时机：约 10ms 检查新增 Speak，匹配后暂停 mediaplayer，shell 接手 LLM；没有恢复 boot1 的 think 预冻结，也没有发现新的业务失败状态字段。首版两轮通过后仍漏掉另一种云端文案，修正规则后再次重启验证通过。判定仍依赖文本规则，未知文案可能漏判，正常回答含相似词也可能误判；不保证所有文案、时序或固件都无漏音。证据见 [本次修复记录](2026-09-06-boot1-fallback-guard.md)。连续追问的后续实现见下一阶段，不能继续沿用旧接口未打通的总括结论。
+
+## 阶段 8：boot1 连续追问从 Mac ASR 到原生实时识别（2026-09-06）
+
+先截取小米音频前端处理后的 PCM，在 Mac Whisper 上识别，接入同一 LLM session；用户验证连续追问和退出后报时正常，清理残余声音的修复也获确认。这条已验证路线保留供回退，见 [PCM 实测](2026-09-06-boot1-pcm-followup.md)。
+
+进一步研究不再尝试让已经 Finish 的旧 dialog 接受下行 ExpectSpeech，而是通过运行时原生回调发起上行 NONWAKEUP 请求，让真实 AIVS 创建新会话。时间和算术题的免唤醒识别先通过用户验证，随后实现正式组件，限定本次 dialog 只识别、禁用 NLP/TTS，再接入 LLM 播放后的续听。
+
+Mac ASR 停止期间，用户实测“介绍杭州西湖”后直接追问“那什么时候去呢”，同一上下文正常回答。组件重启自动加载、静默退出和 42 项项目测试通过；每轮多出的“欸”另定位为原生线程直接播放 WAV，补上线程归属静音并通过 15 项设备隔离测试，最终听觉复验仍待确认。详见 [原生入口研究](2026-09-06-boot1-native-asr-research.md) 与 [正式实现记录](2026-09-06-boot1-native-followup.md)。
+
+boot0/boot1 核心功能至此基本齐备，但转 LLM 的规则、识别入口和收听时机不同；都未实现播放中打断，也尚未做新一轮完整性能对照。
 
 ## 回头看：几条贯穿始终的经验
 

@@ -18,7 +18,8 @@ docs/
 1. [getting-started/bringup.md](getting-started/bringup.md) —— 完整路线图：串口 → SSH → 部署 → 验证 → 自启动
 2. 过程中按指引进入对应 runbook：[boot0-ssh](runbooks/boot0-ssh.md) → [boot1-ssh](runbooks/boot1-ssh.md) → [autostart](runbooks/autostart.md)
 3. 跑通后日常使用 [getting-started/quickstart.md](getting-started/quickstart.md) 和 [runbooks/operations.md](runbooks/operations.md)
-4. 遇到术语卡住，查 [concepts/glossary.md](concepts/glossary.md)
+4. boot1 开启免唤醒追问：[原生 ASR 组件](../device/native_asr/README.md)，按固件校验后安装。
+5. 遇到术语卡住，查 [concepts/glossary.md](concepts/glossary.md)
 
 **路径 B：我有嵌入式/语音经验，想直奔重点**
 
@@ -40,6 +41,10 @@ docs/
 | 日常启动/停止/看日志/切 boot | [runbooks/operations.md](runbooks/operations.md) |
 | boot0 打通 SSH（串口/failsafe） | [runbooks/boot0-ssh.md](runbooks/boot0-ssh.md) |
 | boot1 失败提示拦截（2026-09-06 已实测） | [修复与验证记录](history/2026-09-06-boot1-fallback-guard.md)、[部署说明](../device/aivs_guard/README.md) |
+| boot0/boot1 当前能力与差异 | [双系统能力表](concepts/native-first.md#双系统能力对照2026-09-06) |
+| boot1 免唤醒追问，不运行 Mac ASR | [构建安装](../device/native_asr/README.md)、[正式集成与提示音修复记录](history/2026-09-06-boot1-native-followup.md) |
+| 回看 PCM + Mac 识别旧路线 | [旧组件与回退](../device/pcm_tap/README.md) |
+
 | boot1 打通 SSH（镜像注入） | [runbooks/boot1-ssh.md](runbooks/boot1-ssh.md) |
 | 保持双系统 SSH、关闭原生 OTA、手动升级 | [runbooks/owner-maintenance.md](runbooks/owner-maintenance.md) |
 | 查看 2026-09-05 SSH 恢复与双系统验证结果 | [history/2026-09-05-ssh-ota-recovery.md](history/2026-09-05-ssh-ota-recovery.md) |
@@ -58,7 +63,7 @@ docs/
 
 | 项 | 示例值 | 说明 |
 |---|---|---|
-| Mac（服务端）IP | `192.168.8.150` | 音箱配置里的 `SERVER` 指向它 |
+| Mac（可选服务端）IP | `192.168.8.150` | 仅选择 server LLM/TTS 或旧 Mac ASR 路线时需要常驻 |
 | 音箱 IP | `192.168.8.152` | 路由器后台可查 |
 | 服务端端口 | `8080` | `config.yaml` 可改 |
 | 串口设备 | `/dev/tty.usbserial-3120` | `ls /dev/tty.*` 查看实际名称 |

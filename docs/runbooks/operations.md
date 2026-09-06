@@ -8,6 +8,8 @@
 
 ## 1. Mac 服务端
 
+本节仅在选择 server LLM/TTS 或旧 Mac 识别路线时需要。音箱直连 LLM + 设备 TTS + 原生追问模式不需要常驻 Mac，仍需联网。
+
 启动（仓库根目录）：
 
 ```sh
@@ -109,6 +111,23 @@ LLM_THINKING=disabled                   # deepseek-v4-flash 关思考，首句 ~
 
 回退到经 Mac 调 LLM：把 `LLM_PIPELINE` 改成 `server` 重启即可。
 
+### boot1 原生连续追问
+
+先按 [组件安装说明](../../device/native_asr/README.md) 安装通过固件校验的 `native_asr`。在音箱上查看：
+
+```sh
+sh /data/native_asr.sh status
+/data/native_asr_ctl status
+tail -n 30 /tmp/native_followup/events.log
+tail -n 50 /tmp/native_first_client.log
+```
+
+预期管理器为 `healthy`，客户端记录 `native ASR-only ready; no external recognizer`。每次追问有新 dialog 和 `ASR-only ... disabled=NLP,TTS`，最终文本进入同一 LLM session；静默结束返回 124 并回到 IDLE。
+
+日常使用：唤醒并让 LLM 回答，绿灯续听时直接追问，保持安静退出。没有播放中打断，“退下”等结束语交给 LLM 正常处理。
+
+临时停用追问：将配置最后生效的 `SYSTEM1_FOLLOWUP_ENABLED` 设为 `0` 后重启客户端；完整卸载/回退使用安装器输出备份目录内的 `restore.sh`。boot0 保留原录音与文件 ASR；不要全局改成 `native_live`。旧 PCM + Mac 路线与原生追问管理器不同时加载。
+
 ## 4. 配置文件
 
 音箱上的运行配置：
@@ -122,9 +141,9 @@ vi /data/native_first.env
 
 ## 5. boot 分区切换
 
-2026-09-05 本项目实机已验证两套系统公钥 SSH 与原生 OTA 拦截，默认回到 boot0，用户确认唤醒和回复正常。其他设备或后来刷入的镜像需单独核验。维护策略和验证命令见 [双系统 SSH 与受控升级](owner-maintenance.md)。
+2026-09-05 本项目实机已验证两套系统公钥 SSH 与原生 OTA 拦截，当次最终回到 boot0，用户确认唤醒和回复正常。2026-09-06 已在 boot1 部署并验证原生连续追问，当前使用哪套系统应读取实际根分区。其他设备或后来刷入的镜像需单独核验。维护策略和验证命令见 [双系统 SSH 与受控升级](owner-maintenance.md)。
 
-切换前确认目标系统已具备 SSH；SSH 可用不代表助手已配置自启动。2026-09-06 已补齐本机 system1 的入口，并持久安装失败提示快速拦截器；boot1 重启后自动启动、转 LLM 无先行失败提示已验证。见 [自启动恢复](../history/2026-09-06-boot1-autostart.md) 与 [拦截修复](../history/2026-09-06-boot1-fallback-guard.md)。
+切换前确认目标系统已具备 SSH；SSH 可用不代表助手已配置自启动。2026-09-06 已补齐本机 system1 的入口，并持久安装失败提示快速拦截器；boot1 重启后自动启动、转 LLM 无先行失败提示已验证。见 [自启动恢复](../history/2026-09-06-boot1-autostart.md) 、[拦截修复](../history/2026-09-06-boot1-fallback-guard.md) 及 [原生追问自启动](../history/2026-09-06-boot1-native-followup.md)。
 
 查看当前启动分区：
 

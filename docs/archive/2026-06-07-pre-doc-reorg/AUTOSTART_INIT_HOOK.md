@@ -1,5 +1,7 @@
 # native-first 自启动 init hook 探索
 
+> 2026-09-06 当前能力勘误：boot1 已实现[失败提示拦截](../../history/2026-09-06-boot1-fallback-guard.md)和[原生 ASR 连续追问](../../history/2026-09-06-boot1-native-followup.md)；后者已完成无 Mac ASR 的有声上下文测试及重启加载。续听“欸”声补丁已部署并通过设备检查，听觉复验待确认。boot0 保留录音 + 小米文件 ASR。两者仍依赖云服务，未实现播放中打断。以下保留历史原文；旧“boot1 追问未通”不代表当前能力。
+
 本文记录让音箱断电重启后自动运行 `native_first_client.sh` 的候选方案。
 
 ## 1. 当前结论

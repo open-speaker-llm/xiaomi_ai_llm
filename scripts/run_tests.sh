@@ -19,6 +19,10 @@ echo "== Python unit tests =="
 echo "== Shell syntax =="
 for script in \
     device/native_first_client.sh \
+    device/native_asr/build.sh \
+    device/native_asr/native_asr.sh \
+    device/pcm_tap/build.sh \
+    device/pcm_tap/native_pcm_tap.sh \
     device/vad_record.sh \
     device/native_result_timing_probe.sh \
     device/stream_client.sh \

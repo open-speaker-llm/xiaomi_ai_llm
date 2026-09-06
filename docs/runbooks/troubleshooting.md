@@ -2,7 +2,7 @@
 
 文档类型：问题定位入口  
 适用范围：有唤醒但无动作、错误转 LLM、播报串台、音量异常、追问失败  
-当前结论：先看音箱两份日志，再看 Mac 服务端日志；不要只凭听感改参数
+当前结论：先看音箱客户端与事件日志；boot1 原生追问另看组件日志，仅选用 Mac 服务时检查对应服务端
 
 ## SSH 连接被拒绝或启动分区改变
 
@@ -151,27 +151,28 @@ LLM_MASTER_MIN=96
 LLM_MASTER_MAX=196
 ```
 
-## 8. 追问失败
+## 8. 追问失败或续听时响起“欸”
 
-当前结论：
+先区分路线：boot0 是本地录音 + 小米文件 ASR；boot1 当前已实现原生实时 `native_live`，旧 `native_pcm` + Mac ASR 保留回退。旧的下行 reopen 失败记录不代表 boot1 无法追问。
 
-- boot0 可继续用本地录音追问方案做实验。
-- boot1 默认关闭追问，优先保证原生命令和首轮 LLM 稳定。
-- 原生 ASR reopen 多轮方案已经多次验证未打通。
-
-先确认配置：
+在音箱核对配置与状态：
 
 ```sh
-grep -E 'FOLLOWUP|SYSTEM1_FOLLOWUP' /data/native_first.env
+grep -E '^(FOLLOWUP|SYSTEM1_FOLLOWUP|NATIVE_ASR|LLM_PIPELINE|TTS_ENGINE)' /data/native_first.env
+sh /data/native_asr.sh status
+/data/native_asr_ctl status
+tail -n 40 /tmp/native_followup/events.log
 ```
 
-如果在 boot1：
+配置若有重复赋值，以最后一次为准。boot1 原生路线应为 `SYSTEM1_FOLLOWUP_ENABLED=1`、`SYSTEM1_FOLLOWUP_RECORD_MODE=native_live`、`SYSTEM1_FOLLOWUP_ASR_ENGINE=native_live`，且客户端采用 `FOLLOWUP_MODE=local_record`。安装/启用步骤见 [组件说明](../../device/native_asr/README.md)，不能只把开关改成 1 而缺少组件。
 
-```sh
-SYSTEM1_FOLLOWUP_ENABLED=0
-```
+- **没有打开续听**：先检查客户端是否已实际播完 LLM 回答，再检查 `native ASR-only ready`。固件 ABI 不匹配或原生进程加载失败会关闭追问，应处理日志所示原因或用备份回退，不要强行关闭校验。
+- **有续听但没识别到**：在绿灯亮起后开口；空闲收听约 6 秒，20 秒配置是整轮保护超时。查看 `final` 字节数和 `finish`；静默空结果返回 124 是正常退出。
+- **意外要求 Mac 在线**：检查是否仍是 `native_pcm/mac`，或 LLM/TTS 选用了 `server`。原生 `native_live` 不调用 Mac ASR；设备直连模式仍依赖小米云、LLM 和 TTS 网络。
+- **每轮 LLM 后有“欸”**：这来自 `mipns-xiaomi` 直接播放的本地 WAV，会绕过 `wakeup.sh`。当前修复按续听线程归属静音其读取缓冲区，应出现 `cue silenced seq=… bytes=…`；若缺失，核对组件版本和实际加载。不要删除唤醒音文件或一直保持全局静音。首次正常唤醒的提示音不属于此拦截范围。
+- **退出时还有残余声音或原生报时失声**：核对清队列时临时静音、音量恢复及解除自有静音的顺序；正常退出后应回到 IDLE，随后执行报时对照。
 
-追问探索历史见 [../history/followup-exploration.md](../history/followup-exploration.md)。
+boot0 的文件接口与录音检查、boot1 新入口及实测范围分别见 [探索记录](../history/followup-exploration.md)、[正式集成记录](../history/2026-09-06-boot1-native-followup.md)。
 
 ## 9. TTS 路线排障
 

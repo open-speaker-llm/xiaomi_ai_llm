@@ -1,12 +1,14 @@
 # 原生追问探索记录
 
-> 2026-09-06 范围补充：本文“不支持/不可达”结论针对文件式 ASR 或免唤醒追问。boot1 首轮失败提示拦截已实测通过，见 [独立修复记录](2026-09-06-boot1-fallback-guard.md)；此结果不代表追问开麦已打通。
+> 当前结论（2026-09-06）：boot0 继续使用录音 + 小米文件 ASR；boot1 已实现并部署 NONWAKEUP 原生实时 ASR 的 LLM 连续追问，Mac ASR 停止期间用户已验证西湖上下文追问。构建、自启动、提示音修复及待验项见 [正式实现记录](2026-09-06-boot1-native-followup.md)，原生入口机制见 [研究记录](2026-09-06-boot1-native-asr-research.md)。旧 [PCM + Mac 路线](2026-09-06-boot1-pcm-followup.md) 已实测，保留供回退。
+>
+> 下文按实验发生时间保留。旧“不可达/未打通”只指当时的公开接口与下行注入；boot1 的文件式 ASR 仍不支持，但不妨碍新的实时入口。首轮失败提示拦截另见 [独立记录](2026-09-06-boot1-fallback-guard.md)。
 
 文档类型：历史探索结论  
 适用范围：判断“连续追问到底试过哪些方向”  
-当前结论：
+旧路径结论（当前原生实时路径见上方更新）：
 - **文件式原生 ASR（`ai_service asr_audio`）在 boot0 可用、在 boot1 不支持**（§6.2 + §10 实测勘误）。boot0 追问就靠它，是工作路径，不要删。
-- **“无唤醒词追问”（不靠录音、让原生链路重新开麦）在两个 ROM 都不可达**——开麦与云端 ASR 编排由 aivs/mipns 按云端指令掌控，本地中间人改写下行流也被 aivs 权威状态否决（§8.4）。
+- **旧的公开接口和下行注入方式没有打通主动原生追问**（§8.4）。2026-09-06 通过真实回调 + 上行 NONWAKEUP 请求 + 本地音频门控完成，已在 boot1 取得现场免唤醒识别结果；后续已把该入口接入 LLM 连续追问，见上述集成记录。不能继续概括为所有原生路径不可达。
 - 摸清的机制与对照证伪见 §5–§10。
 
 ## 1. 背景
@@ -51,7 +53,7 @@ LLM 回答：我在，有什么可以帮你
 - 追问时没有新的 `SpeechRecognizer/RecognizeResult`。
 - 没有稳定拿到原生追问文本。
 
-## 3. 当前策略
+## 3. 旧策略（2026-09-06 前）
 
 boot0：
 
@@ -97,7 +99,7 @@ FOLLOWUP_MODE=local_record
 
 ### 5.2 设备端主动开麦——对照实验确认不通
 
-根本约束：**ExpectSpeech 由云端 NLP 决定，设备端无法主动触发**；LLM fallback 不经过云端 NLP，拿不到 ExpectSpeech。试过的设备端“主动开麦”手段：
+当时遇到的约束：**原生 ExpectSpeech 由云端 NLP 决定**；LLM fallback 拿不到同一轮的 ExpectSpeech。下面的公开接口实验没有主动建立有效会话；2026-09-06 新验证的 NONWAKEUP 上行入口不依赖这条下行指令。此前试过的手段：
 
 | 手段 | 结果 |
 |---|---|
@@ -161,7 +163,7 @@ ubus call mibrain ai_service '{"asr":0,"nlp":1,"nlp_text":"今天天气怎么样
 
 即可以不说话、直接把文本喂给小米原生 NLP（天气/闹钟/家电等原生 domain）。这是一条独立于追问的潜在能力（把文本路由回原生处理），与本文档主题分开记录即可。
 
-### 6.4 重开麦是 mipns 内部状态机，外部脚本触发不了
+### 6.4 重开麦涉及 mipns 状态机，此前的外部脚本未触发
 
 - `wakeup.sh multirounds` 只是**反馈**（播 `multirounds_tone.opus` + `player_wakeup multistart` 亮灯），不是触发器；它是 mipns 决定 multirounds 之后才被调用。
 - mipns 内部状态机字符串显示成功路径是 `local multirounds, idle ---> preparing!` → `continuous dialog, reopen mic`，但有大量 ignore 条件（mute / preparing / transmitting / unregistered…）。
@@ -260,16 +262,16 @@ mipns 报 `multirounds, no wakeup end!` 拒绝；注入后无任何上行音频�
 
 **aivs 的 dialog 状态是权威的，且 `open_mic` 由云端 NLP 响应决定**。本轮这轮普通查询，aivs 自己算出 `open_mic:0`（云端没让继续），mipns 以 aivs 的状态为准，无视我们从下行注入的 `0x03`。即便强行让 mipns 开麦，上行音频是发给真 aivs 的，而 aivs 不认识我们伪造的 dialog，云端 ASR 也不会转写。所以：
 
-> 用原生链路做“无唤醒词追问”在本固件上不可达——开麦与云端 ASR 编排都由 aivs 按云端指令掌控，本地无法凭空让某轮“继续”。
+> 本轮下行注入无法让旧会话继续，不能据此证明所有原生识别入口不可达。2026-09-06 新实验改为通过上行 NONWAKEUP 请求，让真实 aivs 创建新会话，已经取得现场识别和回答；见文首实测记录。
 
 ### 8.5 仍然可行的现实路线（重新确认）
 
-回到 §4 的结论但有了新证据支撑：唯一能本地拿到追问的路，是**自己采麦 + 自己 ASR**，不依赖 aivs/云的连续编排：
+在当时已验证的方案中，继续推进的是**自己采麦 + 自己 ASR**，以避开尚未打通的 aivs 会话编排。以下保留当时的线索；2026-09-06 的 NONWAKEUP 新入口已改变原生识别的可行性结论：
 
 - mipns 的录音线程常开（做唤醒检测），原始多麦 PCM 一直在采（但噪声/通道问题见 §2）。
 - 更优的是**上行 MITM**：代理 `mipns→aivs` 的上行 socket（同样 sendto-with-path，可拦），在我们 LLM 播放后的时间窗内，把 mipns 上传的、经小米前端处理（AEC/波束）的干净音频截下来，送我们自己的 ASR（Mac Whisper / 云）。难点仍是“让 mipns 在该时刻开麦上传”——而这一轮证明了从下行注入开麦会被 aivs 权威状态否决，所以上行 MITM 也得配合一个能真正触发采集的手段（目前无解）。
 
-务实判断：**继续投入原生连续对话的边际收益很低**。无唤醒词追问要么接受“每轮喊唤醒词”，要么走纯本地采音 + 自有 ASR 并接受其音质/稳定性代价。
+当时因此优先推进本地采音 + 自有 ASR。该取舍不再是排他的路线结论：2026-09-06 已验证 NONWAKEUP 原生识别入口，后续应评估与 LLM 播报完成、上下文和原生 NLP 隔离的集成。
 
 ### 8.6 复用资产（持久化在设备 `/data/followup_probe/`）
 
@@ -331,6 +333,5 @@ ubus call mibrain ai_service '{"asr":1,"nlp":1,"tts":0,"asr_audio":"/tmp/voice.w
 所以：
 
 - **boot0 追问就靠 `ai_service asr_audio`（`FOLLOWUP_ASR_ENGINE=native`），是工作路径，保留。**
-- boot1 追问本就由 `SYSTEM1_FOLLOWUP_ENABLED=0` 整体关闭，根本不会调到这条；其文件式 ASR 不支持只是顺带结论，不影响主线。
+- 当时 boot1 追问由 `SYSTEM1_FOLLOWUP_ENABLED=0` 关闭，不会调用此文件接口。现有 native_live 路径也不调用它；文件式接口不支持的结论仍有效，不能外推为当前 boot1 不支持追问。
 - 教训：跨 ROM 的能力结论，必须标注是在哪个 system 上测的；boot1 上的 `not support` 不能外推到 boot0。
-
