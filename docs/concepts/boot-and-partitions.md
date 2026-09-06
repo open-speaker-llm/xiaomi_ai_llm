@@ -316,6 +316,8 @@ SpeechSynthesizer/Speak
 Dialog/Finish
 ```
 
+boot1 的失败判定使用 `Speak.text` 文本规则，不应把客户端填入的 `michat/model` 当作固件状态。2026-09-06 已部署 C 快速拦截器并实测无先行失败提示，见 [记录](../history/2026-09-06-boot1-fallback-guard.md)；think 阶段仍不预冻结。
+
 因此不要简单复制 boot0 的服务文件去覆盖 boot1，也不要试图把两套系统“硬填平”。当前长期方案是在 `native_first_client.sh` 中保留两套结果源适配。
 
 ## 12. 和当前项目的关系

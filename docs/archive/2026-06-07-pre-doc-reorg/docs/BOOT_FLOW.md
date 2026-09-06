@@ -1,5 +1,7 @@
 # 小米音箱启动链路与系统分区说明
 
+> 2026-09-06 结论更新：boot1 不做 think 预冻结，但已通过 AIVS 失败文本匹配与 C 快速拦截实现首轮转 LLM 前无失败提示，修正版重启后经用户确认；报时对照正常。domain/action 路由主要适用于 boot0；boot1 的 michat/model 是客户端合成标记。未知文案仍可能漏判或误判，连续追问限制不在此次修复范围。详见 [实测记录](../../../history/2026-09-06-boot1-fallback-guard.md)。以下保留当时记录。
+
 本文说明这台小米 AI 音箱从上电到运行 `native_first_client.sh` 的完整链路，并解释 `boot0`、`boot1`、`system0`、`system1`、`kernel`、`initramfs`、`rootfs`、OpenWrt/LEDE 等概念。
 
 ## 1. 当前设备结论

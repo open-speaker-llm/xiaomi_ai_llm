@@ -46,6 +46,10 @@ AIVS_LAB_LOOKBACK_LINES="${AIVS_LAB_LOOKBACK_LINES:-40}"
 AIVS_LAB_LAST_DIALOG_FILE="${AIVS_LAB_LAST_DIALOG_FILE:-/tmp/native_first_last_aivs_dialog}"
 NATIVE_WAIT_SECONDS="${NATIVE_WAIT_SECONDS:-12}"
 NATIVE_POLL_INTERVAL="${NATIVE_POLL_INTERVAL:-0.2}"
+AIVS_GUARD_ENABLED="${AIVS_GUARD_ENABLED:-1}"
+AIVS_GUARD_BIN="${AIVS_GUARD_BIN:-/data/aivs_speech_guard}"
+AIVS_GUARD_ARMED="/tmp/native_first_aivs_guard_armed"
+AIVS_GUARD_PID=""
 NATIVE_UBUS_TIMEOUT="${NATIVE_UBUS_TIMEOUT:-1}"
 WAKE_EVENT_MAX_AGE="${WAKE_EVENT_MAX_AGE:-4}"
 WAKE_IGNORE_QUERIES="${WAKE_IGNORE_QUERIES:-${WAKE_ONLY_QUERIES:-小爱同学 小爱 小爱小爱 小爱同学小爱同学 我在 在呢}}"
@@ -98,7 +102,7 @@ NATIVE_FOLLOWUP_TTS_NOTIFY="${NATIVE_FOLLOWUP_TTS_NOTIFY:-1}"
 NATIVE_FOLLOWUP_MULTIROUNDS_TRIGGER="${NATIVE_FOLLOWUP_MULTIROUNDS_TRIGGER:-pns}"
 NATIVE_FOLLOWUP_TRIGGER_AFTER_TTS_END="${NATIVE_FOLLOWUP_TRIGGER_AFTER_TTS_END:-0}"
 STREAM_TIMEOUT="${STREAM_TIMEOUT:-180}"
-UNSUPPORTED_PATTERNS="${UNSUPPORTED_PATTERNS:-暂时|不会|不支持|回答不上|需要再学习|没听懂|不知道|不会这项技能}"
+UNSUPPORTED_PATTERNS="${UNSUPPORTED_PATTERNS:-暂时|不会|不支持|回答不上|需要再学习|没听懂|不知道|不会这项技能|难住|问住|更努力学习|还在学习|我.*(再|多|继续|努力)(学习|学学)}"
 DIRECT_LLM_QUERY_PATTERNS="${DIRECT_LLM_QUERY_PATTERNS:-DEEPSEEK|DeepSeek|deepseek}"
 
 # --- 音箱端直连 LLM（独立链路，不依赖 Mac 调 LLM）---
@@ -695,6 +699,8 @@ BUSY_MARKER="${BUSY_MARKER:-/tmp/native_first_busy}"
 NATIVE_REPLAY_CANCEL_MARKER="${NATIVE_REPLAY_CANCEL_MARKER:-/tmp/native_first_replay_cancel}"
 FREEZE_NATIVE_PLAYER_ON_THINK="${FREEZE_NATIVE_PLAYER_ON_THINK:-1}"
 WAKE_ON_THINK_SYSTEM1="${WAKE_ON_THINK_SYSTEM1:-1}"
+AIVS_GUARD_ENABLED="${AIVS_GUARD_ENABLED:-1}"
+AIVS_GUARD_ARMED="/tmp/native_first_aivs_guard_armed"
 LED_FEEDBACK_ENABLED="${LED_FEEDBACK_ENABLED:-1}"
 LED_WAKE_HOLD_SECONDS="${LED_WAKE_HOLD_SECONDS:-4}"
 LED_WAKE_HOLD_REFRESH_SECONDS="${LED_WAKE_HOLD_REFRESH_SECONDS:-0.1}"
@@ -764,6 +770,9 @@ case "$1" in
             echo "[$(log_ts)] NATIVE_THINK_IGNORED_BUSY args=$*" >> "$EVENT_LOG"
         else
             root_dev=$(awk '$2 == "/" {print $1; exit}' /proc/mounts 2>/dev/null)
+            if [ "$AIVS_GUARD_ENABLED" = "1" ] && [ "$root_dev" = "/dev/mtdblock5" ]; then
+                touch "$AIVS_GUARD_ARMED"
+            fi
             if [ "$WAKE_ON_THINK_SYSTEM1" = "1" ] && [ "$root_dev" = "/dev/mtdblock5" ] && [ -p "$EVENT_FIFO" ]; then
                 ( echo "think $ts" > "$EVENT_FIFO" 2>/dev/null ) &
                 echo "[$(log_ts)] NATIVE_WAKE_EVENT_FROM_THINK root=$root_dev ts=$ts" >> "$EVENT_LOG"
@@ -938,6 +947,31 @@ select_native_result_source() {
             fi
             ;;
     esac
+}
+
+start_aivs_speech_guard() {
+    [ "$AIVS_GUARD_ENABLED" = "1" ] || return 0
+    [ "$FREEZE_NATIVE_PLAYER_ON_FALLBACK" = "1" ] || return 0
+    is_system1_root || return 0
+    if [ ! -x "$AIVS_GUARD_BIN" ]; then
+        log "[GUARD] helper unavailable; keeping normal fallback polling"
+        return 0
+    fi
+    rm -f "$AIVS_GUARD_ARMED"
+    "$AIVS_GUARD_BIN" "$AIVS_LAB_INSTRUCTION_LOG" "$PLAYER_FROZEN_MARKER" \
+        "$BUSY_MARKER" "$$" "$UNSUPPORTED_PATTERNS" "$AIVS_GUARD_ARMED" \
+        >>/tmp/native_first_aivs_guard.log 2>&1 &
+    AIVS_GUARD_PID=$!
+    log "[GUARD] started pid=$AIVS_GUARD_PID; failure Speak only, 3s unclaimed lease"
+}
+
+stop_aivs_speech_guard() {
+    rm -f "$AIVS_GUARD_ARMED"
+    if [ -n "$AIVS_GUARD_PID" ]; then
+        kill "$AIVS_GUARD_PID" 2>/dev/null
+        wait "$AIVS_GUARD_PID" 2>/dev/null
+        AIVS_GUARD_PID=""
+    fi
 }
 
 get_aivs_lab_latest_dialog_id() {
@@ -2343,6 +2377,7 @@ handle_wakeup() {
 }
 
 cleanup() {
+    stop_aivs_speech_guard
     led_off
     if [ -n "$HOOK_WATCHDOG_PID" ]; then
         kill "$HOOK_WATCHDOG_PID" 2>/dev/null
@@ -2449,6 +2484,7 @@ mkfifo "$EVENT_FIFO" 2>/dev/null || mknod "$EVENT_FIFO" p 2>/dev/null
 curl -s -o /dev/null -m 2 "$SERVER/" && log "服务器连接正常" || log "服务器无法连接"
 set_state "IDLE"
 
+start_aivs_speech_guard
 install_hook
 start_hook_watchdog
 restart_mipns_single
@@ -2475,5 +2511,6 @@ while true; do
         continue
     fi
     handle_wakeup "$ts"
+    rm -f "$AIVS_GUARD_ARMED"
     log "[IDLE] 等待原生唤醒词：小爱同学"
 done

@@ -88,7 +88,7 @@ root 到手后，先用最笨的办法验证可行性——failsafe 环境 + 手
 
 先是中间形态 `native_client.sh`：用 bind mount 把 `/bin/wakeup.sh` 换成自己的 hook，借小米原生唤醒（"小爱同学"）触发，但后续仍走本地录音 + Whisper。唤醒质量问题解决了，可 ASR 和家电控制还是不如原生。
 
-于是走到最终形态 `native_first_client.sh`：**唤醒、ASR、NLP、家电控制全部留给小米，只在原生明确处理不了时接管**。关键发现：
+于是走到最终形态 `native_first_client.sh`：**唤醒、ASR、NLP、家电控制全部留给小米，只在原生明确处理不了时接管**。以下是早期 boot0 路线的发现，boot1 的结果源与拦截方式见阶段 5、7：
 
 - 小米 NLP 的结果是结构化的（`domain/action/query/speak`），可以通过 `ubus call mibrain nlp_result_get` 拿到——路由判断应该基于 `domain`，而不是猜文本关键词；
 - `query` 字段是陷阱：`domain=weather` 时 `query` 可能是 `token` 这种内部值，真正要播报的是 `speak`（这条教训写进了 [../concepts/native-first.md](../concepts/native-first.md)）；
@@ -114,9 +114,13 @@ root 到手后，先用最笨的办法验证可行性——failsafe 环境 + 手
 
 当前策略：boot0 保留本地录音追问做实验，boot1 默认关闭追问保主流程。下一个值得投入的方向是"获取小米处理后的干净音频"——曾观察到 `/tmp/mipns/usock/speech.usock` 里有 16kHz mono PCM，可能已经过小米前端处理。完整记录见 [followup-exploration.md](followup-exploration.md)。
 
+## 阶段 7：boot1 失败提示快速拦截（2026-09-06）
+
+2026-09-06 已在 S12A 的 boot1/system1（ROM 1.76.54）实测：匹配到的小爱失败提示可被拦截并转 LLM，修正版重启后用户确认正常转接、没有先播失败提示。此次改善的是失败文案覆盖和播放暂停时机：约 10ms 检查新增 Speak，匹配后暂停 mediaplayer，shell 接手 LLM；没有恢复 boot1 的 think 预冻结，也没有发现新的业务失败状态字段。首版两轮通过后仍漏掉另一种云端文案，修正规则后再次重启验证通过。判定仍依赖文本规则，未知文案可能漏判，正常回答含相似词也可能误判；不保证所有文案、时序或固件都无漏音。证据见 [本次修复记录](2026-09-06-boot1-fallback-guard.md)；连续追问的旧限制仍独立成立。
+
 ## 回头看：几条贯穿始终的经验
 
 1. **优先复用，而不是替换**。从"旁路一切"到"native-first"，每一次回退到原生能力（唤醒、ASR、家电），体验和稳定性都明显变好。
-2. **结构化信号优于文本猜测**。路由看 `domain`，不看关键词；判断写入成功看读回 hash，不看命令退出码。
+2. **先核实信号来源与适用系统**。boot0 可用 `domain/action`，boot1 目前仍靠 AIVS 文本规则；客户端合成的标记不能当作固件状态。写入成功应看读回 hash。
 3. **给自己留退路**。串口常驻、写前备份、双系统保一个可启动、`/data` 放可变逻辑 rootfs 只放入口——这些都是用 failsafe 丢失换来的纪律。
 4. **失败记录和成功方案一样值钱**。本文里的每张失败表格，都避免了后来者（包括自己）重走死路。

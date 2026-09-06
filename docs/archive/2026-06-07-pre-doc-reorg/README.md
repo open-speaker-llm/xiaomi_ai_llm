@@ -1,5 +1,7 @@
 # 小米 AI 音箱 LLM 助手
 
+> 2026-09-06 结论更新：boot1 不做 think 预冻结，但已通过 AIVS 失败文本匹配与 C 快速拦截实现首轮转 LLM 前无失败提示，修正版重启后经用户确认；报时对照正常。domain/action 路由主要适用于 boot0；boot1 的 michat/model 是客户端合成标记。未知文案仍可能漏判或误判，连续追问限制不在此次修复范围。详见 [实测记录](../../history/2026-09-06-boot1-fallback-guard.md)。以下保留当时记录。
+
 当前主线是 **native-first 原生优先路线**：音箱继续使用小米原生“小爱同学”唤醒、ASR、NLP 和家电控制；当小米原生判断无法处理时，再把小米识别出的文本转给 Mac 服务端的 LLM。
 
 这个方向的目标不是替换小爱，而是复用小爱最稳定的部分：
@@ -117,6 +119,8 @@ tail -f /tmp/native_first_client.log /tmp/native_first_events.log
 - `query` 只作为 fallback LLM 的输入；原生成功场景里可能是 `token` 等内部值。
 - 原生成功播报使用 `speak/to_speak` replay。
 - `think` 阶段 freeze mediaplayer，用于完整拦截原生失败播报。
+
+> 2026-09-06 补充：上述旧结论应区分系统；boot1 已通过失败 Speak 文本规则 + C 快速拦截实测拦住提示音，仍跳过 think 预冻结。见 [最新记录](../../history/2026-09-06-boot1-fallback-guard.md)。
 - 已验证 `/data/mibrain/mibrain_asr_nlp.rcd` 不比 `mibrain nlp_result_get` 更早，且中文字段会断行，不适合作为正式路由来源。
 - 已验证 `ubus monitor` 未看到更早的结构化 ASR/NLP push 事件。
 

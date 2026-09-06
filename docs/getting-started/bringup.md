@@ -145,7 +145,7 @@ SSH 可用后，按 [quickstart.md](quickstart.md) 完成：上传 `/data` 脚�
 
 → [../runbooks/boot1-ssh.md](../runbooks/boot1-ssh.md)
 
-打通后切到 boot1，重复第 6 步的三条验证用例。SSH 下切换 boot 的命令见 [../runbooks/operations.md](../runbooks/operations.md#5-boot-分区切换)。
+打通后切到 boot1，安装 [AIVS 快速拦截器](../../device/aivs_guard/README.md)，重复第 6 步三条用例与 [P3 失败提示拦截用例](../../tests/manual_native_first_cases.md#p3-boot1-失败提示漏播对照)。2026-09-06 已在 S12A 的 boot1/system1（ROM 1.76.54）实测：匹配到的小爱失败提示可被拦截并转 LLM，修正版重启后用户确认正常转接、没有先播失败提示。SSH 下切换 boot 的命令见 [../runbooks/operations.md](../runbooks/operations.md#5-boot-分区切换)。
 
 ## 8. 配置断电自启动
 

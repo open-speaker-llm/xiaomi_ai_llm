@@ -1,5 +1,7 @@
 # 开发调试常用命令
 
+> 2026-09-06 结论更新：boot1 不做 think 预冻结，但已通过 AIVS 失败文本匹配与 C 快速拦截实现首轮转 LLM 前无失败提示，修正版重启后经用户确认；报时对照正常。domain/action 路由主要适用于 boot0；boot1 的 michat/model 是客户端合成标记。未知文案仍可能漏判或误判，连续追问限制不在此次修复范围。详见 [实测记录](../../history/2026-09-06-boot1-fallback-guard.md)。以下保留当时记录。
+
 本文档记录小米 AI 音箱改造项目开发和调试时常用的命令。
 
 启动链路和分区概念说明见 [docs/BOOT_FLOW.md](docs/BOOT_FLOW.md)，包括 `boot0/boot1`、`system0/system1`、`kernel`、`initramfs`、`rootfs`、OpenWrt/LEDE 等基础概念。
@@ -508,6 +510,8 @@ smartMiot time weather music player alarm timer system volume
 - `speak` 是小米原生准备播报的文本；当前默认成功 domain 后立即恢复播放器并 replay `speak`，不再额外等待。
 - 已验证 `/data/mibrain/mibrain_asr_nlp.rcd` 不比 `mibrain nlp_result_get` 更早，且中文 `query/speak` 在 `strings` 输出里会断行，不适合作为正式路由来源。
 - 已验证 `ubus monitor` 未看到更早的 `RESULT_ASR/RESULT_NLP` push 事件；公开可用的结构化结果来源仍是 `mibrain nlp_result_get`。
+
+> 2026-09-06 补充：上述旧结论应区分系统；boot1 已通过失败 Speak 文本规则 + C 快速拦截实测拦住提示音，仍跳过 think 预冻结。见 [最新记录](../../history/2026-09-06-boot1-fallback-guard.md)。
 
 结果源按系统自动适配：
 

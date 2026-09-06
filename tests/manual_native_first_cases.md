@@ -61,7 +61,7 @@ tail -f /tmp/native_first_client.log /tmp/native_first_events.log
 
 期望：
 
-- 原生失败播报被拦截，最好听不到“还在学习中”等失败文案。
+- 对命中规则的失败文案，应转 LLM 且听不到先行失败提示；分别记录云端原话、是否转接与听觉结果，不能只记“通过”。
 - 日志出现 `unsupported` 或 `non-success-domain`。
 - 日志出现 `[LLM] fallback`。
 - LLM 正常播报。
@@ -100,6 +100,20 @@ tail -f /tmp/native_first_client.log /tmp/native_first_events.log
 - 不串台。
 - 不重复上一轮问题。
 - 日志能看到 busy 忽略或等效保护。
+
+### P3. boot1 失败提示漏播对照
+
+2026-09-06：首版两轮通过、报时正常；之后发现新文案漏判，修正规则并重启后，用户再次确认正常转 LLM 且没有失败提示。详情见 [实测记录](../docs/history/2026-09-06-boot1-fallback-guard.md)。
+
+回归时在 boot1 上，用相同提问做至少两轮对照，例如“人类可能实现 AGI”（同时核对 ASR 实际文字）。
+
+- 原生返回“这可把我难住了，看来要更努力学习了”时，应识别为失败并转 LLM。
+- 启用 guard 后核对 `GUARD_BLOCK` 是否早于 shell 的 fallback，并由用户确认转接前有无可听见的失败提示；日志不能代替听觉验证。
+- 再问“现在几点”，应完整走小爱原生播报，不出现新增 `GUARD_BLOCK`。
+- 覆盖“被难住了诶，看来我还要再学习一下”等曾遗漏文案；云端未返回同一句时，注明仅有分类回归证据。
+- 用 LLM 回答含“不会/不知道”的句子检查 busy 保护与完整播报；原生正常回答含相似词的误判另行记录。本项是回归要求，不代表本轮已经做过听觉验证。
+- 持久安装后重启，确认 helper 自动启动，再重复失败提示用例。
+- 测试完成应回到 IDLE，播放器不残留暂停标记；关闭 guard 或缺少 helper 时仍能执行原有 fallback。
 
 ## 3. boot 兼容
 

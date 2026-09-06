@@ -24,7 +24,7 @@ docs/
 
 1. [concepts/native-first.md](concepts/native-first.md) —— 路由标准、播放控制、boot0/boot1 兼容，10 分钟看完核心设计
 2. [concepts/boot-and-partitions.md](concepts/boot-and-partitions.md) —— 双系统分区布局和它带来的所有麻烦
-3. `device/native_first_client.sh` —— 主客户端就这一个文件，状态机全在里面
+3. `device/native_first_client.sh` —— 主状态机；boot1 的快速失败播报拦截另见 [guard](../device/aivs_guard/README.md)
 4. [history/journey.md](history/journey.md) 的失败路线表 —— 避免重走死路
 
 **路径 C：我只想看故事**
@@ -39,6 +39,7 @@ docs/
 | SSH 已可用，快速联调 | [getting-started/quickstart.md](getting-started/quickstart.md) |
 | 日常启动/停止/看日志/切 boot | [runbooks/operations.md](runbooks/operations.md) |
 | boot0 打通 SSH（串口/failsafe） | [runbooks/boot0-ssh.md](runbooks/boot0-ssh.md) |
+| boot1 失败提示拦截（2026-09-06 已实测） | [修复与验证记录](history/2026-09-06-boot1-fallback-guard.md)、[部署说明](../device/aivs_guard/README.md) |
 | boot1 打通 SSH（镜像注入） | [runbooks/boot1-ssh.md](runbooks/boot1-ssh.md) |
 | 保持双系统 SSH、关闭原生 OTA、手动升级 | [runbooks/owner-maintenance.md](runbooks/owner-maintenance.md) |
 | 查看 2026-09-05 SSH 恢复与双系统验证结果 | [history/2026-09-05-ssh-ota-recovery.md](history/2026-09-05-ssh-ota-recovery.md) |

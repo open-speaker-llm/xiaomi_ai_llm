@@ -509,6 +509,8 @@ ssh -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa root@192.16
 
 ### 14.4 boot1 能 SSH 后，启动音箱助手用什么命令？
 
+2026-09-06 已在 S12A 的 boot1/system1（ROM 1.76.54）实测：匹配到的小爱失败提示可被拦截并转 LLM，修正版重启后用户确认正常转接、没有先播失败提示。需要同版本客户端与 `/data/aivs_speech_guard`，见 [构建部署](../../device/aivs_guard/README.md) 和 [实测记录](../history/2026-09-06-boot1-fallback-guard.md)。SSH 可用与失败提示拦截是两项独立验证。
+
 boot1/system1 上必须保持小米原生音频链路，配置保持 `auto`：
 
 ```sh

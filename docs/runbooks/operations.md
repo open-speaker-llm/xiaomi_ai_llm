@@ -124,7 +124,7 @@ vi /data/native_first.env
 
 2026-09-05 本项目实机已验证两套系统公钥 SSH 与原生 OTA 拦截，默认回到 boot0，用户确认唤醒和回复正常。其他设备或后来刷入的镜像需单独核验。维护策略和验证命令见 [双系统 SSH 与受控升级](owner-maintenance.md)。
 
-切换前确认目标系统已具备 SSH；SSH 可用不代表助手已配置自启动。本次未向 system1 额外添加 `/data/init.sh` 启动入口。
+切换前确认目标系统已具备 SSH；SSH 可用不代表助手已配置自启动。2026-09-06 已补齐本机 system1 的入口，并持久安装失败提示快速拦截器；boot1 重启后自动启动、转 LLM 无先行失败提示已验证。见 [自启动恢复](../history/2026-09-06-boot1-autostart.md) 与 [拦截修复](../history/2026-09-06-boot1-fallback-guard.md)。
 
 查看当前启动分区：
 

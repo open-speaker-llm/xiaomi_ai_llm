@@ -13,6 +13,8 @@
 
 - [2026-09-06-boot1-autostart.md](2026-09-06-boot1-autostart.md) —— 补齐 system1 的助手自启动入口，切回 boot1 后验证开机自动启动。
 
+- [2026-09-06-boot1-fallback-guard.md](2026-09-06-boot1-fallback-guard.md) —— boot1 失败提示已实测拦截；含首版遗漏、修正版重启后听觉确认、报时对照及状态字段复核。
+
 ## 2. 归档快照
 
 文档重构前的完整 Markdown 原文在：

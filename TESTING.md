@@ -19,6 +19,7 @@
 - Shell 脚本语法检查。
 - `device/native_first.env.example` 可被 shell source。
 - 关键推荐参数与客户端默认值一致。
+- boot1 guard 的 C JSON/Unicode 分类、文案回归、暂停所有权，以及 boot0/缺少 helper 的兼容行为。
 
 ## 2. 人工测试
 
@@ -36,6 +37,8 @@ tests/manual_native_first_cases.md
 - boot 差异：boot0 与 boot1 的结果源适配。
 - 追问实验：仅在明确开启追问时测试。
 
+2026-09-06 的 boot1 失败提示拦截已完成用户听觉确认，修正版重启后复测通过，原生报时对照正常；24 项自动测试和设备端 16 个分类样例通过。验证范围与首版遗漏见 [实测记录](docs/history/2026-09-06-boot1-fallback-guard.md)，不能据此断言所有文案都已覆盖。
+
 ## 3. 修改后跑哪些测试
 
 | 改动范围 | 必跑 |
@@ -44,7 +47,7 @@ tests/manual_native_first_cases.md
 | `native_first_client.sh` 状态机 | 自动化测试 + M1/M2/M3 |
 | 原生路由 domain/action | 自动化测试 + M1/M2/M3 |
 | 播放 freeze/replay | 自动化测试 + M1/M2/M3/B3 |
-| boot1 兼容 | 自动化测试 + boot1 人工用例 |
+| boot1 兼容或 guard/失败文案规则 | 自动化测试 + P3/S2（含重启验证和原生报时对照） |
 | 追问相关 | 自动化测试 + 追问实验用例 |
 
 ## 4. 提交前建议

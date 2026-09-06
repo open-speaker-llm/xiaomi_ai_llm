@@ -1,5 +1,7 @@
 # HyperFrames Captions And Demo Implementation Plan
 
+> 2026-09-06 文档勘误：boot1 采用 AIVS 文本规则与快速拦截，已实测拦住匹配的失败提示，见 [记录](../../history/2026-09-06-boot1-fallback-guard.md)。此处更新说明稿，不代表旧视频或旁白音频已重新生成。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Improve technical captions and TTS pronunciation, then insert the complete original-audio demo immediately after the first LLM handoff explanation.
@@ -29,7 +31,7 @@
 - Replace: `xiaomi-ai-llm-explainer/assets/narration.srt`
 - Replace: `xiaomi-ai-llm-explainer/assets/captions.js`
 
-- [ ] Replace “这里不是靠关键词猜测。” in `narration-tts.txt` with “这段实测背后，关键不是关键词匹配，而是读取原生结构化结果。”
+- [ ] Replace “这里不是靠关键词猜测。” in `narration-tts.txt` with “路由要按系统区分：boot0 读取原生意图字段，boot1 匹配原生回复文本。”
 - [ ] Keep technical identifiers in natural spoken Chinese without changing narrative meaning.
 - [ ] Generate EdgeTTS audio and subtitles with `zh-CN-YunjianNeural`.
 - [ ] Regenerate display captions with the tested transformation.

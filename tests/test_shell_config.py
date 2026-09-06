@@ -38,6 +38,31 @@ class ShellConfigTest(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_aivs_guard_stays_off_on_boot0_or_when_disabled(self):
+        import re
+        text = (ROOT / 'device/native_first_client.sh').read_text()
+        function = re.search(r'^start_aivs_speech_guard\(\) \{.*?^\}', text, re.M | re.S).group()
+        for enabled, root_status in [('1', 1), ('0', 0)]:
+            script = (function + '\n' +
+                      f'AIVS_GUARD_ENABLED={enabled}; FREEZE_NATIVE_PLAYER_ON_FALLBACK=1; '
+                      f'is_system1_root() {{ return {root_status}; }}; '
+                      'log() { echo unexpected; }; start_aivs_speech_guard')
+            result = self.run_shell(script)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, '')
+
+    def test_aivs_guard_missing_helper_keeps_polling(self):
+        import re
+        text = (ROOT / 'device/native_first_client.sh').read_text()
+        function = re.search(r'^start_aivs_speech_guard\(\) \{.*?^\}', text, re.M | re.S).group()
+        result = self.run_shell(function + '\n' +
+                                'AIVS_GUARD_ENABLED=1; FREEZE_NATIVE_PLAYER_ON_FALLBACK=1; '
+                                'AIVS_GUARD_BIN=/nonexistent/aivs_guard; '
+                                'is_system1_root() { return 0; }; log() { echo "$*"; }; '
+                                'start_aivs_speech_guard')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('keeping normal fallback polling', result.stdout)
+
     def test_native_first_env_example_is_sourceable(self):
         result = self.run_shell(
             ". device/native_first.env.example; "

@@ -1,5 +1,7 @@
 # boot1 SSH 打通操作手册
 
+> 2026-09-06 结论更新：boot1 不做 think 预冻结，但已通过 AIVS 失败文本匹配与 C 快速拦截实现首轮转 LLM 前无失败提示，修正版重启后经用户确认；报时对照正常。domain/action 路由主要适用于 boot0；boot1 的 michat/model 是客户端合成标记。未知文案仍可能漏判或误判，连续追问限制不在此次修复范围。详见 [实测记录](../../history/2026-09-06-boot1-fallback-guard.md)。以下保留当时记录。
+
 本文档记录如何在小米音箱 `system1` rootfs 中注入 SSH 启动 hook，使设备启动到 `boot1/system1` 时也能通过 SSH 登录。
 
 目标读者：没有 LLM 协助时，能按本文独立完成操作。
@@ -523,6 +525,8 @@ NATIVE_AIVS_LAB_RESULT_SYSTEM1=1
 boot1 的真实唤醒 hook 事件可能只有 `think/ready`，没有 boot0 上常见的 `WuW`。因此 `WAKE_ON_THINK_SYSTEM1=1` 会在检测到 root 为 `/dev/mtdblock5` 时，把 `think` 当作 native-first 状态机触发源。
 
 boot1 上 `think` 阶段不会提前 freeze `mediaplayer`，否则可能影响原生 ASR/NLP 继续产出结果。boot0 仍保留原来的 think 预冻结策略。
+
+> 2026-09-06 补充：上述旧结论应区分系统；boot1 已通过失败 Speak 文本规则 + C 快速拦截实测拦住提示音，仍跳过 think 预冻结。见 [最新记录](../../history/2026-09-06-boot1-fallback-guard.md)。
 
 boot0 与 boot1 的小爱语音链路不是同一套：
 

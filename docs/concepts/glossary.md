@@ -11,7 +11,7 @@
 | TTS | Text To Speech | 文字转语音。Mac 服务端当前使用 EdgeTTS，默认音色 `zh-CN-YunjianNeural`。 |
 | VAD | Voice Activity Detection | 语音活动检测，用于判断什么时候开始/停止录音。 |
 | LLM | Large Language Model | 大语言模型，例如 DeepSeek、MiniMax、Claude、OpenAI。 |
-| NLP | Natural Language Processing | 自然语言理解。小米原生把 ASR 文本解析成 `domain`/`action`/`query` 等结构化意图，native-first 据此判断走原生还是转 LLM。 |
+| NLP | Natural Language Processing | 自然语言理解。小米原生把 ASR 文本解析成 `domain`/`action`/`query` 等结构化意图，boot0 可据此路由；boot1 的失败判定使用 AIVS `Speak.text` 文本规则。 |
 | ALSA | Advanced Linux Sound Architecture | Linux 音频子系统，提供录音/播放设备接口，例如 `arecord`、`aplay`、`Capture`。 |
 | PCM | Pulse-code Modulation | 原始数字音频格式，常见参数包括采样率、声道数、位深。 |
 | WAV | Waveform Audio File Format | 常见音频文件容器，内部通常保存 PCM 音频。 |
@@ -36,6 +36,6 @@
 | U-Boot | Bootloader | 上电后负责选择 boot 分区并加载 kernel 的引导程序。 |
 | failsafe | OpenWrt 救援模式 | 启动早期进入的救援环境，可用于修复配置、恢复 SSH 等。 |
 | IDLE / idle | 状态机状态 | `native_first_client.sh` 的待机状态，等待原生唤醒词；日志 `[IDLE] 等待原生唤醒词：小爱同学`。其余状态如 `NATIVE_PROCESSING`、`LLM_SPEAKING`、`FOLLOWUP_WINDOW` 表示处理流程的不同阶段。 |
-| `instruction.log` | aivs 指令日志 | `/tmp/mico_aivs_lab/instruction.log`，boot1 上原生 ASR/NLP/TTS 指令的落地日志，native-first 在 boot1 从这里读结构化结果。会定期清空重写。 |
+| `instruction.log` | aivs 指令日志 | `/tmp/mico_aivs_lab/instruction.log`，boot1 上原生 ASR/NLP/TTS 指令的落地日志，native-first 在 boot1 从这里读取 `RecognizeResult` 和 `Speak.text`；JSON 指令结构不等于已提供业务失败状态。会定期清空重写。 |
 | `dialog_id` | aivs 对话标识 | 一轮对话的唯一 id。新 `dialog_id` 出现通常意味着开启了一次新的识别会话。 |
 

@@ -98,6 +98,10 @@ DEVICE_TTS_VOICE=zh-CN-YunjianNeural
 
 `dist/ettsc` 是本地构建产物，不提交到仓库；如果不想使用 EdgeTTS，保持 `TTS_FALLBACK_NATIVE=1` 即可退回小爱原生 TTS。
 
+### boot1 失败提示快速拦截
+
+boot1 除客户端脚本外，还需按 [guard 构建部署说明](../../device/aivs_guard/README.md) 安装 `/data/aivs_speech_guard`，保持 `AIVS_GUARD_ENABLED=1` 与 `FREEZE_NATIVE_PLAYER_ON_FALLBACK=1`。只上传 shell 不会获得快速拦截；helper 缺失时退回原有轮询。2026-09-06 已在 S12A 的 boot1/system1（ROM 1.76.54）实测：匹配到的小爱失败提示可被拦截并转 LLM，修正版重启后用户确认正常转接、没有先播失败提示。
+
 ## 3. 启动音箱客户端
 
 登录音箱：
@@ -141,6 +145,8 @@ tail -f /tmp/native_first_client.log /tmp/native_first_events.log
 | 小爱同学，开灯 | 走原生，不进 LLM |
 | 小爱同学，今天天气怎么样 | 走原生播报 |
 | 小爱同学，呼叫 DeepSeek | 原生不支持，转 LLM |
+
+boot1 还应执行 P3：用会触发失败提示的问题核对转 LLM 前无失败音，再问时间并重启复测。云端文案会变化，需记录实际文本。
 
 更完整人工用例见 [../../tests/manual_native_first_cases.md](../../tests/manual_native_first_cases.md)。
 

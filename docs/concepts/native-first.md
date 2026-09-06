@@ -2,7 +2,7 @@
 
 文档类型：当前主线架构
 适用范围：理解为什么先走小米原生、什么时候转 LLM、boot0/boot1 如何兼容
-当前结论：路由依据优先是小米原生结构化结果，不是文本关键词
+当前结论：boot0 按原生 domain/action 路由；boot1 按 AIVS 文本规则路由，失败提示快速拦截已于 2026-09-06 实机验证
 
 ## 1. 目标
 
@@ -15,7 +15,7 @@ native-first 不是重写一个小爱，而是把小爱已经做得稳定的部�
 
 LLM 只接管小米原生不擅长的开放问答。
 
-实现上整条链路就两个东西：音箱端一个约 1700 行的 shell 状态机（`device/native_first_client.sh`），Mac 端一个 FastAPI 服务（`server/`）。
+音箱端由 shell 状态机（`device/native_first_client.sh`）负责主流程，boot1 配合 C 快速拦截器（`device/aivs_guard/`）；可选 FastAPI 服务（`server/`）提供 LLM/TTS 辅助链路。
 
 ## 2. 主流程
 
@@ -23,10 +23,12 @@ LLM 只接管小米原生不擅长的开放问答。
 用户说"小爱同学"
   → /bin/wakeup.sh 被原生链路调用
   → native_first_client.sh 的 hook 记录 WuW/think/ready 事件
-  → 小米原生 ASR/NLP 得到结构化结果
-  → native_first_client.sh 读取结果
-       → 成功 domain：交回原生/replay speak
-       → 不支持 domain 或失败文案：拦截原生播报，转 LLM
+  → 小米原生 ASR/NLP 先处理
+  → boot0：读取 domain/action 与 speak，按路由策略选择原生或 LLM
+  → boot1：读取 RecognizeResult 与 Speak.text
+       → 命中直接转 LLM 的提问或失败文案：转 LLM
+       → guard 在匹配失败 Speak 后暂停播放器，shell 接手
+       → 未命中：原生链路继续处理，不据此保证原生一定答对
   → 音箱直连 LLM 拿回答
   → TTS 播放：优先可选 EdgeTTS 服务；不可用时走原生 mibrain TTS
   → 音箱播放
@@ -36,28 +38,22 @@ hook 的实现方式是把 `/bin/wakeup.sh` 用 bind mount 替换为自己的脚
 
 ## 3. 路由标准
 
-优先级：
+### boot0：结构化结果与文本辅助
 
-1. `domain/action`：判断原生是否支持。
-2. `speak/to_speak`：原生成功播报内容。
-3. `query`：只在 fallback 到 LLM 时作为文本输入。
-4. 文本关键词：只作为最后兜底，不作为主判断依据。
+读取 `nlp_result_get` 中同一条最新结果的 `domain/action/query/to_speak`。现有代码先检查失败文案或 `michat/model`，再检查原生能力白名单；非白名单转 LLM。典型原生 domain 为 `smartMiot soundboxControl weather time music player alarm timer system volume`。
 
-典型成功 domain：
+`domain` 表示能力类别，不是通用成功/失败状态；例如 `qabot/query` 可能有正常回答，也可能有失败提示。实际路由还需结合配置与文本，不能把非白名单都解释为小米明确报错。
 
-```text
-smartMiot soundboxControl weather time music player alarm timer system volume
-```
+### boot1：AIVS 文本规则与快速拦截
 
-典型 fallback domain：
+- `RecognizeResult` 给出用户提问；命中 `DIRECT_LLM_QUERY_PATTERNS`（默认 DeepSeek 的大小写写法）时直接转 LLM。
+- 其余提问等待原生 `SpeechSynthesizer/Speak` 的 `payload.text`，命中 `UNSUPPORTED_PATTERNS` 后转 LLM。shell 与 guard 共用这份表达式。
+- 适配器在匹配后填入的 `michat/model` 是客户端内部路由标记，**不是 boot1 固件返回的失败状态**。
+- 未找到已验证可替代文本匹配的业务失败字段。`open_mic/valid_speech/valid_speak` 出现在历史追问实验中，尚无正常回答与失败提示的分类对照，且记录位于 finish 阶段。
 
-```text
-michat qabot shopping nonsense
-```
+2026-09-06 已在 S12A 的 boot1/system1（ROM 1.76.54）实测：匹配到的小爱失败提示可被拦截并转 LLM，修正版重启后用户确认正常转接、没有先播失败提示。判定仍依赖文本规则，未知文案可能漏判，正常回答含相似词也可能误判；不保证所有文案、时序或固件都无漏音。详见 [实测与历史字段复核](../history/2026-09-06-boot1-fallback-guard.md)。
 
-这些 domain 不一定永远失败，但当前实测里经常对应"还在学习中""正在搜索"等非目标能力，所以会进入 fallback 或继续观察。
-
-### 为什么 query 不能作为主判断
+### boot0 的 query 占位值
 
 日志里可能出现：
 
@@ -74,7 +70,9 @@ domain=weather action=query query=token speak=杭州上城今天...
 - 在 `think` 阶段 freeze `mediaplayer`（boot0；boot1 见下文）。
 - 拿到原生结果后判断路由。
 - 原生成功：resume 播放器，并按需要 replay `speak`。
-- 原生失败：保持拦截，调用 Mac LLM。
+- 原生失败：保持拦截，按 `LLM_PIPELINE` 选择音箱直连 LLM 或经服务端调用。
+
+LLM 请求与播报期间会设置 `/tmp/native_first_busy`，guard 在 busy 状态不执行拦截；LLM 回答文本本身不经过原生失败分类，包括降级原生 TTS 的正常流程。该保护不消除小爱原生回答的文本误判风险。
 
 控制类短播报支持"下一次唤醒取消旧播报"，避免用户已经进入下一轮对话时又听到上一轮"开啦/关啦"。对应配置：
 
@@ -112,7 +110,7 @@ NATIVE_AIVS_LAB_RESULT_SYSTEM1=1
 boot1 还有三个实测得出的行为差异，`auto` 配置都已自动处理：
 
 - **唤醒事件不同**：boot1 的 hook 事件可能只有 `think/ready`，没有 boot0 常见的 `WuW`。`WAKE_ON_THINK_SYSTEM1=1` 会在 boot1 上把 `think` 当作状态机触发源。
-- **think 阶段不预冻结**：boot1 上 `think` 阶段提前 freeze `mediaplayer` 可能影响原生 ASR/NLP 继续产出结果，所以只在拿到 fallback 判定后再拦截；boot0 保留 think 预冻结。
+- **think 阶段不预冻结**：boot1 上 `think` 阶段提前 freeze `mediaplayer` 可能影响原生 ASR/NLP 继续产出结果，所以保留播放器运行到失败指令出现；安装 [AIVS 快速拦截器](../../device/aivs_guard/README.md) 后，由它监听新增失败 `Speak` 并提前暂停，shell 随后接手 fallback；缺少 helper 时仍按原轮询逻辑。boot0 保留 think 预冻结。
 - **不接管音频采集**：`AUDIO_CAPTURE_SETUP=auto` 在检测到 boot1 时跳过 `dsnoop` 和 `libxaudio_engine.so` 覆盖，否则可能导致原生 `recorder` 崩溃——表现为能唤醒但开关灯、天气都不响应。
 
 重要原则：**不要试图把两套系统"硬填平"**。不要复制 boot0 的 `mibrain_service`、`mipns-xiaomi`、`libxaudio_engine.so` 或 `wakeup.sh` 去覆盖 boot1。当前长期方案就是在脚本里保留两套结果源适配器。
@@ -165,6 +163,8 @@ fallback 到 LLM 时走哪条链路由 `LLM_PIPELINE` 决定。**当前主线是
 相关配置见 `device/native_first.env.example` 的"音箱端直连 LLM"段。回退随时可做：`LLM_PIPELINE=server` 即切回经 Mac 的老链路。
 
 ## 8. 连续追问状态
+
+首轮失败提示拦截已实测通过；下述限制仅针对 LLM 回答后的免唤醒追问。
 
 当前追问不是最终方案：
 

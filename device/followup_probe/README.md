@@ -1,5 +1,7 @@
 # followup_probe —— 原生追问逆向工具
 
+> 2026-09-06：这里的限制仅针对免唤醒追问。boot1 首轮失败提示快速拦截已实测通过，见 [修复记录](../../docs/history/2026-09-06-boot1-fallback-guard.md)。
+
 这些是探索"无唤醒词连续追问"过程中写的实验工具。**结论：原生链路做无唤醒词追问在本固件不可达**，详见 [../../docs/history/followup-exploration.md](../../docs/history/followup-exploration.md) §6–§7。保留它们用于复现与后续研究。
 
 ## 编译

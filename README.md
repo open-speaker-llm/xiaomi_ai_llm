@@ -25,9 +25,10 @@
 ```text
 "小爱同学" 唤醒
   → 小米原生 ASR/NLP 先处理
-  → native_first_client.sh（音箱端，纯 shell）读取原生结构化结果
-       → 原生成功 domain（家电/天气/音量…）：交回原生，replay 播报
-       → 原生不支持：冻结失败播报，音箱自己直连 LLM 拿回答（主线）
+  → native_first_client.sh 按系统读取结果（boot1 配合 C 快速拦截器）
+       → boot0：按 domain/action 与文本辅助路由，成功时按需 replay
+       → boot1：按提问触发词或失败 Speak 文案路由，guard 快速拦截失败提示
+       → 原生能力继续由小爱处理；需转 LLM 时音箱自己直连拿回答（主线）
   → 交给 TTS_ENGINE：server 微服务 / device 端侧 ettsc / 原生 mibrain 兜底
   → 音箱播放
 ```
@@ -42,7 +43,7 @@
 
 另保留**经 Mac 调 LLM**（`LLM_PIPELINE=server`）作开发联调 / 回退。
 
-这条 **native-first（原生优先）** 路线的核心判断：不要替换小爱，而是复用它最稳的部分——高质量唤醒、原生 ASR 和家电控制——只接管它不擅长的开放问答。路由依据是小米 NLP 的结构化 `domain/action` 字段，不是文本关键词猜测。详见 [docs/concepts/native-first.md](docs/concepts/native-first.md)。
+这条 **native-first（原生优先）** 路线的核心判断：不要替换小爱，而是复用它最稳的部分——高质量唤醒、原生 ASR 和家电控制——只接管它不擅长的开放问答。boot0 主要按原生 `domain/action` 路由；boot1 读取 AIVS 的提问与 `Speak.text`，按直接触发词或失败文案转 LLM，快速拦截器负责及时暂停失败播报。详见 [docs/concepts/native-first.md](docs/concepts/native-first.md)。
 
 ## 硬件与风险声明
 
@@ -169,7 +170,7 @@ tests/manual_native_first_cases.md        # 真实音箱人工用例
 
 ## 当前边界
 
-- native-first 首轮 fallback 是稳定主线；boot0 与 boot1 两套系统（2019/2023 ROM）均已适配。
+- native-first 首轮 fallback 是主线；boot0 与 boot1 两套系统（2019/2023 ROM）均已适配。2026-09-06 已在 S12A 的 boot1/system1（ROM 1.76.54）实测：匹配到的小爱失败提示可被拦截并转 LLM，修正版重启后用户确认正常转接、没有先播失败提示。见 [实测记录](docs/history/2026-09-06-boot1-fallback-guard.md)。判定仍依赖文本规则，未知文案可能漏判，正常回答含相似词也可能误判；不保证所有文案、时序或固件都无漏音。
 - **音箱直连 LLM（`LLM_PIPELINE=native`）是当前主线**：LLM 由音箱 shell 直接调用。TTS 可选 `server`（Mac/迷你服务端 EdgeTTS）、`device`（音箱端 `ettsc` 直连 EdgeTTS）或原生 `mibrain` 兜底。`server` 模式（经 Mac 调 LLM）保留作开发联调 / 回退。详见 [docs/concepts/native-first.md](docs/concepts/native-first.md)。
 - 连续追问（LLM 回答后不喊唤醒词直接追问）**未解决**：boot1 上免唤醒开麦的设备端手段（oneshot / event_notify / continuous reopen）经对照实验确认不通，唯一可工作的 ExpectSpeech 归云端控制；boot0 有实验性本地录音方案。详见 [docs/history/followup-exploration.md](docs/history/followup-exploration.md)。
 
@@ -179,12 +180,12 @@ tests/manual_native_first_cases.md        # 真实音箱人工用例
 
 | 维度 | **本项目** | open-xiaoai | mi-gpt | xiaogpt |
 |---|---|---|---|---|
-| 接入原理 | 本机 shell 读原生 NLP 结构化结果 | 刷机接管麦克风/扬声器 | 云账号 API 控制 | 云账号轮询对话记录 |
+| 接入原理 | 本机读取原生结果：boot0 NLP 字段；boot1 AIVS 文本 + C 拦截器 | 刷机接管麦克风/扬声器 | 云账号 API 控制 | 云账号轮询对话记录 |
 | 需要 root/刷机 | 拿 root，不全量刷机 | **全量刷机** | 不需要 | 不需要 |
 | 需要常驻电脑 | **不需要** | 需要 Server | 需要 PC/NAS | 需要 PC/Docker |
 | 依赖小米云账号 | **不依赖** | 不依赖 | 依赖 | 依赖 |
 | 支持设备 | 仅 MDZ-25-DA/S12A 老机 | 仅 2 款新机 | 多数机型 | 多数机型 |
-| 路由策略 | **按 NLP domain/action 分流** | 全量接管 | 关键词触发 | 关键词触发 |
+| 路由策略 | boot0 按 domain/action；boot1 按提问/失败文案 | 全量接管 | 关键词触发 | 关键词触发 |
 | 连续对话 | boot0 本地录音（实验性） | 真打断 | ✅ | ✅ |
 | 维护状态 | 活跃 | 已停更 | 已停更 | 活跃 |
 
