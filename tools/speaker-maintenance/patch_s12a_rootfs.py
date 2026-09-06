@@ -49,6 +49,8 @@ def main():
     parser.add_argument("--input-sha256", required=True)
     parser.add_argument("--rom", required=True, choices=sorted(SUPPORTED_ROMS))
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--autostart-only", action="store_true",
+                        help="Add rc.local startup to an already SSH/OTA-patched image")
     args = parser.parse_args()
     source = args.input.resolve()
     if sha256(source) != args.input_sha256:
@@ -79,53 +81,87 @@ def main():
     if not re.search(r"option\s+ROM\s+['\"]" + re.escape(args.rom) + r"['\"]", version):
         raise SystemExit("ROM does not match the reviewed input")
     before = inventory(root)
-    # Patch standard native entry points, not only the scheduled check.
-    originals = root / "usr/lib/owner-maintenance"
-    originals.mkdir(parents=True, exist_ok=False)
-    for name in ("ota", "flash.sh"):
-        target = root / "bin" / name
-        if not target.is_file() or target.is_symlink() or not target.read_bytes().startswith(b"#!/bin/sh"):
-            raise SystemExit("Unexpected native updater: " + name)
-        saved = originals / (name + ".original")
-        shutil.copyfile(target, saved)
-        saved.chmod(0o600)
-        shutil.copyfile(HERE / "ota-blocked.sh", target)
-        target.chmod(0o755)
-    cron = root / "etc/crontabs/root"
-    cron_lines = cron.read_text().splitlines()
-    active = [line for line in cron_lines if not line.lstrip().startswith("#") and "/bin/ota " in line]
-    if len(active) != 1:
-        raise SystemExit("Unexpected OTA cron layout")
-    cron.write_text("\n".join("# owner-maintenance disabled: " + line if line in active else line
-                              for line in cron_lines) + "\n")
-    hook = root / "etc/init.d/sshen"
-    shutil.copyfile(HERE / "sshen", hook)
-    hook.chmod(0o755)
-    link = root / "etc/rc.d/S45sshen"
-    if link.is_symlink():
-        if os.readlink(link) != "../init.d/sshen":
-            raise SystemExit("Unexpected existing sshen symlink")
-    elif link.exists():
-        raise SystemExit("Unexpected sshen startup entry")
+    if args.autostart_only:
+        # Require the reviewed maintenance payload before adding one startup line.
+        for installed, template in (("bin/ota", "ota-blocked.sh"),
+                                    ("bin/flash.sh", "ota-blocked.sh"),
+                                    ("etc/init.d/sshen", "sshen")):
+            target = root / installed
+            if target.is_symlink() or sha256(target) != sha256(HERE / template):
+                raise SystemExit("Not a verified maintenance-patched image: " + installed)
+        if os.readlink(root / "etc/rc.d/S45sshen") != "../init.d/sshen":
+            raise SystemExit("Unexpected SSH startup entry")
+        config_text = (root / "etc/config/dropbear").read_text()
+        for setting in ("PasswordAuth", "RootPasswordAuth"):
+            values = re.findall(r"option\s+" + setting + r"\s+['\"]([^'\"]+)['\"]", config_text)
+            if values != ["0"]:
+                raise SystemExit("Password authentication is not disabled")
+        if any("/bin/ota" in line and not line.lstrip().startswith("#")
+               for line in (root / "etc/crontabs/root").read_text().splitlines()):
+            raise SystemExit("OTA cron is still active")
+        rc_local = root / "etc/rc.local"
+        if rc_local.is_symlink() or not rc_local.is_file():
+            raise SystemExit("Unexpected rc.local type")
+        text = rc_local.read_text()
+        active = [line.strip() for line in text.splitlines()
+                  if line.strip() and not line.lstrip().startswith("#")]
+        if active != ["exit 0"]:
+            raise SystemExit("Expected the reviewed empty rc.local; refusing to overwrite custom startup")
+        startup = '[ -f "/data/init.sh" ] && sh /data/init.sh >/dev/null 2>&1 &'
+        rc_local.write_text(text.replace("exit 0", startup + "\n\nexit 0", 1))
+        run(["sh", "-n", str(rc_local)])
     else:
-        link.symlink_to("../init.d/sshen")
-    keys = root / "etc/dropbear/authorized_keys"
-    if not keys.is_file() or keys.is_symlink():
-        raise SystemExit("Unexpected authorized_keys mount target")
-    config = root / "etc/config/dropbear"
-    contents = config.read_text()
-    for setting in ("PasswordAuth", "RootPasswordAuth"):
-        contents, count = re.subn(r"(option\s+" + setting + r"\s+)['\"][01]['\"]", r"\g<1>'0'", contents)
-        if count != 1:
-            raise SystemExit("Unexpected Dropbear authentication config")
-    config.write_text(contents)
-    for script in (hook, root / "bin/ota", root / "bin/flash.sh"):
-        run(["sh", "-n", str(script)])
+        # Patch standard native entry points, not only the scheduled check.
+        originals = root / "usr/lib/owner-maintenance"
+        originals.mkdir(parents=True, exist_ok=False)
+        for name in ("ota", "flash.sh"):
+            target = root / "bin" / name
+            if not target.is_file() or target.is_symlink() or not target.read_bytes().startswith(b"#!/bin/sh"):
+                raise SystemExit("Unexpected native updater: " + name)
+            saved = originals / (name + ".original")
+            shutil.copyfile(target, saved)
+            saved.chmod(0o600)
+            shutil.copyfile(HERE / "ota-blocked.sh", target)
+            target.chmod(0o755)
+        cron = root / "etc/crontabs/root"
+        cron_lines = cron.read_text().splitlines()
+        active = [line for line in cron_lines if not line.lstrip().startswith("#") and "/bin/ota " in line]
+        if len(active) != 1:
+            raise SystemExit("Unexpected OTA cron layout")
+        cron.write_text("\n".join("# owner-maintenance disabled: " + line if line in active else line
+                                  for line in cron_lines) + "\n")
+        hook = root / "etc/init.d/sshen"
+        shutil.copyfile(HERE / "sshen", hook)
+        hook.chmod(0o755)
+        link = root / "etc/rc.d/S45sshen"
+        if link.is_symlink():
+            if os.readlink(link) != "../init.d/sshen":
+                raise SystemExit("Unexpected existing sshen symlink")
+        elif link.exists():
+            raise SystemExit("Unexpected sshen startup entry")
+        else:
+            link.symlink_to("../init.d/sshen")
+        keys = root / "etc/dropbear/authorized_keys"
+        if not keys.is_file() or keys.is_symlink():
+            raise SystemExit("Unexpected authorized_keys mount target")
+        config = root / "etc/config/dropbear"
+        contents = config.read_text()
+        for setting in ("PasswordAuth", "RootPasswordAuth"):
+            contents, count = re.subn(r"(option\s+" + setting + r"\s+)['\"][01]['\"]", r"\g<1>'0'", contents)
+            if count != 1:
+                raise SystemExit("Unexpected Dropbear authentication config")
+        config.write_text(contents)
+        for script in (hook, root / "bin/ota", root / "bin/flash.sh"):
+            run(["sh", "-n", str(script)])
     after = inventory(root)
     changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
     allowed = {"bin/ota", "bin/flash.sh", "etc/crontabs/root", "etc/init.d/sshen", "etc/rc.d/S45sshen",
                "etc/config/dropbear", "usr/lib/owner-maintenance", "usr/lib/owner-maintenance/ota.original",
                "usr/lib/owner-maintenance/flash.sh.original"}
+    if args.autostart_only:
+        allowed = {"etc/rc.local"}
+        if set(changed) != allowed:
+            raise SystemExit("Autostart must change only etc/rc.local")
     if set(changed) - allowed:
         raise SystemExit("Unexpected changes: " + repr(set(changed) - allowed))
     pseudo = out / "devices.txt"
@@ -157,6 +193,7 @@ def main():
             raise SystemExit("Packed image is missing a required device node")
     manifest = {"policy": "owner-maintenance-v1", "hardware": "S12A", "rom": args.rom,
                 "input_sha256": args.input_sha256, "changed_paths": changed,
+                "autostart_only": args.autostart_only,
                 "output_bytes": padded.stat().st_size, "output_sha256": sha256(padded),
                 "gzip_sha256": sha256(out / "rootfs-padded.img.gz"),
                 "verified_content": True, "flashed": False}

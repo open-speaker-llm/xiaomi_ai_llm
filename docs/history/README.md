@@ -11,6 +11,8 @@
 
 - [2026-09-05-ssh-ota-recovery.md](2026-09-05-ssh-ota-recovery.md) —— 实机 boot1 SSH 恢复、两套系统原生 OTA 拦截与重启验证；最终 boot0 唤醒和回复由用户确认正常。
 
+- [2026-09-06-boot1-autostart.md](2026-09-06-boot1-autostart.md) —— 补齐 system1 的助手自启动入口，切回 boot1 后验证开机自动启动。
+
 ## 2. 归档快照
 
 文档重构前的完整 Markdown 原文在：

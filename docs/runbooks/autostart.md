@@ -2,7 +2,7 @@
 
 文档类型：长期部署操作手册  
 适用范围：让音箱断电重启后自动启动 `native_first_client.sh`  
-当前结论：system0/system1 的 `/etc/rc.local` 都已注入 `/data/init.sh` 入口；后续调整主要改 `/data/init.sh`
+当前结论：2026-09-06 实机已补齐 system1 的 `/data/init.sh` 入口并验证重启后客户端自动启动；system0 沿用既有入口。旧记录不替代实际镜像检查。
 
 本文记录让音箱断电重启后自动运行 `native_first_client.sh` 的候选方案。
 
@@ -27,7 +27,13 @@
 - `START=95` 足够靠后，比 SSH 的 `S45sshen` 更适合启动 native-first 客户端。
 - `/data` 是可写且持久化的，适合放后续可调整的启动脚本。
 
-## 1.1 2026-06-06 实际写入状态
+## 1.1 2026-09-06 实机补齐与验证
+
+本轮检查发现 system1 只有空的 `rc.local`，虽能 SSH 和使用小爱，但没有启动 LLM 客户端。手动启动后用户确认转 LLM 正常，因此只补齐 `rc.local -> /data/init.sh`。从 boot0 写备用 system1、读回校验后切回 boot1，确认开机自动启动并进入 `[IDLE]`，无需手动执行。
+
+构建使用 `patch_s12a_rootfs.py --autostart-only`，详细输入输出哈希、验证范围见 [实测记录](../history/2026-09-06-boot1-autostart.md)。下文 2026-06-06 的日志与镜像名称仅作为历史记录。
+
+## 1.2 2026-06-06 历史写入记录
 
 已完成：
 

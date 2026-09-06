@@ -5,6 +5,8 @@
 
 ## 最近一次实机验证
 
+2026-09-06：已补齐 system1 的助手自启动入口，经 boot0 写入后切回 boot1，确认客户端开机自动启动；最终保持 boot1。详见 [自启动恢复记录](../history/2026-09-06-boot1-autostart.md)。
+
 2026-09-05：boot0（1.54.8）与 boot1（1.76.54）均在写入读回校验、重启后通过现有公钥 SSH 登录和升级拦截检查。默认启动 boot0，用户确认唤醒和回复正常。boot1 验证了语音服务进程，未做实际语音交互测试，也未增加助手自启动入口。
 
 详细证据见 [本次恢复记录](../history/2026-09-05-ssh-ota-recovery.md)。这是该日实机状态，后续刷写或配置变动后需要重新核验。
@@ -56,6 +58,26 @@ python3 tools/speaker-maintenance/patch_s12a_rootfs.py \
 
 构建记录中的 `flashed: false` 表示构建器没有操作设备；实机部署与验证另行记录。
 当前工具拒绝未审核的新 ROM；必须先审核其内核/驱动、启动路径、分区容量和升级入口，才能扩展支持。不能通过仅修改版本白名单来声称兼容。
+
+## 为已有维护镜像补齐助手自启动
+
+如果实际检查发现 `rc.local` 只有 `exit 0`，而 `/data/init.sh` 和客户端已存在、手动运行正常，可以使用 `--autostart-only`。它要求输入已具备本工具的 SSH/OTA 补丁，只修改 `etc/rc.local`，拒绝覆盖已有自定义启动内容。
+
+```sh
+python3 tools/speaker-maintenance/patch_s12a_rootfs.py \
+  --input /绝对路径/system1-before.img \
+  --input-sha256 <实际核对过的SHA256> \
+  --rom 1.76.54 --autostart-only \
+  --output-dir /绝对路径/新的自启动构建目录
+```
+
+新增入口为：
+
+```sh
+[ -f "/data/init.sh" ] && sh /data/init.sh >/dev/null 2>&1 &
+```
+
+该模式不部署或修改 `/data/init.sh`、客户端与配置。缺少这些文件时应先完成部署。仍需从已验证的另一套系统写入备用分区、完整读回校验，再重启验证。启动后查看 `/tmp/native_first_autostart.log` 中的启动记录及 `/tmp/native_first_client.log` 中的 `[HOOK]` 和 `[IDLE]`，最后验证实际转 LLM。
 
 ## 手动受控升级
 
