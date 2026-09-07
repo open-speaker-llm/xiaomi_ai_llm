@@ -129,13 +129,36 @@ int main(void) {
     assert(!strcmp(s.text,"什么时候去？\"原样\"\n第二行")); state_close(fd,NULL);
 
     set_state_for_test(BOUND,"next-dialog");
-    assert(receive_json(1,&instruction)==1); /* delayed previous result cannot enter new turn */
+    assert(receive_json(1,&instruction)==0); /* delayed previous result cannot enter new turn */
     fd=state_open(&s); assert(fd>=0); assert(!s.final_seen && !s.text[0]); state_close(fd,NULL);
     j_dtor(&instruction);
+    set_state_for_test(NATIVE_HANDOFF,"owned");
+    const char *late_ns[]={"SpeechRecognizer","Dialog","System","MiotController"};
+    const char *late_names[]={"StopCapture","Finish","Abort","Operate"};
+    for (unsigned i=0;i<4;i++) {
+        header(&instruction,late_ns[i],late_names[i],"owned",0);
+        assert(receive_json(1,&instruction)==0); j_dtor(&instruction);
+        header(&instruction,late_ns[i],late_names[i],"physical-native",0);
+        assert(receive_json(1,&instruction)==1); j_dtor(&instruction);
+    }
     header(&instruction,"Dialog","Finish","owned",0);
     set_state_for_test(RESULT,"owned"); fd=state_open(&s); assert(fd>=0); s.final_seen=1; state_close(fd,&s);
     assert(receive_json(1,&instruction)==1);
     fd=state_open(&s); assert(fd>=0); assert(s.phase==COMPLETE && s.finished); state_close(fd,NULL);
+    /* Firmware parses Finish both for SDK bookkeeping and app dispatch. The
+     * second parse, including after the CLI consumes the result, must still
+     * reach the SDK or its TTS watchdog fires ten seconds after ASR final. */
+    assert(receive_json(1,&instruction)==1);
+    fd=state_open(&s); assert(fd>=0); s.phase=IDLE; state_close(fd,&s);
+    assert(receive_json(1,&instruction)==1);
+    fd=state_open(&s); assert(fd>=0); assert(s.phase==IDLE && s.finished); state_close(fd,NULL);
+    fd=state_open(&s); assert(fd>=0); s.phase=NATIVE_HANDOFF; state_close(fd,&s);
+    assert(receive_json(1,&instruction)==0); /* completed text can still be yielded */
+    fd=state_open(&s); assert(fd>=0); s.phase=BOUND;
+    strcpy(s.dialog,"new-native-dialog"); state_close(fd,&s);
+    assert(receive_json(1,&instruction)==0);
+    fd=state_open(&s); assert(fd>=0);
+    assert(s.phase==BOUND && !strcmp(s.dialog,"new-native-dialog")); state_close(fd,NULL);
     j_dtor(&instruction);
     test_wake_cue();
     unlink(CONTROL_FILE); unlink(CONTROL_DIR "/events.log"); assert(rmdir(CONTROL_DIR)==0);

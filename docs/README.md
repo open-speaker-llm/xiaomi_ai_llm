@@ -55,6 +55,7 @@ docs/
 | 和 open-xiaoai/mi-gpt/xiaogpt 有什么不同 | [concepts/comparison.md](concepts/comparison.md) |
 | 查术语：KWS、VAD、ALSA、rootfs… | [concepts/glossary.md](concepts/glossary.md) |
 | 测试怎么跑 | [../TESTING.md](../TESTING.md) / [../tests/manual_native_first_cases.md](../tests/manual_native_first_cases.md) |
+| 2026-09-07 对话可靠性优化与剩余问题 | [当日优化总结](history/2026-09-07-dialog-reliability.md) |
 | 某条路线是否已经试过 | [history/README.md](history/README.md) |
 
 ## 文档约定

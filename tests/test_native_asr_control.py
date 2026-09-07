@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import signal
 import struct
+import sys
 import subprocess
 import tempfile
 import time
@@ -81,6 +82,36 @@ class NativeAsrControlTest(unittest.TestCase):
         stdout, _ = p.communicate(timeout=2)
         self.assertEqual(p.returncode, 124)
         self.assertEqual(stdout, b'')
+
+    def test_physical_wake_handoff_discards_text_and_preserves_tombstone(self):
+        p = self.listen()
+        self.update({7: 8, 10: 1, 11: 1, 12: b'old-followup',
+                     13: '小爱同学关灯'.encode()})
+        stdout, _ = p.communicate(timeout=2)
+        self.assertEqual(p.returncode, 125)
+        self.assertEqual(stdout, b'')
+        self.assertEqual(self.read()[7], 8)
+
+    def test_native_wake_callback_releases_lease_before_original_callback(self):
+        binary = Path(self.temp.name) / 'wake-test'
+        directory = Path(self.temp.name) / 'wake-state'
+        includes = []
+        if sys.platform == 'darwin':
+            # These callback tests never exercise Linux thread-name APIs.
+            # Actual cue isolation is tested separately on the firmware.
+            headers = Path(self.temp.name) / 'headers'
+            (headers / 'sys').mkdir(parents=True, exist_ok=True)
+            (headers / 'sys/prctl.h').write_text(
+                '#define PR_GET_NAME 16\n'
+                'static inline int prctl(int option, ...) { (void)option; return -1; }\n')
+            includes = ['-I', str(headers)]
+        subprocess.run(['cc', '-O2', '-Wall', '-Wextra', '-Werror',
+                        '-DCONTROL_DIR="' + str(directory) + '"',
+                        str(ROOT / 'device/native_asr/test_native_asr_wake.c'),
+                        *includes, '-lpthread', '-ldl', '-o', str(binary)], check=True)
+        result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('PASS: 18 wake callbacks', result.stdout)
 
     def test_concurrent_request_is_rejected_and_cancel_releases_lease(self):
         p = self.listen()

@@ -170,6 +170,8 @@ DEVICE_TTS_UA="${DEVICE_TTS_UA:-}"            # 留空用 ettsc 内置默认
 DEVICE_TTS_ORIGIN="${DEVICE_TTS_ORIGIN:-}"    # 留空用 ettsc 内置默认
 # 句级流式：1=LLM 边流式输出边按句合成播放（首句即开声，LLM 慢时收益大）；0=整段收完再合成播放。
 DEVICE_TTS_STREAM="${DEVICE_TTS_STREAM:-1}"
+# 单句首次失败后额外重试次数；仍失败则按播放顺序交给原生 TTS。
+DEVICE_TTS_STREAM_RETRIES="${DEVICE_TTS_STREAM_RETRIES:-2}"
 # 流式播放采样率：ettsc(ETTSC_PCM=1) 把 mp3 解成裸 PCM，单个常驻 aplay 连续播，句间无缝。
 # EdgeTTS 输出为 24kHz 单声道，故 24000。
 DEVICE_TTS_PCM_RATE="${DEVICE_TTS_PCM_RATE:-24000}"
@@ -207,6 +209,9 @@ LLM_SESSION_MASTER_TARGET=""
 FOLLOWUP_VAD_PID=""
 HOOK_WATCHDOG_PID=""
 CURRENT_SESSION_ID=""
+# 仅 boot1 native_live 的 LLM 输入补全；不改变原生家电指令或云端 VAD。
+NATIVE_DIALOG_INPUT_GUARD="${NATIVE_DIALOG_INPUT_GUARD:-1}"
+NATIVE_DIALOG_INPUT_MAX_REPROMPTS="${NATIVE_DIALOG_INPUT_MAX_REPROMPTS:-2}"
 LED_FEEDBACK_PID=""
 NATIVE_PLAYER_FROZEN=0
 NATIVE_DRAIN_MUTED=0
@@ -744,8 +749,11 @@ echo "[$(log_ts)] wakeup.sh $*" >> "$EVENT_LOG"
 
 # This software followup owns its LEDs and has no wakeword prompt. Suppress the
 # native cue at its source so nothing can remain queued after the session ends.
+# Busy also covers LLM PCM playback, during which physical native wake/control
+# must remain available. Only a live ASR-only lease owns these native cues.
 if [ "${SYSTEM1_FOLLOWUP_RECORD_MODE:-}" = "native_live" ] && [ -f "$BUSY_MARKER" ] &&
-    [ "$(awk '$2 == "/" {print $1;exit}' /proc/mounts)" = /dev/mtdblock5 ]; then
+    [ "$(awk '$2 == "/" {print $1;exit}' /proc/mounts)" = /dev/mtdblock5 ] &&
+    "${NATIVE_ASR_CTL:-/data/native_asr_ctl}" status 2>/dev/null | grep -Eq 'phase=[1-6] '; then
     case "$1" in
         WuW|WuW_first|WuW_oneshot|wuw_tips|bf|bf_end|ready|ready_delay|noangle|noangle_end|think|speek|multirounds|command_timeout|mibrain_service_timeout)
             echo "[$(log_ts)] NATIVE_FOLLOWUP_CUE_SUPPRESSED args=$*" >> "$EVENT_LOG"
@@ -1272,10 +1280,13 @@ native_tts_player_status() {
 
 wait_native_tts_status() {
     local text="$1"
+    local strict="${2:-0}"
     local start_deadline end now status started idle_hits
 
-    [ "$TTS_NATIVE_WAIT_ENABLED" = "1" ] || return 0
-    [ "$TTS_NATIVE_STATUS_WAIT_ENABLED" = "1" ] || return 1
+    if [ "$strict" != "1" ]; then
+        [ "$TTS_NATIVE_WAIT_ENABLED" = "1" ] || return 0
+        [ "$TTS_NATIVE_STATUS_WAIT_ENABLED" = "1" ] || return 1
+    fi
     [ -n "$text" ] || return 0
 
     start_deadline=$(( $(date +%s) + TTS_NATIVE_STATUS_START_TIMEOUT_SECONDS ))
@@ -1296,18 +1307,28 @@ wait_native_tts_status() {
             started=1
             idle_hits=0
         elif [ "$started" = "1" ]; then
-            idle_hits=$((idle_hits + 1))
+            # 单句兜底不能把状态查询失败当作播完，否则会与下一句重叠。
+            if [ "$strict" = "1" ] && [ "$status" != "0" ]; then
+                idle_hits=0
+            else
+                idle_hits=$((idle_hits + 1))
+            fi
             if [ "$idle_hits" -ge "$TTS_NATIVE_STATUS_IDLE_HITS" ]; then
                 log "[TTS] native fallback playback finished by status"
                 return 0
             fi
         elif [ "$now" -ge "$start_deadline" ]; then
+            if [ "$strict" = "1" ]; then
+                log "[TTS] native sentence playback did not start"
+                return 1
+            fi
             log "[TTS] native playback status did not enter playing, fallback to estimate"
             return 1
         fi
 
         if [ "$now" -ge "$end" ]; then
             log "[TTS] native playback status wait timeout after ${TTS_NATIVE_STATUS_MAX_SECONDS}s"
+            [ "$strict" = "1" ] && return 1
             return 0
         fi
         sleep "$TTS_NATIVE_STATUS_POLL_SECONDS"
@@ -1526,8 +1547,15 @@ setup_native_live_asr() {
 }
 
 wait_native_live_asr() {
-    local ret
+    local ret session_master="$LLM_SESSION_MASTER_TARGET"
     FOLLOWUP_TEXT=""
+    # Release the frozen player's old queue before opening the microphone, so a
+    # real wake can immediately use native audio without a later stop/reset.
+    finish_llm_playback
+    # Native audio is restored above, but the next LLM turn belongs to the
+    # same conversation. Re-reading media volume would raise later turns.
+    LLM_SESSION_MASTER_TARGET="$session_master"
+    set_busy "native_followup_listening"
     set_state "FOLLOWUP_LISTENING"
     led_feedback_llm_followup_listening
     log "[FOLLOWUP] native live listening; cloud ASR-only; no wakeword required"
@@ -1538,7 +1566,19 @@ wait_native_live_asr() {
         [ -n "$FOLLOWUP_TEXT" ] || ret=124
     fi
     rm -f /tmp/native_followup_text
-    if [ "$ret" -eq 0 ]; then
+    if [ "$ret" -eq 125 ]; then
+        NATIVE_DIALOG_HANDED_OFF=1
+        LLM_SESSION_MASTER_TARGET=""
+        # Native wake already owns the LEDs and player. Only stop our refresh;
+        # led_off/finish_llm_playback would interfere with its new response.
+        if [ -n "$LED_FEEDBACK_PID" ]; then
+            kill "$LED_FEEDBACK_PID" 2>/dev/null
+            LED_FEEDBACK_PID=""
+        fi
+        printf '%s:handoff\n' "$$" > "$LED_FEEDBACK_TOKEN_FILE" 2>/dev/null
+        clear_busy
+        log "[FOLLOWUP] physical wake -> native handoff; no LLM submission"
+    elif [ "$ret" -eq 0 ]; then
         log "[FOLLOWUP] native live ASR text=$FOLLOWUP_TEXT"
     else
         log "[FOLLOWUP] native live ended ret=$ret"
@@ -1908,24 +1948,92 @@ llm_direct_answer() {
     return 0
 }
 
-# 后台播放消费者：一个常驻 aplay 读 FIFO，按序号把各句 PCM(NNNN.pcm) 顺序灌进同一条流。
-# 写端常开，aplay 排空时阻塞等待而非 EOF（miplayer 做不到这点），于是句间真正无缝——
-# 对应 Mac 端"ffmpeg 解码 mp3→PCM 连续下发给 aplay"。done 出现且下一句不存在 → 收尾。
+# 单句合成只发布完整成功的 PCM；失败重试后发布原生补播任务。
+stream_synthesize_sentence() {
+    local wd="$1" n="$2" sentence="$3"
+    local attempt=0 retries="${DEVICE_TTS_STREAM_RETRIES:-2}" rc
+    case "$retries" in ''|*[!0-9]*) retries=2 ;; esac
+    # 配置错误也不能导致无限重试。
+    [ "$retries" -le 5 ] 2>/dev/null || retries=5
+    while [ "$attempt" -le "$retries" ]; do
+        attempt=$((attempt + 1))
+        rm -f "$wd/$n.pcm" "$wd/$n.part"
+        ETTSC_GEC_VERSION="$DEVICE_TTS_GEC_VERSION" \
+        ETTSC_UA="$DEVICE_TTS_UA" ETTSC_ORIGIN="$DEVICE_TTS_ORIGIN" \
+        ETTSC_PCM=1 ETTSC_GAIN="$DEVICE_TTS_GAIN" \
+            timeout -t "$DEVICE_TTS_TIMEOUT" "$DEVICE_TTS_BIN" "$sentence" "$wd/$n.part" "$DEVICE_TTS_VOICE" \
+            >"$wd/$n.attempt-$attempt.log" 2>&1
+        rc=$?
+        # ettsc 的旧版在读流失败后也可能返回 0 并留下部分音频，不能只检查文件大小。
+        if [ "$rc" = "0" ] && [ -s "$wd/$n.part" ] && \
+            ! grep -q '\[!\]' "$wd/$n.attempt-$attempt.log"; then
+            mv "$wd/$n.part" "$wd/$n.pcm"
+            echo x >> "$wd/segs"
+            log "[TTS] 端侧流式合成 $n($(wc -c < "$wd/$n.pcm")B pcm) attempt=$attempt: $sentence"
+            return 0
+        fi
+        rm -f "$wd/$n.part"
+        log "[TTS] 单句合成失败 $n attempt=$attempt rc=$rc detail=$wd/$n.attempt-$attempt.log"
+        [ "$attempt" -le "$retries" ] && sleep 1
+    done
+    if [ "$TTS_FALLBACK_NATIVE" = "1" ]; then
+        printf '%s' "$sentence" > "$wd/$n.native"
+        log "[TTS] 单句重试耗尽 $n，排队原生兜底: $sentence"
+    else
+        : > "$wd/$n.failed"
+        log "[TTS] 单句重试耗尽 $n，原生兜底未启用"
+    fi
+}
+
+# PCM 常驻 FIFO 连播；遇到原生补播任务先排空并关闭 aplay，补播结束后续接 PCM。
 stream_play_worker() {
     local wd="$1"
     local fifo="$wd/play.fifo"
-    local idx=1 n ap
+    local idx=1 n ap="" sentence rc
     rm -f "$fifo"
     mkfifo "$fifo" 2>/dev/null || mknod "$fifo" p 2>/dev/null
-    aplay -r "$DEVICE_TTS_PCM_RATE" -f S16_LE -c 1 "$fifo" >/dev/null 2>&1 &
-    ap=$!
-    exec 8>"$fifo"   # 保持写端常开，避免 aplay 在句间排空时 EOF 退出
     while :; do
         n=$(printf "%04d" "$idx")
         if [ -f "$wd/$n.rdy" ]; then
-            if [ ! -f "$wd/$n.skip" ] && [ -s "$wd/$n.pcm" ]; then
+            if [ -s "$wd/$n.native" ] || [ -f "$wd/$n.failed" ]; then
+                # 必须等 PCM 真正排空、释放声卡后才允许原生播放器出声。
+                if [ -n "$ap" ]; then
+                    exec 8>&-
+                    wait "$ap" || return 1
+                    ap=""
+                fi
+                [ ! -f "$wd/$n.failed" ] || return 1
+                sentence=$(cat "$wd/$n.native")
+                resume_native_player 1
+                rc=0
+                if native_tts_speak "$sentence"; then
+                    wait_native_tts_status "$sentence" 1 || rc=1
+                else
+                    rc=1
+                fi
+                # 消费者是子进程；恢复冻结态，让主进程仍按原有路径清理。
+                freeze_native_player
+                if [ "$rc" != "0" ]; then
+                    log "[TTS] 单句原生兜底失败 $n，停止本轮播报"
+                    return 1
+                fi
+                echo x >> "$wd/native_segs"
+                log "[TTS] 单句原生兜底完成 $n"
+            elif [ -s "$wd/$n.pcm" ]; then
+                if [ -z "$ap" ]; then
+                    aplay -r "$DEVICE_TTS_PCM_RATE" -f S16_LE -c 1 "$fifo" >/dev/null 2>&1 &
+                    ap=$!
+                    exec 8>"$fifo"
+                fi
                 [ -f "$wd/first" ] || monotonic_ms > "$wd/first"
-                cat "$wd/$n.pcm" >&8
+                if ! cat "$wd/$n.pcm" >&8; then
+                    exec 8>&-
+                    wait "$ap" 2>/dev/null
+                    return 1
+                fi
+            else
+                if [ -n "$ap" ]; then exec 8>&-; wait "$ap"; fi
+                return 1
             fi
             idx=$((idx + 1))
             continue
@@ -1933,19 +2041,23 @@ stream_play_worker() {
         [ -f "$wd/done" ] && break
         sleep 0.05
     done
-    exec 8>&-        # 关闭写端 → aplay 播完剩余 PCM 后 EOF 退出
-    wait "$ap" 2>/dev/null
+    if [ -n "$ap" ]; then
+        exec 8>&-        # 关闭写端 → aplay 播完剩余 PCM 后 EOF 退出
+        wait "$ap"
+        return $?
+    fi
+    return 0
 }
 
 # 句级流式（仿 Mac Server StreamingPipeline）：LLM 边流式输出边按 。！？ 切句。
-# 生产者只做"切句→ettsc 合成为 NNNN.mp3→置 NNNN.rdy"，播放交给后台 stream_play_worker，
+# 生产者切句并生成 PCM 或原生补播任务，再置 NNNN.rdy；后台消费者顺序播放，
 # 于是"合成下一句"与"播放当前句"重叠，句间无空档。整段答案存 LLM_DIRECT_ANSWER 供历史/去重。
 # 产出：LLM_DIRECT_TTFT(首字s)/LLM_DIRECT_GEN_S(LLM流时长s)/LLM_STREAM_FIRST_SOUND(首声s)/LLM_STREAM_SEGS(成功句数)
 llm_stream_answer_and_play() {
     local sid="$1"
     local user="$2"
     local t0="$3"
-    local messages req t_req seq n play_pid
+    local messages req t_req seq n play_pid play_rc native_segs
     local wd="/tmp/native_first_stream"
 
     if [ -z "$LLM_API_KEY" ]; then
@@ -1954,6 +2066,8 @@ llm_stream_answer_and_play() {
     fi
     rm -rf "$wd" 2>/dev/null
     mkdir -p "$wd" "$LLM_HISTORY_DIR"
+    : > "$wd/segs"
+    : > "$wd/native_segs"
 
     messages=$(llm_build_messages "$sid" "$user")
     req=$(llm_build_request "$messages")
@@ -1983,25 +2097,17 @@ llm_stream_answer_and_play() {
             [ -n "$sentence" ] || continue
             seq=$((seq + 1))
             n=$(printf "%04d" "$seq")
-            rm -f "$wd/$n.pcm"
-            ETTSC_GEC_VERSION="$DEVICE_TTS_GEC_VERSION" \
-            ETTSC_UA="$DEVICE_TTS_UA" \
-            ETTSC_ORIGIN="$DEVICE_TTS_ORIGIN" \
-            ETTSC_PCM=1 ETTSC_GAIN="$DEVICE_TTS_GAIN" \
-                timeout -t "$DEVICE_TTS_TIMEOUT" "$DEVICE_TTS_BIN" "$sentence" "$wd/$n.pcm" "$DEVICE_TTS_VOICE" \
-                >/dev/null 2>&1
-            if [ -s "$wd/$n.pcm" ]; then
-                echo x >> "$wd/segs"
-                log "[TTS] 端侧流式合成 $n($(wc -c < "$wd/$n.pcm" 2>/dev/null)B pcm): $sentence"
-            else
-                : > "$wd/$n.skip"
-                log "[TTS] 端侧流式合成失败 $n，跳过: $sentence"
-            fi
+            stream_synthesize_sentence "$wd" "$n" "$sentence"
             : > "$wd/$n.rdy"
         done
 
     : > "$wd/done"
-    wait "$play_pid" 2>/dev/null
+    wait "$play_pid"
+    play_rc=$?
+    if [ "$play_rc" != "0" ]; then
+        log "[TTS] 本轮播报不完整 rc=$play_rc，不写入完整回答历史"
+        return 1
+    fi
 
     LLM_DIRECT_ANSWER=$(tr -d '\n' < "$wd/raw" 2>/dev/null)
     if [ -s "$wd/genend" ]; then
@@ -2023,15 +2129,11 @@ llm_stream_answer_and_play() {
     fi
 
     [ -n "$LLM_DIRECT_ANSWER" ] || return 1
-    log "[LLM-NATIVE] answer(llm_ttft=${LLM_DIRECT_TTFT:-?}s llm_gen=${LLM_DIRECT_GEN_S}s segs=${LLM_STREAM_SEGS}): $LLM_DIRECT_ANSWER"
+    native_segs=0
+    [ ! -f "$wd/native_segs" ] || native_segs=$(wc -l < "$wd/native_segs" | tr -d ' ')
+    log "[LLM-NATIVE] answer(llm_ttft=${LLM_DIRECT_TTFT:-?}s llm_gen=${LLM_DIRECT_GEN_S}s segs=${LLM_STREAM_SEGS} native_segs=$native_segs): $LLM_DIRECT_ANSWER"
 
-    # 一句都没成功播放（全合成失败）→ 降级原生整段，避免静默
-    if [ "$LLM_STREAM_SEGS" = "0" ] && [ "$TTS_FALLBACK_NATIVE" = "1" ]; then
-        log "[TTS] 流式全部失败，降级原生 mibrain 整段"
-        resume_native_player 1
-        native_tts_speak "$LLM_DIRECT_ANSWER"
-        wait_native_tts_playback "$LLM_DIRECT_ANSWER"
-    fi
+    # 每句均已由消费者按顺序播完（含原生兜底）；不再重复播报整段。
 
     {
         printf 'user\t%s\n' "$(printf '%s' "$user" | json_escape)"
@@ -2073,7 +2175,7 @@ send_text_native() {
             start_followup_vad_prearm
         fi
         if ! llm_stream_answer_and_play "$session_id" "$text" "$t0"; then
-            log "[LLM-NATIVE] 流式空回答/调用失败，结束"
+            log "[LLM-NATIVE] 流式回答或播报失败，结束"
             led_feedback_error
             sleep 1
             finish_llm_playback
@@ -2343,6 +2445,104 @@ transcribe_followup_voice() {
     esac
 }
 
+native_dialog_compact() {
+    # 只用于匹配，不把去掉空格/标点的文本发给模型。逐个删除中文标点，
+    # 避免 BusyBox 的单字节 locale 把多字节字符类解释成 UTF-8 字节集合。
+    printf '%s' "$1" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz' | \
+        sed 's/[[:space:]]//g; s/，//g; s/。//g; s/！//g; s/？//g; s/、//g; s/：//g; s/[,.!?:]//g'
+}
+
+classify_native_dialog_text() {
+    local compact
+    compact=$(native_dialog_compact "$1")
+    NATIVE_DIALOG_TEXT_KIND=complete
+    case "$compact" in
+        小爱同学|小爱同学小爱同学) NATIVE_DIALOG_TEXT_KIND=wake; return ;;
+    esac
+    # 只识别缺少查询对象的独立短句，绝不用宽泛的后缀/关键词判断。
+    compact=${compact#小爱同学}
+    case "$compact" in
+        呼叫deepseek*) compact=${compact#呼叫deepseek} ;;
+        呼叫minimax*) compact=${compact#呼叫minimax} ;;
+        呼叫glm*) compact=${compact#呼叫glm} ;;
+        呼叫kimi*) compact=${compact#呼叫kimi} ;;
+    esac
+    case "$compact" in
+        帮我查一下|帮我查询一下|请帮我查一下|请帮我查询一下|请查一下|查一下|查询一下|帮我查|帮我查询|请帮我查询)
+            NATIVE_DIALOG_TEXT_KIND=incomplete ;;
+    esac
+}
+
+play_native_dialog_prompt() {
+    local text="$1" wd=/tmp/native_first_input_prompt play_pid rc=0
+    set_state "LLM_SPEAKING"
+    set_busy "input_prompt"
+    apply_llm_master_volume
+    freeze_native_player
+    led_feedback_llm_playing
+    # 固定提示不调用 LLM，也不写入会话历史。端侧沿用单句重试和按序兜底。
+    if [ "$TTS_ENGINE" = "device" ]; then
+        rm -rf "$wd"
+        mkdir -p "$wd"
+        : > "$wd/segs"
+        : > "$wd/native_segs"
+        stream_play_worker "$wd" &
+        play_pid=$!
+        stream_synthesize_sentence "$wd" 0001 "$text"
+        : > "$wd/0001.rdy"
+        : > "$wd/done"
+        wait "$play_pid" || rc=1
+    else
+        resume_native_player 1
+        if native_tts_speak "$text"; then
+            wait_native_tts_status "$text" 1 || rc=1
+        else
+            rc=1
+        fi
+        freeze_native_player
+    fi
+    [ "$rc" = "0" ] || log "[INPUT] 补充提示播报失败，结束本轮"
+    return "$rc"
+}
+
+collect_native_dialog_text() {
+    local current="$1" pending="" prompt attempts=0
+    local limit="${NATIVE_DIALOG_INPUT_MAX_REPROMPTS:-2}"
+    case "$limit" in 1|2|3) ;; *) limit=2 ;; esac
+    NATIVE_DIALOG_TEXT="$current"
+    [ "${NATIVE_DIALOG_INPUT_GUARD:-1}" = "1" ] || return 0
+    while :; do
+        classify_native_dialog_text "$current"
+        if [ "$NATIVE_DIALOG_TEXT_KIND" = "complete" ]; then
+            if [ -n "$pending" ]; then
+                NATIVE_DIALOG_TEXT="$pending，$current"
+                log "[INPUT] 补充完成，合并到同一轮: $NATIVE_DIALOG_TEXT"
+            else
+                NATIVE_DIALOG_TEXT="$current"
+            fi
+            return 0
+        fi
+        if [ "$attempts" -ge "$limit" ]; then
+            log "[INPUT] 连续 $limit 次未获得完整问题，结束本轮"
+            NATIVE_DIALOG_TEXT=""
+            return 124
+        fi
+        attempts=$((attempts + 1))
+        if [ "$NATIVE_DIALOG_TEXT_KIND" = "wake" ]; then
+            prompt="我在，请说。"
+            log "[INPUT] 纯唤醒词，不提交 LLM；应答后重新收听"
+        else
+            pending="$current"
+            prompt="请继续说，要查什么？"
+            log "[INPUT] 查询对象缺失，不提交 LLM；等待补充"
+        fi
+        play_native_dialog_prompt "$prompt" || return 1
+        # 确认提示播完后再开启真实原生 ASR，避免把提示语识别为用户输入。
+        wait_native_live_asr || return $?
+        current="$FOLLOWUP_TEXT"
+    done
+}
+
 handle_llm_dialog() {
     local session_id="$1"
     local first_text="$2"
@@ -2351,6 +2551,7 @@ handle_llm_dialog() {
     local last_dialog
 
     CURRENT_SESSION_ID="$session_id"
+    NATIVE_DIALOG_HANDED_OFF=0
     set_state "LLM_DIALOG"
     led_feedback_llm_accept
     pause_native_asr
@@ -2399,21 +2600,28 @@ handle_llm_dialog() {
 
     if [ "$FOLLOWUP_RECORD_MODE" = "native_live" ] && is_system1_root; then
         local next_text="$first_text" saved_dup="$SUPPRESS_DUP_SECONDS"
-        while send_text_and_play "$session_id" "$next_text" defer; do
+        while true; do
+            collect_native_dialog_text "$next_text" || break
+            next_text="$NATIVE_DIALOG_TEXT"
+            if [ "$turn" -gt 1 ]; then
+                led_feedback_followup_asr_ok
+                log "[TURN $turn] native followup -> LLM: $next_text"
+            fi
+            send_text_and_play "$session_id" "$next_text" defer || break
             if ! wait_native_live_asr; then
                 break
             fi
             turn=$((turn + 1))
-            led_feedback_followup_asr_ok
-            log "[TURN $turn] native followup -> LLM: $FOLLOWUP_TEXT"
             next_text="$FOLLOWUP_TEXT"
             # A deliberate repeated followup is a new turn, not a duplicate wake.
             SUPPRESS_DUP_SECONDS=0
         done
         SUPPRESS_DUP_SECONDS="$saved_dup"
-        finish_llm_playback
-        led_off
-        resume_native_asr
+        if [ "$NATIVE_DIALOG_HANDED_OFF" != "1" ]; then
+            finish_llm_playback
+            led_off
+            resume_native_asr
+        fi
         CURRENT_SESSION_ID=""
         set_state "IDLE"
         return 0

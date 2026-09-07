@@ -47,6 +47,9 @@ int main(int argc,char **argv) {
     for (;;) {
         usleep(40000); fd=state_open(&s); if (fd<0) return 1;
         if (s.sequence!=seq || s.owner!=owner) { state_close(fd,NULL); return 1; }
+        /* A real wake owns the microphone now. Keep the cancelled prepare and
+         * dialog as a tombstone; never return its already buffered ASR text. */
+        if (s.phase==NATIVE_HANDOFF) { state_close(fd,NULL); return 125; }
         if (interrupted || !alive(owner) || s.phase==FAILED) {
             s.phase=FAILED; state_close(fd,&s); return 1;
         }

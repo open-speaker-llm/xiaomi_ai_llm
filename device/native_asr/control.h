@@ -15,7 +15,7 @@
 #endif
 #define CONTROL_FILE CONTROL_DIR "/state"
 #define CONTROL_MAGIC 0x4e415331u
-enum phase { IDLE, REQUEST, TRIGGERED, PREPARED, BOUND, RESULT, COMPLETE, FAILED };
+enum phase { IDLE, REQUEST, TRIGGERED, PREPARED, BOUND, RESULT, COMPLETE, FAILED, NATIVE_HANDOFF };
 /* Only fixed-width members: shared between ARM32 native daemons and ARM64 CLI.
  * Each access opens a new description and takes flock, including across threads.
  * Deadlines use monotonic milliseconds and signed differences (<= 30 seconds). */

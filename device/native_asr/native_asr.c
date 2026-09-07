@@ -16,10 +16,13 @@ static ivw_fn original_ivw;
 static void *wake_context;
 static float last_angle;
 static pthread_mutex_t wake_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t wake_dispatch_lock = PTHREAD_MUTEX_INITIALIZER;
+#ifndef NATIVE_BUSY_FILE
+#define NATIVE_BUSY_FILE "/tmp/native_first_busy"
+#endif
 static int role; /* 1=mipns, 2=aivs */
 static __thread uint32_t prepare_scope;
 static __thread const void *prepare_message;
-
 static void note(const char *fmt, ...) {
     char b[512]; va_list ap;
     int n = snprintf(b, sizeof(b), "%u pid=%d ", now_ms(), (int)getpid());
@@ -109,13 +112,23 @@ static void wake_observed(void *ctx, unsigned code, float angle) {
     if (code == 1 && angle >= 0 && angle <= 360) last_angle = angle;
     wake_fn fn = original_wake;
     pthread_mutex_unlock(&wake_lock);
-    /* The existing client ignores wakewords while busy. Prevent a concurrent
-     * physical wake from replacing a software followup's prepare/dialog. */
+    /* Real wakewords yield the ASR-only lease to native NLP. Serialize with
+     * software dispatch so the worker cannot wake again after this handoff. */
+    pthread_mutex_lock(&wake_dispatch_lock);
     struct control s; int fd = state_open(&s);
-    int suppress = fd >= 0 && active(&s);
-    if (fd >= 0) state_close(fd, NULL);
-    if (suppress && (code & 255u) == 1) { note("physical wake ignored during owned followup"); return; }
+    int handoff = fd >= 0 && (code & 255u) == 1 &&
+        (active(&s) || (s.phase==COMPLETE && alive(s.owner) &&
+                       (int32_t)(s.deadline-now_ms())>0));
+    if (handoff) {
+        s.phase=NATIVE_HANDOFF; memset(s.text,0,sizeof(s.text));
+        state_close(fd,&s);
+        /* Unblock wakeup.sh before the original callback starts native cues.
+         * Audio/volume were already restored before opening this lease. */
+        unlink(NATIVE_BUSY_FILE);
+        note("physical wake handoff seq=%u",s.sequence);
+    } else if (fd>=0) state_close(fd,NULL);
     if (fn) fn(ctx,code,angle);
+    pthread_mutex_unlock(&wake_dispatch_lock);
 }
 
 void *xaudio_register_callback(void *engine, wake_fn callback, void *ctx) {
@@ -164,7 +177,7 @@ void *speech_message__unpack(void *allocator, size_t len, const void *data) {
     if (role==2 && msg) {
         struct control s; int fd=state_open(&s);
         if (fd>=0) {
-            if ((s.phase==PREPARED || s.phase==FAILED) && (int32_t)(s.deadline-now_ms()) > -3000 &&
+            if ((s.phase==PREPARED || s.phase==FAILED || s.phase==NATIVE_HANDOFF) && (int32_t)(s.deadline-now_ms()) > -3000 &&
                 s.packet_size==len && s.packet_hash==packet_hash(data,len)) {
                 prepare_scope=s.sequence; prepare_message=msg;
                 note("prepare received seq=%u",s.sequence);
@@ -284,6 +297,17 @@ static int receive_json(int ok,void *json) {
     if (!permitted) { note("blocked followup instruction %s.%s dialog=%s",ns,name,id); return 0; }
     struct control s; int fd=state_open(&s);
     if (fd>=0) {
+        /* Finish is parsed more than once by this firmware. The first parse
+         * publishes COMPLETE; the CLI may consume it before the SDK's parse.
+         * Keep this same, normally completed dialog's terminal bookkeeping
+         * deliverable so TimeoutManager does not wait for disabled TTS.
+         * Handoff/cancelled/superseded dialogs must still be isolated. */
+        if (finish && s.finished && s.final_seen && !strcmp(s.dialog,id) &&
+            (s.phase==COMPLETE || s.phase==IDLE)) {
+            state_close(fd,NULL);
+            note("finish replay permitted dialog=%s",id);
+            return ok;
+        }
         if (active(&s) && !strcmp(s.dialog,id)) {
             const void *payload=member(json,"payload"), *final=member(payload,"is_final");
             if (result && final && j_type(final)==5 && j_bool(final)) {
@@ -299,7 +323,13 @@ static int receive_json(int ok,void *json) {
             if (finish) { s.finished=1; note("finish seq=%u",s.sequence); }
             if (s.finished && s.final_seen) s.phase=COMPLETE;
             state_close(fd,&s);
-        } else state_close(fd,NULL);
+        } else {
+            /* Late StopCapture/Finish from the cancelled followup must not
+             * stop or finish the new physical wake's native conversation. */
+            state_close(fd,NULL); return 0;
+        }
+    } else {
+        return 0;
     }
     return ok;
 }
@@ -318,13 +348,14 @@ static void *worker(void *arg) {
         pthread_mutex_lock(&wake_lock);
         wake_fn wake=original_wake; ivw_fn ivw=original_ivw; void *ctx=wake_context; float angle=last_angle;
         pthread_mutex_unlock(&wake_lock);
+        pthread_mutex_lock(&wake_dispatch_lock);
         struct control s; int fd=state_open(&s);
-        if (fd<0) continue;
+        if (fd<0) { pthread_mutex_unlock(&wake_dispatch_lock); continue; }
         int changed=wake && ivw && ctx && s.mipns_pid!=(uint32_t)getpid();
         if (changed) s.mipns_pid=(uint32_t)getpid();
-        if (s.phase!=REQUEST || !active(&s)) { state_close(fd,changed?&s:NULL); continue; }
+        if (s.phase!=REQUEST || !active(&s)) { state_close(fd,changed?&s:NULL); pthread_mutex_unlock(&wake_dispatch_lock); continue; }
         if (!wake || !ivw || !ctx || !alive(s.aivs_pid) || access("/tmp/mipns/mute",F_OK)==0 || access("/tmp/native_first_busy",F_OK)) {
-            s.phase=FAILED; state_close(fd,&s); continue;
+            s.phase=FAILED; state_close(fd,&s); pthread_mutex_unlock(&wake_dispatch_lock); continue;
         }
         s.phase=TRIGGERED; state_close(fd,&s);
         note("trigger seq=%u angle=%.1f",s.sequence,(double)angle);
@@ -339,6 +370,9 @@ static void *worker(void *arg) {
             unsigned char empty[1]={0}; ivw(1,empty,0,0,0);
             note("IVW complete seq=%u len=0",s.sequence);
         }
+        /* Keep the short software startup and IVW completion before a queued
+         * physical wake; neither may land inside the new native capture. */
+        pthread_mutex_unlock(&wake_dispatch_lock);
     }
     return NULL;
 }
