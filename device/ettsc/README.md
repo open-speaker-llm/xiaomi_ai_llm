@@ -32,6 +32,13 @@ cargo install cargo-zigbuild
 
 `dist/ettsc` 是本地构建产物，不提交到仓库；首次使用端侧 EdgeTTS 前需要先运行 `./build.sh`，再运行 `./deploy.sh`。未来如果发布 GitHub Release，可把预编译二进制作为附件提供，但当前仓库只保存源码和构建脚本。
 
+## MP3 解码依赖安全补丁
+
+`ETTSC_PCM=1` 使用的 `minimp3` 已通过本地补丁改用标准库缓冲区，移除存在
+`RUSTSEC-2025-0044` 双重释放漏洞的 `slice-ring-buffer`。来源、改动范围、测试和维护要求见
+[vendor/minimp3/README.md](vendor/minimp3/README.md)。运行 `cargo test --locked` 验证解码回归。
+已有设备需要重新构建并部署 `ettsc` 才能获得修复；部署前验证真机播放并保留旧二进制。
+
 ## 用法
 
 ```sh
