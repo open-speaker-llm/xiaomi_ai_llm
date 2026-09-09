@@ -13,8 +13,8 @@ TARGET=arm-unknown-linux-musleabihf
 command -v cargo-zigbuild >/dev/null || { echo "缺 cargo-zigbuild：cargo install cargo-zigbuild"; exit 1; }
 command -v zig >/dev/null || { echo "缺 zig：brew install zig"; exit 1; }
 
-echo "[build] cargo zigbuild --release --target $TARGET"
-cargo zigbuild --release --target "$TARGET"
+echo "[build] cargo zigbuild --release --locked --target $TARGET"
+cargo zigbuild --release --locked --target "$TARGET"
 
 OUT="target/$TARGET/release/ettsc"
 mkdir -p dist
