@@ -121,7 +121,7 @@ tail -f /tmp/native_first_client.log /tmp/native_first_events.log
 
 - LLM 持续播放，不停止或暂停；唤醒后接着说“开灯”，观察实际灯光动作。
 - 原生回调应透传，控制命令不重复送入 LLM。分别记录唤醒次数、最终 ASR、家居动作和 LLM 是否持续播报。
-- 当前已修复回调隔离范围和追问音量回归；播报串入 ASR 仍可复现，不能把唤醒或中间文本识别成功记作家居执行成功。
+- 2026-09-09 已补齐 AEC 参考通道的启动配置。先确认 `sh /data/native_asr.sh status` 为 healthy、`amixer -c 0 sget 'Loopback Enable'` 为 Enable，再在长播报的前段、中段和结尾分别测试。参考信号恢复及 ASR-only 串音对照不代替真实唤醒验收，不能把唤醒或中间文本识别成功记作家居执行成功。
 
 ### P3. boot1 失败提示漏播对照
 
