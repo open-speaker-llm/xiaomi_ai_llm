@@ -31,6 +31,18 @@ cargo test --locked --offline
 cargo zigbuild --release --target arm-unknown-linux-musleabihf --locked --offline
 ```
 
+旧版设备上若标准 libtest 运行器超时，可构建不使用测试工作线程的检查程序：
+
+```sh
+cargo zigbuild --release --example decoder_device_check \
+  --target arm-unknown-linux-musleabihf --locked --offline
+```
+
+将 `target/arm-unknown-linux-musleabihf/release/examples/decoder_device_check`
+复制到已授权设备的临时目录后执行。它按顺序复用相同的 7 项断言，任何失败均返回非零；
+不连接网络、不播放音频、不修改设备配置。2026-09-09 真机验证时，libtest 运行器超时，
+而该顺序检查程序全部通过；底层 libtest 兼容性原因尚未进一步定位。
+
 `tests/decoder_regression.rs` 验证重复补充缓冲、跨环绕边界的错位帧、短读、截断帧、空/无效输入、IO 错误和
 锁文件禁止重新引入漏洞依赖。合成音频重复 32 次后，原版解码得到 1408 帧、811008
 个采样；补丁需保持该结果。在 aarch64 macOS 上还检查修复前记录的 PCM SHA-256，

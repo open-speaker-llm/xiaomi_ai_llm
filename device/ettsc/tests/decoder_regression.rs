@@ -24,8 +24,8 @@ fn decode(reader: impl Read) -> (usize, Vec<i16>) {
     (frames, pcm)
 }
 
-#[test]
-fn vulnerable_buffer_is_absent_from_lockfile() {
+#[cfg_attr(test, test)]
+pub fn vulnerable_buffer_is_absent_from_lockfile() {
     let lock = include_str!("../Cargo.lock");
     for package in ["slice-ring-buffer", "slice-deque"] {
         assert!(
@@ -35,8 +35,8 @@ fn vulnerable_buffer_is_absent_from_lockfile() {
     }
 }
 
-#[test]
-fn pcm_matches_upstream_across_many_refills() {
+#[cfg_attr(test, test)]
+pub fn pcm_matches_upstream_across_many_refills() {
     // Much larger than the decoder's buffer, exercising repeated front removal
     // and refill. The fixture contains synthetic audio, no user recording.
     let input = TONE.repeat(32);
@@ -64,14 +64,14 @@ impl Read for Chunked<'_> {
     }
 }
 
-#[test]
-fn short_reads_preserve_pcm() {
+#[cfg_attr(test, test)]
+pub fn short_reads_preserve_pcm() {
     let input = TONE.repeat(16);
     assert_eq!(decode(Chunked(&input)), decode(input.as_slice()));
 }
 
-#[test]
-fn unaligned_stream_preserves_frames_across_buffer_wrap() {
+#[cfg_attr(test, test)]
+pub fn unaligned_stream_preserves_frames_across_buffer_wrap() {
     let input = TONE.repeat(32);
     // A non-frame prefix shifts MP3 frames relative to the ring allocation.
     // An implementation passing only the first VecDeque slice can then split
@@ -84,14 +84,14 @@ fn unaligned_stream_preserves_frames_across_buffer_wrap() {
     );
 }
 
-#[test]
-fn empty_and_invalid_input_reach_eof() {
+#[cfg_attr(test, test)]
+pub fn empty_and_invalid_input_reach_eof() {
     assert_eq!(decode(&[][..]), (0, vec![]));
     assert_eq!(decode(vec![0x55; 100_000].as_slice()), (0, vec![]));
 }
 
-#[test]
-fn truncated_last_frame_preserves_decoded_prefix() {
+#[cfg_attr(test, test)]
+pub fn truncated_last_frame_preserves_decoded_prefix() {
     let (_, full) = decode(TONE);
     let (_, partial) = decode(&TONE[..TONE.len() - 100]);
     assert!(!partial.is_empty());
@@ -99,8 +99,8 @@ fn truncated_last_frame_preserves_decoded_prefix() {
     assert_eq!(partial, full[..partial.len()]);
 }
 
-#[test]
-fn reader_errors_are_propagated() {
+#[cfg_attr(test, test)]
+pub fn reader_errors_are_propagated() {
     struct Broken;
     impl Read for Broken {
         fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
