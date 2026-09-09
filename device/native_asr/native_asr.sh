@@ -12,6 +12,34 @@ is_boot1() { [ "$(awk '$2 == "/" {print $1;exit}' /proc/mounts)" = /dev/mtdblock
 mounted() { awk -v p="$1" '$2==p {found=1} END {exit !found}' /proc/mounts; }
 owned() { mounted "$1" && grep -q "$TAG" "$1"; }
 hash_is() { [ "$(sha256sum "$1" 2>/dev/null | awk '{print $1}')" = "$2" ]; }
+native_reference_value() {
+    amixer -c 0 sget 'Loopback Enable' 2>/dev/null |
+        sed -n "s/^[[:space:]]*Item0: '\([^']*\)'[[:space:]]*$/\1/p"
+}
+native_reference_ready() {
+    [ -f "$DIR/loopback.before" ] && [ "$(native_reference_value)" = Enable ]
+}
+prepare_native_reference() {
+    local previous
+    previous=$(native_reference_value)
+    case "$previous" in Disable|Enable) ;; *) log 'AEC reference control unavailable'; return 1;; esac
+    if [ ! -f "$DIR/loopback.before" ]; then
+        printf '%s\n' "$previous" > "$DIR/loopback.before" || return 1
+    fi
+    # PDM capture must be opened AFTER enabling the hardware reference lane.
+    # Toggling this control on an already running recorder is insufficient.
+    amixer -c 0 sset 'Loopback Enable' Enable >/dev/null 2>&1 &&
+        native_reference_ready
+}
+restore_native_reference() {
+    local previous
+    [ -f "$DIR/loopback.before" ] || return 0
+    previous=$(cat "$DIR/loopback.before")
+    case "$previous" in Disable|Enable) ;; *) log 'Invalid saved AEC reference setting'; return 1;; esac
+    amixer -c 0 sset 'Loopback Enable' "$previous" >/dev/null 2>&1 &&
+        [ "$(native_reference_value)" = "$previous" ] || return 1
+    rm -f "$DIR/loopback.before"
+}
 verified() {
     hash_is /usr/bin/mipns-xiaomi a02071a39f3509d3a90dac638e323039a24de784a907f076a0a91f81cd5fbb9d &&
     hash_is /usr/lib/libxaudio_engine.so 79f1a33d9683cd6940c8d23e3dd4e992f1958fe220c0dfff8d230f9f8a1b5e73 &&
@@ -21,6 +49,7 @@ verified() {
 }
 healthy() {
     local pid
+    native_reference_ready || return 1
     owned "$PNS" && owned "$AIVS" || return 1
     for process in mipns-xiaomi mico_aivs_lab; do
         pid=$(pidof "$process" 2>/dev/null)
@@ -37,6 +66,9 @@ stop_native_asr() {
     for p in "$PNS" "$AIVS"; do
         if owned "$p"; then umount "$p" || return 1; changed=1; fi
     done
+    [ ! -f "$DIR/loopback.before" ] || changed=1
+    # Restore the old routing before the original service reopens capture.
+    restore_native_reference || return 1
     if [ "$changed" = 1 ]; then
         "$AIVS" restart
         "$PNS" restart
@@ -64,7 +96,9 @@ start_native_asr() {
         {print}
         /^_start_mipns_xiaomi\(\)/ {xiaomi=1}
         xiaomi && /^[[:space:]]*procd_open_instance[[:space:]]*$/ {
-            print "    # " tag; print "    procd_set_param env LD_PRELOAD=" so
+            print "    # " tag
+            print "    amixer -c 0 sset '\''Loopback Enable'\'' Enable >/dev/null 2>&1 || return 1"
+            print "    procd_set_param env LD_PRELOAD=" so
             xiaomi=0; count++
         }
         END {if(count!=1) exit 1}
@@ -78,8 +112,8 @@ start_native_asr() {
     ' "$AIVS" > "$DIR/aivs" || return 1
     sh -n "$DIR/pns" && sh -n "$DIR/aivs" || return 1
     chmod 700 "$DIR/pns" "$DIR/aivs"
-    mount --bind "$DIR/aivs" "$AIVS" || return 1
-    if mount --bind "$DIR/pns" "$PNS" && "$AIVS" restart && "$PNS" restart; then
+    if prepare_native_reference && mount --bind "$DIR/aivs" "$AIVS" &&
+        mount --bind "$DIR/pns" "$PNS" && "$AIVS" restart && "$PNS" restart; then
         local attempt=0
         while [ "$attempt" -lt 15 ]; do
             sleep 1
