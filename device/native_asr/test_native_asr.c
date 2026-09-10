@@ -1,6 +1,8 @@
 /* Runs in a separate process on the matching speaker, without touching its
  * microphone, native daemons, production control file or cloud connection. */
 #define CONTROL_DIR "/tmp/native_followup_unit"
+#define NATIVE_BUSY_FILE CONTROL_DIR "/busy"
+#define FAILURE_ARMED_FILE CONTROL_DIR "/armed"
 #include "native_asr.c"
 #undef NDEBUG
 #include <assert.h>
@@ -80,6 +82,71 @@ static void test_wake_cue(void) {
     assert(write(fd,data,sizeof(data))==sizeof(data)); close(fd);
     cue_case(other,"wakeup_tone_raw",TRIGGERED,0,0); assert(unlink(other)==0);
 }
+static void test_failure_gate_json(void) {
+    int fd=open(FAILURE_POLICY_FILE,O_CREAT|O_WRONLY|O_TRUNC,0600); assert(fd>=0);
+    char policy[256]; int n=snprintf(policy,sizeof(policy),"%u\n回答不上|需要再学习\n",(unsigned)getpid());
+    assert(write(fd,policy,(size_t)n)==n); close(fd);
+    fd=open(FAILURE_ARMED_FILE,O_CREAT|O_WRONLY,0600); assert(fd>=0); close(fd);
+    json_value v, yes;
+    header(&v,"SpeechRecognizer","RecognizeResult","failure-native",0);
+    void (*bool_ctor)(void *,int)=dlsym(RTLD_NEXT,"_ZN4Json5ValueC1Eb"); assert(bool_ctor);
+    bool_ctor(&yes,1); j_swap(j_member(j_member(&v,"payload"),"is_final"),&yes); j_dtor(&yes);
+    assert(receive_json(1,&v)==1); /* empty final must not arm the gate */
+    assert(!failure_block_speak("failure-native","回答不上"));
+    json_value results, result;
+    j_ctor(&results,6); j_ctor(&result,7); put_string(&result,"text","解释这个问题");
+    j_append(&results,&result); j_dtor(&result);
+    j_swap(j_member(j_member(&v,"payload"),"results"),&results); j_dtor(&results);
+    assert(receive_json(1,&v)==1); j_dtor(&v);
+    const char *names[]={"SetVolume","Operate","Finish","Speak"};
+    const char *spaces[]={"Speaker","MiotController","Dialog","SpeechSynthesizer"};
+    for (unsigned i=0;i<4;i++) {
+        header(&v,spaces[i],names[i],"failure-native",0);
+        put_string(j_member(&v,"payload"),"text","灯已打开");
+        assert(receive_json(1,&v)==1); j_dtor(&v);
+    }
+    header(&v,"SpeechSynthesizer","Speak","failure-native",0);
+    put_string(j_member(&v,"payload"),"text","这个问题我暂时还回答不上，需要再学习一下");
+    assert(receive_json(0,&v)==0); /* malformed JSON cannot trigger handoff */
+    assert(access(FAILURE_DIALOG_FILE,F_OK)!=0);
+    assert(receive_json(1,&v)==0);
+    assert(access(FAILURE_DIALOG_FILE,F_OK)==0);
+    fd=open(NATIVE_BUSY_FILE,O_CREAT|O_WRONLY,0600); assert(fd>=0); close(fd);
+    assert(receive_json(1,&v)==0); /* second SDK parse after handoff */
+    j_dtor(&v);
+    header(&v,"Dialog","Finish","failure-native",0);
+    assert(receive_json(1,&v)==1); j_dtor(&v); /* retain SDK completion */
+    header(&v,"SpeechSynthesizer","Speak","parallel-physical",0);
+    put_string(j_member(&v,"payload"),"text","需要再学习");
+    assert(receive_json(1,&v)==1); j_dtor(&v);
+    unlink(NATIVE_BUSY_FILE);
+    /* Exercise the firmware's real CharReader -> interposed OurReader path,
+     * including Unicode decoding, rather than only calling receive_json.
+     * Link this test with --export-dynamic so the DSO resolves the hook here. */
+    json_value builder;
+    void (*builder_ctor)(void *)=dlsym(RTLD_NEXT,"_ZN4Json17CharReaderBuilderC1Ev");
+    void (*builder_dtor)(void *)=dlsym(RTLD_NEXT,"_ZN4Json17CharReaderBuilderD1Ev");
+    void *(*new_reader)(const void *)=dlsym(RTLD_NEXT,"_ZNK4Json17CharReaderBuilder13newCharReaderEv");
+    assert(builder_ctor && builder_dtor && new_reader);
+    builder_ctor(&builder); void *reader=new_reader(&builder); assert(reader);
+    void **vtable=*(void ***)reader;
+    int (*parse)(void *,const char *,const char *,void *,void *)=(void *)vtable[2];
+    void (*destroy)(void *)=(void *)vtable[1];
+    const char *records[]={
+        "{\"header\":{\"dialog_id\":\"raw-native\",\"namespace\":\"SpeechRecognizer\",\"name\":\"RecognizeResult\"},\"payload\":{\"is_final\":true,\"results\":[{\"text\":\"test query\"}]}}",
+        "{\"header\":{\"dialog_id\":\"raw-native\",\"namespace\":\"SpeechSynthesizer\",\"name\":\"Speak\"},\"payload\":{\"text\":\"\\u56de\\u7b54\\u4e0d\\u4e0a\"}}",
+        "{\"header\":{\"dialog_id\":\"raw-native\",\"namespace\":\"Dialog\",\"name\":\"Finish\"}}"
+    };
+    for (unsigned i=0;i<3;i++) {
+        j_ctor(&v,0);
+        assert(parse(reader,records[i],records[i]+strlen(records[i]),&v,NULL)==(i!=1));
+        j_dtor(&v);
+    }
+    destroy(reader); builder_dtor(&builder);
+    unlink(FAILURE_POLICY_FILE); unlink(FAILURE_DIALOG_FILE);
+    unlink(FAILURE_ARMED_FILE); unlink(NATIVE_BUSY_FILE);
+}
+
 int main(void) {
     assert(mkdir(CONTROL_DIR,0700)==0);
     assert(dlopen("/usr/lib/libaivs_sdk.so",RTLD_NOW|RTLD_GLOBAL));
@@ -160,8 +227,9 @@ int main(void) {
     fd=state_open(&s); assert(fd>=0);
     assert(s.phase==BOUND && !strcmp(s.dialog,"new-native-dialog")); state_close(fd,NULL);
     j_dtor(&instruction);
+    test_failure_gate_json();
     test_wake_cue();
     unlink(CONTROL_FILE); unlink(CONTROL_DIR "/events.log"); assert(rmdir(CONTROL_DIR)==0);
-    puts("PASS: firmware JsonCpp ABI, ASR-only, duplicate serialization, action isolation, stale results, finish, owned cue PCM isolation (15 cases)");
+    puts("PASS: firmware JsonCpp ABI, ASR-only, duplicate serialization, action isolation, stale results, finish, early failure gate JSON, owned cue PCM isolation (15 cases)");
     return 0;
 }

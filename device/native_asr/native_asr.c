@@ -284,12 +284,31 @@ int event_to_json(const void *event,void *json) {
     return ok;
 }
 
+#include "failure_gate.h"
+
 static int receive_json(int ok,void *json) {
     if (!ok || role!=2 || !json_ready) return ok;
     const void *h=member(json,"header"); const char *id=string_member(h,"dialog_id");
-    if (!tracked(id)) return ok;
     const char *ns=string_member(h,"namespace"), *name=string_member(h,"name");
     int result=!strcmp(ns,"SpeechRecognizer") && !strcmp(name,"RecognizeResult");
+    if (!tracked(id)) {
+        const void *payload=member(json,"payload"), *final=member(payload,"is_final");
+        if (result && final && j_type(final)==5 && j_bool(final)) {
+            const void *results=member(payload,"results");
+            const char *text=results && j_type(results)==6 && j_size(results)>0 ?
+                string_member(j_index(results,0),"text") : "";
+            /* Never suppress a failure when there is no usable ASR query for
+             * the shell to hand to the LLM. An empty final clears eligibility. */
+            if (*text && strlen(text)<4096) failure_observe_final(id);
+            else {
+                pthread_mutex_lock(&failure_lock); failure_observed[0]=0;
+                pthread_mutex_unlock(&failure_lock);
+            }
+        }
+        if (!strcmp(ns,"SpeechSynthesizer") && !strcmp(name,"Speak") &&
+            failure_block_speak(id,string_member(payload,"text"))) return 0;
+        return ok;
+    }
     int finish=!strcmp(ns,"Dialog") && !strcmp(name,"Finish");
     int permitted=result || finish || (!strcmp(ns,"SpeechRecognizer") &&
         (!strcmp(name,"StopCapture") || !strcmp(name,"RecognizeStreamFinished"))) ||

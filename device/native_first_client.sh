@@ -51,6 +51,9 @@ AIVS_GUARD_ENABLED="${AIVS_GUARD_ENABLED:-1}"
 AIVS_GUARD_BIN="${AIVS_GUARD_BIN:-/data/aivs_speech_guard}"
 AIVS_GUARD_ARMED="/tmp/native_first_aivs_guard_armed"
 AIVS_GUARD_PID=""
+AIVS_EARLY_GUARD_ENABLED="${AIVS_EARLY_GUARD_ENABLED:-1}"
+AIVS_FAILURE_POLICY="/tmp/native_followup/failure_policy"
+AIVS_FAILURE_DIALOG="/tmp/native_followup/failure_dialog"
 NATIVE_UBUS_TIMEOUT="${NATIVE_UBUS_TIMEOUT:-1}"
 WAKE_EVENT_MAX_AGE="${WAKE_EVENT_MAX_AGE:-4}"
 WAKE_IGNORE_QUERIES="${WAKE_IGNORE_QUERIES:-${WAKE_ONLY_QUERIES:-小爱同学 小爱 小爱小爱 小爱同学小爱同学 我在 在呢}}"
@@ -175,11 +178,13 @@ DEVICE_TTS_STREAM_RETRIES="${DEVICE_TTS_STREAM_RETRIES:-2}"
 # 流式播放采样率：ettsc(ETTSC_PCM=1) 把 mp3 解成裸 PCM，单个常驻 aplay 连续播，句间无缝。
 # EdgeTTS 输出为 24kHz 单声道，故 24000。
 DEVICE_TTS_PCM_RATE="${DEVICE_TTS_PCM_RATE:-24000}"
-# aplay 经 Master 衰减后比 miplayer 偏小，用两级补偿追平 miplayer 响度（实测校准）：
-#   DEVICE_TTS_GAIN：ettsc 数字增益（EdgeTTS PCM 峰值约 46%，无削顶上限 ~2.16x，取 2.0）。
-#   DEVICE_TTS_STREAM_MASTER_BOOST：在自动 Master 目标上再 +N（数字增益补不齐的残差）。
+LLM_DIRAC_ENABLED="${LLM_DIRAC_ENABLED:-1}"
+DIRAC_APLAY="${DIRAC_APLAY:-/data/dirac_aplay.sh}"
+DIRAC_PLAYBACK_LOG="${DIRAC_PLAYBACK_LOG:-/tmp/native_first_dirac.log}"
+# 保留 ettsc 数字增益；Dirac 初始化后取消旧的 Master +10（+5 dB）补偿。
+# 实际响度仍取决于两种 TTS 音源；BOOST 仅供显式校准，不默认抬高原生硬件音量。
 DEVICE_TTS_GAIN="${DEVICE_TTS_GAIN:-2.0}"
-DEVICE_TTS_STREAM_MASTER_BOOST="${DEVICE_TTS_STREAM_MASTER_BOOST:-10}"
+DEVICE_TTS_STREAM_MASTER_BOOST="${DEVICE_TTS_STREAM_MASTER_BOOST:-0}"
 LLM_DIRECT_ANSWER=""
 NATIVE_SUCCESS_DOMAINS="${NATIVE_SUCCESS_DOMAINS:-smartMiot soundboxControl time weather music player alarm timer system volume}"
 NATIVE_REPLAY_SUCCESS_SPEAK="${NATIVE_REPLAY_SUCCESS_SPEAK:-1}"
@@ -604,6 +609,19 @@ calc_llm_master_volume() {
                 return 0
             fi
 
+            # mediaplayer 的 volume 与硬件 Master 不是同一标尺。
+            # 默认优先沿用实际 Master（含低音量/0），不受媒体查询或冻结时序影响。
+            case "$MASTER_RESTORE_VALUE" in
+                ''|*[!0-9]*) ;;
+                *)
+                    if [ "$LLM_MASTER_CURRENT_SCALE" = "100" ]; then
+                        log "[AUDIO] follow current native Master=$MASTER_RESTORE_VALUE" >&2
+                        echo "$MASTER_RESTORE_VALUE"
+                        return 0
+                    fi
+                    ;;
+            esac
+
             target=0
             media_vol=$(get_native_media_volume)
             if [ -n "$media_vol" ]; then
@@ -655,8 +673,8 @@ apply_llm_master_volume() {
         LLM_SESSION_MASTER_TARGET="$target"
     fi
 
-    # 端侧流式走 aplay，同 Master 下比 miplayer 偏小；在目标上加固定补偿（配合 ETTSC_GAIN）。
-    # 缓存的 session 目标是补偿前的值，每次都重新加，保持一致。
+    # Dirac 已初始化时默认不额外抬高硬件音量；保留显式配置的补偿。
+    # 缓存的 session 目标是补偿前的值，避免多轮重复累加。
     if [ "$TTS_ENGINE" = "device" ] && [ "$DEVICE_TTS_STREAM" = "1" ] \
         && [ "${DEVICE_TTS_STREAM_MASTER_BOOST:-0}" -gt 0 ] 2>/dev/null; then
         target=$((target + DEVICE_TTS_STREAM_MASTER_BOOST))
@@ -994,9 +1012,19 @@ select_native_result_source() {
 }
 
 start_aivs_speech_guard() {
+    rm -f "$AIVS_FAILURE_POLICY" "$AIVS_FAILURE_DIALOG" "$AIVS_GUARD_ARMED"
     [ "$AIVS_GUARD_ENABLED" = "1" ] || return 0
     [ "$FREEZE_NATIVE_PLAYER_ON_FALLBACK" = "1" ] || return 0
     is_system1_root || return 0
+    if [ "$AIVS_EARLY_GUARD_ENABLED" = "1" ] &&
+        [ "$(select_native_result_source)" = aivs_lab_instruction ] &&
+        [ "$NATIVE_AIVS_LAB_RESULT_SYSTEM1" = "1" ] &&
+        "$NATIVE_ASR_CTL" status >/dev/null 2>&1; then
+        if (umask 077; printf '%s\n%s\n' "$$" "$UNSUPPORTED_PATTERNS" > "$AIVS_FAILURE_POLICY.next" &&
+            mv "$AIVS_FAILURE_POLICY.next" "$AIVS_FAILURE_POLICY"); then
+            log "[GUARD] early failure Speak gate enabled; dialog-scoped LLM handoff"
+        fi
+    fi
     if [ ! -x "$AIVS_GUARD_BIN" ]; then
         log "[GUARD] helper unavailable; keeping normal fallback polling"
         return 0
@@ -1010,7 +1038,7 @@ start_aivs_speech_guard() {
 }
 
 stop_aivs_speech_guard() {
-    rm -f "$AIVS_GUARD_ARMED"
+    rm -f "$AIVS_GUARD_ARMED" "$AIVS_FAILURE_POLICY" "$AIVS_FAILURE_DIALOG"
     if [ -n "$AIVS_GUARD_PID" ]; then
         kill "$AIVS_GUARD_PID" 2>/dev/null
         wait "$AIVS_GUARD_PID" 2>/dev/null
@@ -1060,7 +1088,7 @@ get_native_result_ubus() {
 
 get_native_result_aivs_lab() {
     local new_lines dialog_id dialog_lines raw_query raw_speak
-    local last_dialog
+    local last_dialog failure_dialog
 
     reset_native_result
 
@@ -1094,6 +1122,20 @@ get_native_result_aivs_lab() {
 
     [ -n "$raw_query" ] && RESULT_QUERY=$(printf '%s\n' "$raw_query" | json_text_unescape)
     [ -n "$raw_speak" ] && RESULT_SPEAK=$(printf '%s\n' "$raw_speak" | json_text_unescape)
+
+    # A synchronously rejected Speak never reaches instruction.log. Its ASR
+    # still does; only accept the exact dialog and this running client's PID.
+    failure_dialog=$(cat "$AIVS_FAILURE_DIALOG" 2>/dev/null)
+    if [ -n "$RESULT_QUERY" ] && [ "$failure_dialog" = "$$ $dialog_id" ]; then
+        RESULT_TS=$(date +%s)
+        RESULT_DOMAIN="michat"
+        RESULT_ACTION="model"
+        RESULT_SOURCE="aivs_lab_early_failure"
+        RESULT_SPEAK="[failure Speak suppressed before dispatch]"
+        echo "$dialog_id" > "$AIVS_LAB_LAST_DIALOG_FILE"
+        log "[GUARD] early failure handoff dialog=$dialog_id"
+        return 0
+    fi
 
     if [ -n "$RESULT_QUERY" ] && echo "$RESULT_QUERY" | grep -Eq "$DIRECT_LLM_QUERY_PATTERNS"; then
         RESULT_TS=$(date +%s)
@@ -1839,7 +1881,7 @@ tts_play_text() {
         -F "volume=${LLM_VOLUME}" \
         "${TTS_SERVER}/api/v1/tts/stream" &
     CURL_PID=$!
-    aplay /tmp/stream_fifo 2>/dev/null &
+    llm_aplay /tmp/stream_fifo &
     APLAY_PID=$!
     wait $CURL_PID 2>/dev/null
     wait $APLAY_PID 2>/dev/null
@@ -1985,6 +2027,18 @@ stream_synthesize_sentence() {
     fi
 }
 
+llm_aplay() {
+    local helper="${DIRAC_APLAY:-/data/dirac_aplay.sh}"
+    # One log per player, never store audio or grow a persistent log on /data.
+    if [ -x "$helper" ]; then
+        LLM_DIRAC_ENABLED="${LLM_DIRAC_ENABLED:-1}" "$helper" "$@" \
+            2>"${DIRAC_PLAYBACK_LOG:-/tmp/native_first_dirac.log}"
+    else
+        log '[DIRAC] helper unavailable; using ordinary aplay'
+        aplay "$@" 2>"${DIRAC_PLAYBACK_LOG:-/tmp/native_first_dirac.log}"
+    fi
+}
+
 # PCM 常驻 FIFO 连播；遇到原生补播任务先排空并关闭 aplay，补播结束后续接 PCM。
 stream_play_worker() {
     local wd="$1"
@@ -2021,7 +2075,7 @@ stream_play_worker() {
                 log "[TTS] 单句原生兜底完成 $n"
             elif [ -s "$wd/$n.pcm" ]; then
                 if [ -z "$ap" ]; then
-                    aplay -r "$DEVICE_TTS_PCM_RATE" -f S16_LE -c 1 "$fifo" >/dev/null 2>&1 &
+                    llm_aplay -r "$DEVICE_TTS_PCM_RATE" -f S16_LE -c 1 "$fifo" >/dev/null &
                     ap=$!
                     exec 8>"$fifo"
                 fi
@@ -2271,7 +2325,7 @@ send_text_and_play() {
     CURL_PID=$!
 
     led_feedback_llm_playing
-    aplay /tmp/stream_fifo 2>/dev/null &
+    llm_aplay /tmp/stream_fifo &
     APLAY_PID=$!
     if [ "$cleanup_mode" = "defer" ]; then
         start_followup_vad_prearm
@@ -2326,7 +2380,7 @@ send_voice_and_play() {
     CURL_PID=$!
 
     led_feedback_llm_playing
-    aplay /tmp/stream_fifo 2>/dev/null &
+    llm_aplay /tmp/stream_fifo &
     APLAY_PID=$!
 
     wait $CURL_PID 2>/dev/null
@@ -2855,6 +2909,7 @@ log "TTS fallback: native=${TTS_FALLBACK_NATIVE} health_timeout=${TTS_HEALTH_TIM
 log "Followup recorder: enabled=${FOLLOWUP_ENABLED} followup_mode=${FOLLOWUP_MODE} record_mode=${FOLLOWUP_RECORD_MODE} asr=${FOLLOWUP_ASR_ENGINE} native_min_bytes=${FOLLOWUP_NATIVE_MIN_QUERY_BYTES} native_poll=${NATIVE_FOLLOWUP_POLL_SECONDS}s/${NATIVE_FOLLOWUP_POLL_INTERVAL}s window=${FOLLOWUP_WINDOW_SECONDS}s capture=${FOLLOWUP_WINDOW_CAPTURE_DEV}/${FOLLOWUP_WINDOW_CAPTURE_FORMAT}/${FOLLOWUP_WINDOW_CAPTURE_RATE}/${FOLLOWUP_WINDOW_CAPTURE_CHANNELS}ch audio_setup=${AUDIO_CAPTURE_SETUP} root=$(root_device) window_gate=peak${FOLLOWUP_WINDOW_MIN_PEAK}/rms${FOLLOWUP_WINDOW_MIN_RMS_THRESHOLD}/active${FOLLOWUP_WINDOW_MIN_ACTIVE_PERMILLE}‰ timeout=${FOLLOWUP_TIMEOUT}s arm_delay=${FOLLOWUP_ARM_DELAY}s arm_poll=${FOLLOWUP_ARM_POLL_SECONDS}s start=$FOLLOWUP_THRESHOLD/rms=$FOLLOWUP_START_RMS_THRESHOLD/active=${FOLLOWUP_START_ACTIVE_PERMILLE}‰ hits=$FOLLOWUP_START_HITS tail=${FOLLOWUP_IGNORE_INITIAL_CHUNKS}s/rms=$FOLLOWUP_TAIL_RMS_THRESHOLD/active=${FOLLOWUP_TAIL_ACTIVE_PERMILLE}‰ end=$FOLLOWUP_END_THRESHOLD/rms=$FOLLOWUP_END_RMS_THRESHOLD/active=${FOLLOWUP_END_ACTIVE_PERMILLE}‰ silence=${FOLLOWUP_SILENCE_LIMIT}s min_raw=$FOLLOWUP_MIN_RAW_BYTES prearm=$FOLLOWUP_PREARM"
 log "Fallback: stop=${STOP_NATIVE_SECONDS}s freeze_mediaplayer=${FREEZE_NATIVE_PLAYER_ON_FALLBACK} prefreeze_on_think=${FREEZE_NATIVE_PLAYER_ON_THINK}"
 log "Native ASR pause during LLM: $PAUSE_NATIVE_ASR_DURING_LLM"
+log "Dirac playback: enabled=$LLM_DIRAC_ENABLED helper=$DIRAC_APLAY detail=$DIRAC_PLAYBACK_LOG"
 log "Duplicate suppression: ${SUPPRESS_DUP_SECONDS}s"
 init_native_result_state
 set_state "INIT"
