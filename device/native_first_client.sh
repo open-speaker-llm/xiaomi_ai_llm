@@ -135,7 +135,7 @@ elif [ "$BACKEND" = "kimi" ]; then
 else
     LLM_API_BASE="${LLM_API_BASE:-https://api.deepseek.com}"
     LLM_API_KEY="${LLM_API_KEY:-${DEEPSEEK_API_KEY}}"
-    LLM_MODEL="${LLM_MODEL:-deepseek-v4-flash}"
+    LLM_MODEL="${LLM_MODEL:-deepseek-flash}"
 fi
 LLM_THINKING="${LLM_THINKING:-disabled}"          # disabled=关思考(快，~2s首句); enabled=开思考(深，~3s+)
 LLM_REASONING_EFFORT="${LLM_REASONING_EFFORT:-low}" # GLM-5.3-Flash 始终思考，支持 low/high/max

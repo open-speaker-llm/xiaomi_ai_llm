@@ -174,7 +174,7 @@ fallback 到 LLM 时走哪条链路由 `LLM_PIPELINE` 决定。**当前主线是
 关键设计点（都是实测踩坑后定的）：
 
 - **中文切句放在端点 Python 做**，不在 busybox shell 里——shell 按字节处理 UTF-8 会把 `。！？` 切碎成乱码。音箱只管"整段发 + fifo 流式播放"。
-- **思考型模型要关思考**：`deepseek-v4-flash` 默认输出 `reasoning_content`（思考链），首句要等 ~3s。`LLM_THINKING=disabled` 关掉后首句 ~2s，而且 shell 只取 `content` 字段天然把思考滤掉。
+- **语音链路使用非思考模式**：当前 DeepSeek 模型名为 `deepseek-flash`（V4.1 Flash）。保留 `LLM_THINKING=disabled`，减少等待思考阶段结束后才输出回答的延迟；shell 只取 `content`，不播报 `reasoning_content`。实际首声延迟还受网络、回答长度和 TTS 影响。
 - **降级探测**：每次 fallback 前快速 ping TTS 微服务（`TTS_HEALTH_TIMEOUT`），在线走 EdgeTTS，离线走原生 `mibrain text_to_speech`（已验证能完整念几百字长文本）。
 - **会话历史**保存在 `LLM_HISTORY_DIR`（默认 `/tmp/native_first_llm_hist`，重启清空，可自行配置持久目录），保留最近 `LLM_HISTORY_TURNS` 轮多轮上下文。
 
