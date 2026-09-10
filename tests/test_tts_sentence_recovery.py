@@ -18,10 +18,12 @@ def functions(*names):
 class TtsSentenceRecoveryTest(unittest.TestCase):
     def run_stream(self, mode, fallback='1'):
         with tempfile.TemporaryDirectory() as temp:
-            code = functions('stream_synthesize_sentence', 'stream_play_worker',
+            code = functions('llm_aplay', 'stream_synthesize_sentence', 'stream_play_worker',
                              'llm_stream_answer_and_play').replace('/tmp/native_first_stream', temp + '/stream')
             code += r'''
 export TRACE="$TEST_DIR/trace"
+DIRAC_PLAYBACK_LOG="$TEST_DIR/aplay.log"
+DIRAC_APLAY="$TEST_DIR/no-helper"
 mkdir -p "$TEST_DIR/history"
 LLM_API_KEY=test; LLM_API_BASE=test; LLM_DIRECT_TIMEOUT=1
 LLM_HISTORY_DIR="$TEST_DIR/history"

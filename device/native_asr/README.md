@@ -66,7 +66,9 @@ PAUSE_NATIVE_ASR_DURING_LLM=0
 
 播放期间的原生回调只在自有续听 phase 1–6 且 busy 时屏蔽；IDLE、FAILED、交接或状态不可用时透传。LLM 保持连续播报。追问开麦前恢复原生音量，同时保留本轮 LLM 的音量目标，避免下一段重新计算后变响。2026-09-09 已修复 AEC 参考通道的初始化时机，参考电平及串音对照见[验证记录](../../docs/history/2026-09-09-parallel-wake-reference.md)。参考信号存在不等于每次家居命令都能成功，仍需分别核对真实唤醒、最终 ASR 和家居动作。
 
-首轮失败文案拦截仍由 `device/aivs_guard/` 负责，和本组件的追问 ASR-only 隔离是两件事。
+首轮失败文案在匹配固件的 JSON 解析入口提前拦截（`AIVS_EARLY_GUARD_ENABLED=1`）。客户端发布存活 PID 和同一份 `UNSUPPORTED_PATTERNS`，只有 think 已激活、未 busy、当前原生 ASR final 的同一 dialog、15 秒期限内的失败 Speak 才可触发。先原子写入仅含 PID/dialog_id 的接管标记，再拒绝 Speak 分发；客户端从原始 ASR 日志取问题并转 LLM。重复解析同一被拦截 dialog 不会重新放出失败语音，`Dialog.Finish` 仍透传。普通原生回答、家居/音量指令和 LLM 播放期间新唤醒的 dialog 继续原生处理。
+
+关闭配置、客户端不存活、标记过期、规则无效或接管标记写入失败时保留原生路径。`device/aivs_guard/` 的日志监听仍作后备；文本规则的误判/漏判边界没有改变。独立于追问的 ASR-only 隔离，未使用全局静音。
 
 正常完成的同一追问 `Dialog.Finish` 允许 SDK 重复解析，包括 CLI 已将 phase 置回 IDLE 的间隙。它负责清除 SDK 的会话/TTS 超时等待，不能当作旧动作拦截；否则会在 ASR final 约十秒后误报 `50010005 / TTS timeout`，并触发本地“网络异常”语音。该例外不适用于交接、取消或被新会话替代的 dialog，也不放行旧 StopCapture 或家居动作。
 
@@ -84,7 +86,7 @@ tail /tmp/native_first_client.log
 本地自动测试覆盖控制程序的并发、取消、空结果、旧文本、参数校验，以及 shell 的同一会话、boot0 兼容与 LLM 错误退出。另有 `test_native_asr.c`，在独立设备进程中验证实际 JsonCpp ABI、ASR-only 上下文和动作/结果隔离，并用固件的真实 WAV 进行 15 项提示音隔离测试：五种提示音、普通唤醒透传、其他线程/文件/进程透传，以及完成或取消后的延迟读取。测试不调用麦克风或云服务、不播放音频：
 
 ```sh
-zig cc -target arm-linux-gnueabihf.2.25 -Os -Wall -Wextra -Werror device/native_asr/test_native_asr.c -ldl -lpthread -o /tmp/test_native_asr
+zig cc -target arm-linux-gnueabihf.2.25 -Os -Wall -Wextra -Werror -Wl,--export-dynamic device/native_asr/test_native_asr.c -ldl -lpthread -o /tmp/test_native_asr
 zig cc -target arm-linux-gnueabihf.2.25 -Os -Wall -Wextra -Werror device/native_asr/test_native_asr_wake.c -ldl -lpthread -o /tmp/test_native_asr_wake
 # 将二进制复制到音箱 /tmp 后运行；测试状态分别使用
 # /tmp/native_followup_unit 与 /tmp/native_followup_wake_unit，目录已存在时拒绝运行。

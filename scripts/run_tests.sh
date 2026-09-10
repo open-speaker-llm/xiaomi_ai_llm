@@ -19,6 +19,8 @@ echo "== Python unit tests =="
 echo "== Shell syntax =="
 for script in \
     device/native_first_client.sh \
+    device/dirac/build.sh \
+    device/dirac/dirac_aplay.sh \
     device/native_asr/build.sh \
     device/native_asr/native_asr.sh \
     device/pcm_tap/build.sh \
