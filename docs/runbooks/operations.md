@@ -96,7 +96,7 @@ DEEPSEEK_API_KEY=sk-...                 # native 模式必填，否则无法直�
 TTS_SERVER=http://192.168.8.150:8080   # TTS 微服务地址，可指向任意常驻设备
 TTS_ENGINE=server                       # server=Mac/迷你 TTS 服务；device=音箱端 ettsc
 TTS_FALLBACK_NATIVE=1                   # TTS 微服务不可用时走小爱原生 TTS
-LLM_THINKING=disabled                   # deepseek-v4-flash 关思考，首句 ~2s
+LLM_THINKING=disabled                   # deepseek-flash 使用非思考模式
 ```
 
 启动后日志里会看到 `[LLM-NATIVE] direct → ...`。TTS 有三种用法：
@@ -119,7 +119,7 @@ LLM_THINKING=disabled                   # deepseek-v4-flash 关思考，首句 ~
 
 | BACKEND | 默认模型 |
 |---|---|
-| `deepseek` | `deepseek-v4-flash` |
+| `deepseek` | `deepseek-flash`（V4.1 Flash） |
 | `minimax` | `MiniMax-M2.7` |
 | `glm` | `glm-5.3-flash` |
 | `kimi` | `kimi-k2.6` |

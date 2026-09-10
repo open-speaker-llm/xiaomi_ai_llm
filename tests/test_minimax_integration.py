@@ -19,7 +19,7 @@ class NativeMiniMaxTest(unittest.TestCase):
         setup = source.split('LLM_THINKING=')[0]
         template = (ROOT / 'device/native_first.env.example').read_text()
         providers = {
-            'deepseek': ('https://api.deepseek.com', 'deepseek-v4-flash'),
+            'deepseek': ('https://api.deepseek.com', 'deepseek-flash'),
             'minimax': ('https://api.minimaxi.com/v1', 'MiniMax-M2.7'),
             'glm': ('https://open.bigmodel.cn/api/paas/v4', 'glm-5.3-flash'),
             'kimi': ('https://api.moonshot.cn/v1', 'kimi-k2.6'),
@@ -41,7 +41,7 @@ class NativeMiniMaxTest(unittest.TestCase):
         return re.search(r'^' + name + r'\(\) \{.*?^\}', source, re.M | re.S).group()
 
     def test_provider_requests(self):
-        for model in ('MiniMax-M2.7', 'deepseek-v4-flash', 'glm-5.3-flash', 'kimi-k2.6'):
+        for model in ('MiniMax-M2.7', 'deepseek-flash', 'glm-5.3-flash', 'kimi-k2.6'):
             result = subprocess.run(
                 ['sh', '-c', self.function('llm_build_request') +
                  '\nLLM_MODEL=$1; LLM_THINKING=disabled; LLM_REASONING_EFFORT=low; llm_build_request "$2"',
@@ -110,7 +110,7 @@ class NativeMiniMaxTest(unittest.TestCase):
 
 class ServerMiniMaxTest(unittest.IsolatedAsyncioTestCase):
     async def test_chat_and_stream_split_reasoning_only_for_minimax(self):
-        for model in ('MiniMax-M2.7', 'deepseek-v4-flash', 'glm-5.3-flash', 'kimi-k2.6'):
+        for model in ('MiniMax-M2.7', 'deepseek-flash', 'glm-5.3-flash', 'kimi-k2.6'):
             client = MiniMaxClient(api_key='dummy', model=model)
             await client.client.close()
             create = AsyncMock(return_value=SimpleNamespace(choices=[SimpleNamespace(
@@ -135,7 +135,7 @@ class ServerMiniMaxTest(unittest.IsolatedAsyncioTestCase):
 
             create.return_value = chunks()
             self.assertEqual([part async for part in client.chat_stream('你好')], ['你好'])
-            self.assertEqual('extra_body' in create.call_args.kwargs, model != 'deepseek-v4-flash')
+            self.assertEqual('extra_body' in create.call_args.kwargs, model != 'deepseek-flash')
 
     async def test_glm_reasoning_effort_is_configurable(self):
         client = MiniMaxClient(api_key='dummy', model='glm-5.3-flash', reasoning_effort='high')
