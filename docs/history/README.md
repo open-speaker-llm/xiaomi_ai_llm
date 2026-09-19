@@ -19,6 +19,8 @@
 - [2026-09-06-boot1-native-asr-research.md](2026-09-06-boot1-native-asr-research.md) —— NONWAKEUP 入口研究；时间和算术免唤醒识别成功，后续由正式组件接入 LLM。
 - [2026-09-06-boot1-pcm-followup.md](2026-09-06-boot1-pcm-followup.md) —— 已验证的 PCM + Mac Whisper 旧路线及退出残音修复，现保留供回退。
 
+- [首轮截断与本地判停](first-turn-endpoint/README.md) —— 从 partial 提前提交、云端停录到音箱本地判停；含失败反例、常驻恢复、2026-09-20 日常部署验收。当前使用入口仍是快速上手和运维手册。
+
 ## 2. 归档快照
 
 文档重构前的完整 Markdown 原文在：

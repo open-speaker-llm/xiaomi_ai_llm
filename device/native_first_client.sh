@@ -45,6 +45,7 @@ SYSTEM1_FOLLOWUP_WINDOW_CAPTURE_CHANNELS="${SYSTEM1_FOLLOWUP_WINDOW_CAPTURE_CHAN
 AIVS_LAB_INSTRUCTION_LOG="${AIVS_LAB_INSTRUCTION_LOG:-/tmp/mico_aivs_lab/instruction.log}"
 AIVS_LAB_LOOKBACK_LINES="${AIVS_LAB_LOOKBACK_LINES:-40}"
 AIVS_LAB_LAST_DIALOG_FILE="${AIVS_LAB_LAST_DIALOG_FILE:-/tmp/native_first_last_aivs_dialog}"
+NATIVE_ENDPOINT_RESULT_DIR="${NATIVE_ENDPOINT_RESULT_DIR:-/tmp/xiaomi_native_wake_probe/routes}"
 NATIVE_WAIT_SECONDS="${NATIVE_WAIT_SECONDS:-12}"
 NATIVE_POLL_INTERVAL="${NATIVE_POLL_INTERVAL:-0.2}"
 AIVS_GUARD_ENABLED="${AIVS_GUARD_ENABLED:-1}"
@@ -90,6 +91,8 @@ PCM_CAPTURE_SECONDS="${PCM_CAPTURE_SECONDS:-8}"
 FOLLOWUP_ASR_TIMEOUT="${FOLLOWUP_ASR_TIMEOUT:-30}"
 NATIVE_ASR_MANAGER="${NATIVE_ASR_MANAGER:-/data/native_asr.sh}"
 NATIVE_ASR_CTL="${NATIVE_ASR_CTL:-/data/native_asr_ctl}"
+NATIVE_ENDPOINT_ENABLED="${NATIVE_ENDPOINT_ENABLED:-0}"
+NATIVE_ENDPOINT_MANAGER="${NATIVE_ENDPOINT_MANAGER:-/data/native_endpoint/manager.sh}"
 NATIVE_ASR_LISTEN_TIMEOUT="${NATIVE_ASR_LISTEN_TIMEOUT:-20}"
 FOLLOWUP_WINDOW_SECONDS="${FOLLOWUP_WINDOW_SECONDS:-8}"
 FOLLOWUP_WINDOW_CAPTURE_DEV="${FOLLOWUP_WINDOW_CAPTURE_DEV:-Capture}"
@@ -453,6 +456,21 @@ setup_audio() {
     amixer -c 0 sset 'Hard Mute' off 2>/dev/null
     amixer -c 0 sset 'Ch1' unmute 2>/dev/null
     amixer -c 0 sset 'Ch2' unmute 2>/dev/null
+}
+
+setup_native_endpoint() {
+    [ "$NATIVE_ENDPOINT_ENABLED" = 1 ] || return 0
+    is_system1_root || return 0
+    if [ -x "$NATIVE_ENDPOINT_MANAGER" ] && sh "$NATIVE_ENDPOINT_MANAGER" start; then
+        log '[ENDPOINT] 本地判停已就绪；小米识别保留完整问题后路由'
+    else
+        log '[ENDPOINT] 本地判停未就绪，当前仅有原生收音；请检查判停状态'
+    fi
+}
+
+stop_native_endpoint() {
+    [ "$NATIVE_ENDPOINT_ENABLED" = 1 ] || return 0
+    [ ! -x "$NATIVE_ENDPOINT_MANAGER" ] || sh "$NATIVE_ENDPOINT_MANAGER" stop
 }
 
 root_device() {
@@ -1086,9 +1104,33 @@ get_native_result_ubus() {
     RESULT_SOURCE="ubus_nlp_result"
 }
 
+# Read the individual journal first; compacted denials are published before
+# that journal is unlinked. Reversing this order would create a TOCTOU bypass.
+endpoint_denial_allows() {
+    local dialog="$1" dir bucket first size
+    dir="${NATIVE_ENDPOINT_RESULT_DIR:-/tmp/xiaomi_native_wake_probe/routes}.denied"
+    if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then return 0; fi
+    [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+    first=${dialog%"${dialog#?}"}
+    bucket="$dir/b_$first"
+    if [ ! -e "$bucket" ] && [ ! -L "$bucket" ]; then return 0; fi
+    [ -f "$bucket" ] && [ ! -L "$bucket" ] || return 1
+    size=$(wc -c < "$bucket") || return 1
+    [ "$size" -ge 5 ] && [ "$size" -le 131072 ] || return 1
+    # The sentinel also detects a truncated final line on BusyBox awk.
+    { cat "$bucket" || printf '\n!READ_ERROR\n'; printf '!END\n'; } | awk -v id="$dialog" -v prefix="$first" '
+        NR==1 { if ($0!="NRD1") bad=1; next }
+        $0=="!END" { ends++; next }
+        length($0)<1 || length($0)>=80 || $0 ~ /[^a-zA-Z0-9_-]/ || substr($0,1,1)!=prefix { bad=1 }
+        $0==id { denied=1 }
+        END { exit (ends!=1 || bad || denied) ? 1 : 0 }
+    ' 2>/dev/null
+}
+
 get_native_result_aivs_lab() {
     local new_lines dialog_id dialog_lines raw_query raw_speak
     local last_dialog failure_dialog
+    local endpoint_file endpoint_record endpoint_magic endpoint_owner endpoint_nonce endpoint_tag endpoint_status endpoint_extra
 
     reset_native_result
 
@@ -1105,15 +1147,36 @@ get_native_result_aivs_lab() {
     last_dialog=$(cat "$AIVS_LAB_LAST_DIALOG_FILE" 2>/dev/null)
     [ "$dialog_id" = "$last_dialog" ] && return 1
 
+    # A cloud final can also be caused by a forced EOF. Controlled dialogs
+    # require the watcher's explicit completion record; owner death remains
+    # pending. Uncontrolled native/ASR-only dialogs keep their original route.
+    case "$dialog_id" in *[!a-zA-Z0-9_-]*) return 1;; esac
+    endpoint_file="${NATIVE_ENDPOINT_RESULT_DIR:-/tmp/xiaomi_native_wake_probe/routes}/$dialog_id"
+    if [ -e "$endpoint_file" ] || [ -L "$endpoint_file" ]; then
+        [ -f "$endpoint_file" ] && [ ! -L "$endpoint_file" ] || return 1
+        endpoint_record=$(cat "$endpoint_file" 2>/dev/null) || return 1
+        IFS=' ' read -r endpoint_magic endpoint_owner endpoint_nonce endpoint_tag endpoint_status endpoint_extra <<EOF
+$endpoint_record
+EOF
+        [ "$endpoint_magic" = NW1 ] && [ "$endpoint_status" = quiet ] && [ -z "$endpoint_extra" ] || return 1
+        case "$endpoint_owner:$endpoint_nonce" in *[!0-9:]*|:*|*:) return 1;; esac
+        case "$endpoint_tag" in *[!0-9a-f]*) return 1;; esac
+        [ "${#endpoint_tag}" = 32 ] || return 1
+        [ "$endpoint_record" = "NW1 $endpoint_owner $endpoint_nonce $endpoint_tag quiet" ] || return 1
+    fi
+
+    endpoint_denial_allows "$dialog_id" || return 1
+
     dialog_lines=$(printf '%s\n' "$new_lines" | grep "\"dialog_id\":\"$dialog_id\"")
     [ -n "$dialog_lines" ] || return 1
 
     raw_query=$(printf '%s\n' "$dialog_lines" \
         | sed -n 's/.*"name":"RecognizeResult".*"is_final":true.*"text":"\([^"]*\)".*/\1/p' \
         | tail -1)
-    [ -n "$raw_query" ] || raw_query=$(printf '%s\n' "$dialog_lines" \
-        | sed -n 's/.*"name":"RecognizeResult".*"text":"\([^"]*\)".*/\1/p' \
-        | tail -1)
+    # Partial text may change while the user is still speaking. Neither a
+    # routing keyword nor a failure Speak makes it final. Leave the dialog
+    # unclaimed so a later poll can submit its complete, nonempty final once.
+    [ -n "$raw_query" ] || return 1
     raw_speak=$(printf '%s\n' "$dialog_lines" \
         | sed -n 's/.*"name":"Speak".*"text":"\([^"]*\)".*/\1/p' \
         | tail -1)
@@ -2820,6 +2883,7 @@ handle_wakeup() {
 }
 
 cleanup() {
+    stop_native_endpoint
     end_native_queue_drain
     stop_aivs_speech_guard
     led_off
@@ -2938,6 +3002,7 @@ install_hook
 start_hook_watchdog
 restart_mipns_single
 
+setup_native_endpoint
 log "[IDLE] 等待原生唤醒词：小爱同学"
 exec 3<>"$EVENT_FIFO"
 while true; do

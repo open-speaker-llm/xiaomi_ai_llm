@@ -10,6 +10,12 @@
 
 2026-09-06 已验证 boot1 的 native_asr 原生追问组件可随客户端重建服务覆盖并自动加载。只具备 SSH/rc.local 入口不等于已安装组件；安装与健康检查见 [原生追问说明](../../device/native_asr/README.md)。
 
+## 首轮判停的启动与验证范围
+
+安装 `native_endpoint` 后沿用现有入口：`rc.local → /data/init.sh → native_first_client.sh → manager.sh start`。客户端仅在 boot1 且开关启用时加载判停；运行包持久存于 `/data/native_endpoint/`，校验后解压至 `/tmp`，模型 READY 后才接管新唤醒。不需要再改 rootfs、加另一条自启动命令或依赖 Mac 在线。
+
+2026-09-20 已验证服务启动、停止、实际回滚和重新启用；**尚未做安装该包后的整机重启或全天验证**。2026-09-06 的旧版重启结果不能替代本次验证。后续整机重启需按 EP7 检查 READY、服务健康、模型单实例及正常停顿问题，见[人工测试](../../tests/manual_native_first_cases.md#ep-首轮本地判停)。失败时按[日常运维](operations.md#boot1-首轮本地判停)回滚，保留原 SSH/init 入口。
+
 ## 1. 当前结论
 
 推荐长期方案：

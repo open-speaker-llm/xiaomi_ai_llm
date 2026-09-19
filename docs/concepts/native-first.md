@@ -2,7 +2,7 @@
 
 文档类型：当前主线架构
 适用范围：理解为什么先走小米原生、什么时候转 LLM、boot0/boot1 如何兼容
-当前结论：boot0 按原生 domain/action 路由；boot1 按 AIVS 文本规则路由，失败提示快速拦截已于 2026-09-06 实机验证
+当前结论：boot0 按原生 domain/action 路由；boot1 只提交最终识别、按 AIVS 文本规则路由。可选本地首轮判停已于 2026-09-20 完成日常接入验收，追问仍使用原生 VAD。
 
 ## 1. 目标
 
@@ -23,9 +23,11 @@ LLM 只接管小米原生不擅长的开放问答。
 用户说"小爱同学"
   → /bin/wakeup.sh 被原生链路调用
   → native_first_client.sh 的 hook 记录 WuW/think/ready 事件
-  → 小米原生 ASR/NLP 先处理
+  → boot1 本地判停包启用且就绪时，控制当前首轮的收音结束
+  → 小米原生 ASR/NLP 处理
   → boot0：读取 domain/action 与 speak，按路由策略选择原生或 LLM
-  → boot1：读取 RecognizeResult 与 Speak.text
+  → boot1：读取非空 final RecognizeResult 与 Speak.text
+       → 受本地判停控制的请求必须有同轮 quiet 完成记录；异常残句拒绝转 LLM
        → 命中直接转 LLM 的提问或失败文案：转 LLM
        → guard 在匹配失败 Speak 后暂停播放器，shell 接手
        → 未命中：原生链路继续处理，不据此保证原生一定答对
@@ -35,6 +37,31 @@ LLM 只接管小米原生不擅长的开放问答。
 ```
 
 hook 的实现方式是把 `/bin/wakeup.sh` 用 bind mount 替换为自己的脚本（`mounted /bin/wakeup.sh -> /tmp/wakeup.sh.native_first_client`），原生链路每次唤醒都会调用它，脚本借此拿到事件流，且不修改只读 rootfs。
+
+### 首轮收音与结果提交
+
+提前截断有两个层次：客户端以前可能取到尚未定稿的 partial 并立即转 LLM，同一 dialog 后来的 final 又被去重；即使改成只读 final，小米原生判停也可能已在句中停顿时结束上行，此时 final 本身就缺少后半句。麦克风仍采到后续声音，不代表该段声音仍被送进同一次云识别。证据见[基线](../history/first-turn-endpoint/baseline-20260917.md)和[真实首轮反例](../history/first-turn-endpoint/native-first-endpoint-20260919.md)。
+
+现在客户端统一只处理非空 final；boot1 另提供可选首轮本地判停：
+
+1. 预加载的音箱端 Silero VAD 观察原生处理后的 PCM；声音继续由小米云识别，不通过 Mac，也不新增 ASR 服务。
+2. 仅对准确关联的真实唤醒首轮改写 Wakeup/Recognize 的自然录音设置，由本机控制结束；不按“呼叫某模型”的特定短语决定要不要多听。
+3. 模型按语音活动提出结束候选。原生入口复核本轮身份、辅助进程、提议时效及音频消费进度，再沿原会话发送结束。临时积压最多容纳 500 ms，必须追平全部音频才可判停；超载拒绝该轮。
+4. 正常 quiet 完成记录与同一 dialog 的非空 final 同时具备，才允许进入原有 LLM 路由。6 秒未开口、20 秒硬上限、故障或再次唤醒取消都不能冒充正常完成；迟到的 final 也不能补交旧残句或写入历史。
+5. 新唤醒、免唤醒追问和旧请求使用独立身份；退出和进程重建保留旧拒绝记录，避免恢复后重放。
+
+| 项目 | 当前行为与代价 |
+|---|---|
+| 未开口 | 从首个 PCM 帧起约 6 秒结束，静默轮不进 LLM |
+| 句末 | 检测到语音后约 2 秒静音；已实测容纳约 1.5 秒停顿和轻声补充 |
+| 整轮上限 | 唤醒后约 20 秒，达到上限拒绝残句 |
+| 资源 | 一个常驻模型；最终现场 RSS 约 27.7 MiB，早期 20 秒文件测试约单核 16–17%；并非所有负载下的上限 |
+| 能力边界 | 不判断语义完整，不保证长停顿、远距离或所有噪声下都不截断；原生命令也会承担句末等待 |
+| 不可用时 | 新唤醒保留原生收音，日志明确未就绪；当前受控异常轮拒绝提交 |
+
+这是收音层修正。原有 `NATIVE_DIALOG_INPUT_GUARD` 是识别后针对少量明确短句的补全规则，两者独立；短句规则无法找回已经停止上传的声音。本地判停也不替代失败文案匹配或修复 TTS 播放卡顿。
+
+使用与恢复见[运维手册](../runbooks/operations.md#boot1-首轮本地判停)，构建及版本限制见[组件说明](../../device/native_endpoint/README.md)。
 
 ## 3. 路由标准
 
@@ -92,7 +119,9 @@ NATIVE_REPLAY_CANCEL_DOMAINS="smartMiot soundboxControl volume system"
 | boot0/system0 | `/dev/mtdblock4` | 1.54.8，2019 | `mibrain nlp_result_get` → `ubus_nlp_result` |
 | boot1/system1 | `/dev/mtdblock5` | 1.76.54，2023 | `/tmp/mico_aivs_lab/instruction.log` → `aivs_lab_instruction` |
 
-### 双系统能力对照（2026-09-06）
+<a id="双系统能力对照2026-09-06"></a>
+
+### 双系统能力对照（更新至 2026-09-20）
 
 下表针对本项目 S12A 实测固件和已安装组件；通用模板仍须按安装说明启用相应能力。
 
@@ -104,7 +133,8 @@ NATIVE_REPLAY_CANCEL_DOMAINS="smartMiot soundboxControl volume system"
 | LLM 与 TTS 不依赖常驻 Mac | 可用音箱直连 LLM + 设备 TTS | 同样可用 |
 | 免唤醒追问与同一上下文 | 原有录音方案 + 小米文件 ASR，仍标为实验方案 | 原生实时 ASR-only；有声上下文追问已实测 |
 | 追问识别不依赖 Mac | 支持原生文件 ASR，Mac 回退可选 | native_live 不调用 Mac ASR，仍需小米云 |
-| 收听窗口 | 由本地录音配置控制，默认 window 8 秒 | 原生 VAD 判定，空闲收听约 6 秒；20 秒是整轮保护超时 |
+| 首轮停顿续说 | 未接入本地判停 | 可选 native_endpoint：约 2 秒句末静音、6 秒未开口退出、20 秒总上限 |
+| 追问收听窗口 | 由本地录音配置控制，默认 window 8 秒 | 原生 VAD 判定，空闲收听约 6 秒；20 秒是整轮保护超时 |
 | SSH、自启动、原生 OTA 拦截 | 已配置验证 | 已配置验证，原生追问组件重启后自动加载 |
 | 播放中语音打断 | 未实现 | 未实现 |
 
@@ -188,7 +218,7 @@ boot1 / S12A ROM 1.76.54 已实现并安装原生 ASR 连续追问：LLM 播报�
 - 脚本提示音在 `wakeup.sh` hook 处跳过；绕过脚本直接播放的本地“欸”等提示音，按本次续听的线程归属将 WAV 读取缓冲区置为静音。普通唤醒保留原样；静默结束后清理原生队列、恢复音量。
 - 本次追问中的原生 NLP/设备动作被隔离；普通首轮唤醒仍走小爱的原生处理。
 - 使用 `SYSTEM1_FOLLOWUP_RECORD_MODE=native_live`，需先安装匹配固件的组件。通用示例仍默认关闭。
-- 原生 VAD 控制句末和静默窗口；20 秒配置是整体保护超时。尚未实现播放中打断，不特别处理结束语。
+- 此免唤醒入口仍由原生 VAD 控制句末和静默窗口；20 秒配置是整体保护超时。首轮 `NATIVE_ENDPOINT_ENABLED` 不改变这里的判停策略。尚未实现播放中打断，不特别处理结束语。
 - boot0 保留原录音与文件 ASR 方式。此前 [PCM + Mac ASR](../../device/pcm_tap/README.md) 实现保留供回退；旧下行 reopen/文件识别失败结论不适用于新入口。
 
 详见 [原生组件安装](../../device/native_asr/README.md)、[集成验证记录](../history/2026-09-06-boot1-native-followup.md)、[入口研究](../history/2026-09-06-boot1-native-asr-research.md)。

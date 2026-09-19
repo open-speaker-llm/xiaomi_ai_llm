@@ -17,6 +17,8 @@
 
 ## 1. 上传音箱端文件
 
+以下上传步骤用于初次部署。已有本地判停包的设备请走[整包维护说明](../../device/native_endpoint/README.md#安装)，不要直接覆盖客户端。
+
 在 Mac 仓库根目录执行：
 
 ```sh
@@ -152,7 +154,7 @@ boot1 还应执行 P3：用会触发失败提示的问题核对转 LLM 前无失
 
 ### boot1 开启原生免唤醒追问
 
-先完成首轮验证并确认设备为 S12A boot1 / ROM 1.76.54。在开发机仓库根目录使用 Zig 构建，再安装：
+先完成首轮验证并确认设备为 S12A boot1 / ROM 1.76.54。下面是尚未安装本地判停包时的基础追问部署；已有判停包不要用此安装器覆盖共享 SO。在开发机仓库根目录使用 Zig 构建，再安装：
 
 ```sh
 sh device/native_asr/build.sh /tmp/native-asr-build
@@ -164,6 +166,14 @@ python3 tools/speaker-maintenance/install_boot1_native_followup.py --host 192.16
 回答结束、绿灯续听时直接说下一句；同一 LLM session 保留上下文。空闲收听约 6 秒，由原生 VAD 判定，`NATIVE_ASR_LISTEN_TIMEOUT=20` 仅是整轮保护超时。保持安静后退出，再喊“小爱同学”即可使用原生功能。
 
 选择 `LLM_PIPELINE=native`、`TTS_ENGINE=device` 并部署 `ettsc` 后，LLM、TTS 和追问都不需 Mac 常驻，仍需云服务联网。通用模板默认不启用 boot1 追问；安装器校验通过后才启用。完整验证和回退见 [组件说明](../../device/native_asr/README.md) 与 [人工用例](../../tests/manual_native_first_cases.md)。
+
+### boot1 首轮本地判停
+
+此项用于“小爱同学”真实唤醒后的首轮，不替代免唤醒追问。仅适配 S12A boot1 / ROM 1.76.54，通用模板 `NATIVE_ENDPOINT_ENABLED=0`。先确认原生 ASR 组件可用，再按[判停包构建与安装](../../device/native_endpoint/README.md)部署；只上传本页第 1 步的脚本或把开关改成 1，不会自动安装模型与运行库。
+
+安装后需看到 `ENDPOINT_READY` 和 native_asr `healthy`，再做[EP 系列现场验收](../../tests/manual_native_first_cases.md#ep-首轮本地判停)。可正常使用约 1.5 秒句中停顿；说完后约等 2 秒交给云端完成识别。无语音约 6 秒退出、整轮最多 20 秒，异常和上限残句不交给 LLM。
+
+判停在音箱内运行，识别仍需小米云；不需要 Mac 常驻。日常状态与回滚见[运维](../runbooks/operations.md#boot1-首轮本地判停)。已经安装判停包的设备应整包维护，避免仅覆盖客户端或用旧追问安装器覆盖共享的 `native_asr.so`。
 
 ## 6. 之后
 

@@ -161,6 +161,32 @@ tail -n 50 /tmp/native_first_client.log
 
 临时停用追问：将配置最后生效的 `SYSTEM1_FOLLOWUP_ENABLED` 设为 `0` 后重启客户端；完整卸载/回退使用安装器输出备份目录内的 `restore.sh`。boot0 保留原录音与文件 ASR；不要全局改成 `native_live`。旧 PCM + Mac 路线与原生追问管理器不同时加载。
 
+### boot1 首轮本地判停
+
+安装与升级边界见[组件说明](../../device/native_endpoint/README.md)。它与上述原生追问共用 native_asr 库，但只控制真实唤醒首轮。客户端在 boot1 且 `NATIVE_ENDPOINT_ENABLED=1` 时自动启动管理器，退出时停止；日常无需运行实验目录下的 `run_*.sh`。
+
+在音箱上检查：
+
+```sh
+sh /data/native_endpoint/manager.sh verify
+sh /data/native_endpoint/manager.sh status
+sh /data/native_asr.sh status
+tail -n 60 /tmp/xiaomi_native_wake_probe/daily.log
+tail -n 40 /tmp/native_followup/events.log
+```
+
+`verify` 检查安装包文件哈希；`ENDPOINT_READY owner=… model=… turns=…` 说明判停已就绪；native_asr 还应为 `healthy`。只有客户端 `[IDLE]` 或能正常报时，不能证明本地判停正在工作。日志和路由记录可能含识别文本，不要公开原始文件。
+
+| 状态/需求 | 操作与判断 |
+|---|---|
+| 日常重启助手 | 空闲时 `sh /data/native_first_client.sh stop`，再 `sh /data/init.sh`；随后检查上述状态 |
+| 判停未就绪 | 查看 daily.log 和客户端 `[ENDPOINT]`；新唤醒可能仅有原生收音，不能承诺停顿保护 |
+| 临时停用 | 空闲时先停止客户端，再将配置中最后生效的 `NATIVE_ENDPOINT_ENABLED` 改为 `0`，然后运行 `sh /data/init.sh` |
+| 重新启用已完整安装的同版包 | 空闲时停止客户端，设开关为 `1`，再运行 init.sh 并检查 READY |
+| 完整回滚 | 空闲时执行本次安装输出的 `/data/endpoint-backup-时间/restore.sh`；它恢复原客户端、配置及 SO，并归档旧指令日志后重启，避免旧问题重放 |
+
+不要直接删除 `/tmp/xiaomi_native_wake_probe/routes*`，其中的拒绝记录阻止超时、取消和故障的旧结果进入 LLM。不要用 `killall` 或仅替换 `native_asr.so` 代替停止和恢复流程。当前版本的整机重启、全天稳定性仍待验收，见[自启动验证范围](autostart.md#首轮判停的启动与验证范围)。
+
 ## 4. 配置文件
 
 音箱上的运行配置：

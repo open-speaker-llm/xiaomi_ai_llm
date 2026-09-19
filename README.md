@@ -20,11 +20,20 @@
 小爱同学，给我讲讲量子纠缠    → LLM 流式回答，逐句合成播放
 ```
 
+## 首轮停顿续说
+
+boot1 / S12A ROM 1.76.54 可安装音箱本地判停：说“问问 DeepSeek，为什么月亮白天也能看见”，停约 1.5 秒再补“请用一句话回答”，会保留后半句，再按原有规则交给小爱或 LLM。识别仍走小米云，无需 Mac 识别或新增服务。
+
+当前策略是约 6 秒未开口退出、说话后约 2 秒静音判句末、整轮最多 20 秒。只提交最终识别；受控首轮还必须正常结束，超时、取消或故障的残句不进入 LLM 和历史。它不判断语义是否完整，超过约 2 秒的长停顿仍可能结束。
+
+已在实机启用并完成现场验收；通用模板默认关闭，须先部署匹配固件的组件。整机重启与全天稳定性尚未验证。入口见[快速上手](docs/getting-started/quickstart.md#boot1-首轮本地判停)和[原理说明](docs/concepts/native-first.md#首轮收音与结果提交)。
+
 ## 工作原理
 
 ```text
 "小爱同学" 唤醒
-  → 小米原生 ASR/NLP 先处理
+  → boot1 已启用且就绪时由本机 VAD 控制首轮收音结束
+  → 小米原生 ASR/NLP 处理；boot1 客户端只读取非空 final
   → native_first_client.sh 按系统读取结果（boot1 配合 C 快速拦截器）
        → boot0：按 domain/action 与文本辅助路由，成功时按需 replay
        → boot1：按提问触发词或失败 Speak 文案路由，guard 快速拦截失败提示
@@ -111,12 +120,13 @@
 
 ```text
 server/                 可选 FastAPI 服务：LLM/TTS 辅助链路、旧 PCM 路线独立 Whisper ASR
-device/                 主客户端、boot1 native_asr/、失败提示 guard、设备 TTS、旧 PCM/probe 组件
+device/                 主客户端、native_asr/、native_endpoint/、失败提示 guard、设备 TTS
+  endpoint_probe/       判停共用底层实现、独立测试与实验工具（不直接用于日常启动）
 docs/
   getting-started/      从零打通、快速上手
   concepts/             native-first 架构、启动链路与分区、术语表
   runbooks/             日常运维、SSH 注入、自启动、排障
-  history/              探索历程与已验证失败的路线
+  history/              探索历程、first-turn-endpoint/ 判停证据与失败反例
   archive/              重构前文档原貌快照（查证用）
 tests/                  自动化测试 + 真实音箱人工用例
 config.yaml             LLM / ASR / TTS 配置
@@ -169,6 +179,8 @@ tests/manual_native_first_cases.md        # 真实音箱人工用例
 说明见 [TESTING.md](TESTING.md)。
 
 ## 当前边界
+
+- **首轮本地判停仅适配上述 boot1 固件**，新增约 2 秒句末等待和本机模型开销；免唤醒追问仍由原生 VAD 判停。判停未就绪时保留原生收音，不能因此认为停顿保护仍然有效。部署、关闭与回滚见[运维手册](docs/runbooks/operations.md#boot1-首轮本地判停)。
 
 - native-first 首轮 fallback 是主线；boot0 与 boot1 两套系统（2019/2023 ROM）均已适配。2026-09-06 已在 S12A 的 boot1/system1（ROM 1.76.54）实测：匹配到的小爱失败提示可被拦截并转 LLM，修正版重启后用户确认正常转接、没有先播失败提示。见 [实测记录](docs/history/2026-09-06-boot1-fallback-guard.md)。判定仍依赖文本规则，未知文案可能漏判，正常回答含相似词也可能误判；不保证所有文案、时序或固件都无漏音。
 - **音箱直连 LLM（`LLM_PIPELINE=native`）是当前主线**：LLM 由音箱 shell 直接调用。TTS 可选 `server`（Mac/迷你服务端 EdgeTTS）、`device`（音箱端 `ettsc` 直连 EdgeTTS）或原生 `mibrain` 兜底。`server` 模式（经 Mac 调 LLM）保留作开发联调 / 回退。详见 [docs/concepts/native-first.md](docs/concepts/native-first.md)。

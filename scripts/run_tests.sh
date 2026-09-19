@@ -19,6 +19,21 @@ echo "== Python unit tests =="
 echo "== Shell syntax =="
 for script in \
     device/native_first_client.sh \
+    device/endpoint_probe/run.sh \
+    device/endpoint_probe/run_protocol.sh \
+    device/endpoint_probe/build_shadow.sh \
+    device/endpoint_probe/run_active.sh \
+    device/endpoint_probe/build_active.sh \
+    device/endpoint_probe/build_neural_bench.sh \
+    device/endpoint_probe/run_neural_shadow.sh \
+    device/endpoint_probe/run_neural_pool.sh \
+    device/endpoint_probe/build_native_wake.sh \
+    device/endpoint_probe/run_native_wake.sh \
+    device/endpoint_probe/run_route_client.sh \
+    device/endpoint_probe/native_route_restore.sh \
+    device/endpoint_probe/native_resident_lease.sh \
+    device/endpoint_probe/run_native_wake_session.sh \
+    device/native_endpoint/manager.sh \
     device/dirac/build.sh \
     device/dirac/dirac_aplay.sh \
     device/native_asr/build.sh \

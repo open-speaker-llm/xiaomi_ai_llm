@@ -71,6 +71,30 @@ speak=...
 - boot1 通常使用 `aivs_lab_instruction`。
 - 如果长时间没有 result，先确认小米原生链路是否正常，再看 `NATIVE_RESULT_SOURCE=auto` 是否被覆盖。
 
+## 首轮提前截断或启用判停后没有回答
+
+先判断出问题的是普通唤醒首轮，还是绿灯下免唤醒追问；本地判停只覆盖前者。
+
+```sh
+sh /data/native_endpoint/manager.sh status
+sh /data/native_asr.sh status
+tail -n 80 /tmp/xiaomi_native_wake_probe/daily.log
+tail -n 60 /tmp/native_followup/events.log
+```
+
+按同一 dialog 对齐判停原因、`RecognizeResult.is_final`、`Dialog.Finish` 和客户端请求。partial 中出现触发词不应提交 LLM；云端 final 也不一定意味着正常说完，硬上限同样可能产生 final。
+
+| 现象 | 核对与处理 |
+|---|---|
+| 仍然提前回答 | 先核对开关、READY 和实际加载版本；未就绪的新轮仍可能走原生判停。约 2 秒以上停顿属于当前边界，不用短语特判掩盖 |
+| 只唤醒不说话 | 约 6 秒 `no-speech` 结束，空 final 不请求 LLM、不写历史；不应出现错误语音 |
+| 连续说超过 20 秒后无回答 | `limit` 是有意拒绝残句；重新唤醒说一个较短的完整问题，不重放残句 |
+| 正常问题也无回答 | 检查 `helper-failed`、`backlog`、`stalled`、模型状态及同轮完成记录；临时队列可追平 50 帧，超过保护仍拒绝。不要删除拒绝记录或把异常强制标成 quiet |
+| 再次唤醒后旧问题仍出现 | 核对新旧 dialog 与取消记录；停止客户端、归档证据并按安装备份恢复，不能简单清空日志后继续判通过 |
+| 静默后网络提示或重叠音 | 检查 SDK `50010005` 和播放时间线。旧候选曾因 TTS timeout 触发两条错误播放路径；这不直接证明网络断连或有两个 LLM。确认是否为含 6 秒 no-speech 修正的版本 |
+
+[最终反例与修正记录](../history/first-turn-endpoint/native-daily-20260919.md)包括静默提示、短时积压和修正版验收。组件版本不匹配时按[运维手册](operations.md#boot1-首轮本地判停)恢复；本次修正没有处理历史播放卡顿。
+
 ## 4. 原生成功却转了 LLM
 
 先确认结果源。以下 `domain` 检查适用于 boot0 的 `ubus_nlp_result`：
