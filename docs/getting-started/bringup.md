@@ -153,6 +153,8 @@ SSH 可用后，按 [quickstart.md](quickstart.md) 完成：上传 `/data` 脚�
 
 boot1 的免唤醒上下文追问已实现：按 [原生 ASR 安装说明](../../device/native_asr/README.md) 部署匹配固件的组件，再完成真实追问、静默退出及原生报时对照。boot0 保留本地录音 + 小米文件 ASR，不能复制 boot0 的音频库来替代 boot1 的实现。
 
+boot1 如需解决首轮句中停顿被截断，再安装[本地判停包](../../device/native_endpoint/README.md)，按[首轮验收用例](../../tests/manual_native_first_cases.md#ep-首轮本地判停)验证静默、超长、正常续说与新唤醒。它保留小米云 ASR，不要求新增识别服务；两套系统不可混用该固件适配。
+
 ## 8. 配置断电自启动
 
 没有自启动时，每次断电重启都要 SSH 手动启动客户端。长期方案：

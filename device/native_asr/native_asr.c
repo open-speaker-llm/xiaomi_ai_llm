@@ -28,6 +28,15 @@ static void note(const char *fmt, ...) {
     int n = snprintf(b, sizeof(b), "%u pid=%d ", now_ms(), (int)getpid());
     va_start(ap, fmt); vsnprintf(b+n, sizeof(b)-(size_t)n, fmt, ap); va_end(ap);
     int fd = open(CONTROL_DIR "/events.log", O_WRONLY|O_CREAT|O_APPEND|O_CLOEXEC|O_NOFOLLOW, 0600);
+#ifdef NATIVE_EVENT_LOG_LIMIT
+    if(fd>=0){
+        struct stat st;
+        if(flock(fd,LOCK_EX|LOCK_NB) || fstat(fd,&st) || !S_ISREG(st.st_mode) || st.st_uid!=geteuid()){
+            close(fd);return;
+        }
+        if(st.st_size>=NATIVE_EVENT_LOG_LIMIT && ftruncate(fd,0)){close(fd);return;}
+    }
+#endif
     if (fd >= 0) { (void)write(fd,b,strnlen(b,sizeof(b))); (void)write(fd,"\n",1); close(fd); }
 }
 
@@ -288,6 +297,9 @@ int event_to_json(const void *event,void *json) {
 
 static int receive_json(int ok,void *json) {
     if (!ok || role!=2 || !json_ready) return ok;
+#ifdef NATIVE_ASR_ON_INSTRUCTION
+    NATIVE_ASR_ON_INSTRUCTION(json);
+#endif
     const void *h=member(json,"header"); const char *id=string_member(h,"dialog_id");
     const char *ns=string_member(h,"namespace"), *name=string_member(h,"name");
     int result=!strcmp(ns,"SpeechRecognizer") && !strcmp(name,"RecognizeResult");

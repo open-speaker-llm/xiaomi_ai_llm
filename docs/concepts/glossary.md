@@ -9,7 +9,9 @@
 | KWS | Keyword Spotting | 唤醒词检测。早期路线用开源 KWS 检测“你好小智”，当前主线使用小米原生“小爱同学”。 |
 | ASR | Automatic Speech Recognition | 语音转文字。首轮使用小米原生识别；追问时 boot0 使用小米文件 ASR，boot1 native_live 使用原生实时云 ASR。Mac Whisper 仅为可选旧路线。 |
 | TTS | Text To Speech | 文字转语音。可由音箱端或可选 Mac 客户端调用 EdgeTTS 云服务，失败时用小爱原生 TTS；设备直连不等于离线合成。 |
-| VAD | Voice Activity Detection | 语音活动检测，用于判断什么时候开始/停止录音。 |
+| VAD | Voice Activity Detection | 语音活动检测，不判断语义完整。boot1 可选本机 Silero 控制真实唤醒首轮；免唤醒追问仍使用原生 VAD。 |
+| 判停 / endpoint | 输入结束判定 | 决定何时结束音频上行；约 2 秒句末静音与 20 秒硬上限是不同结束原因，后者的残句不能提交 LLM。 |
+| partial / final | ASR 中间候选 / 最终识别 | 客户端只提交非空 final；受本地判停控制的首轮还必须同轮正常 quiet 完成，不能把任何 final 都当作完整问题。 |
 | LLM | Large Language Model | 大语言模型，例如 DeepSeek、MiniMax、Claude、OpenAI。 |
 | NLP | Natural Language Processing | 自然语言理解。小米原生把 ASR 文本解析成 `domain`/`action`/`query` 等结构化意图，boot0 可据此路由；boot1 的失败判定使用 AIVS `Speak.text` 文本规则。 |
 | ALSA | Advanced Linux Sound Architecture | Linux 音频子系统，提供录音/播放设备接口，例如 `arecord`、`aplay`、`Capture`。 |

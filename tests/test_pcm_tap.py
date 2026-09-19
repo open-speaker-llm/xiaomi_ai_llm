@@ -44,8 +44,10 @@ class PcmTapTest(unittest.TestCase):
                     struct.pack_into('<8I', m, 0, 0x50434d31, 1, 16000, 160, 256, os.getpid(), 100, 0)
                     for i in range(100):
                         struct.pack_into('<I160h', m, 32 + i * 324, i * 2 + 2, *([-2000] * 160))
-                    p = subprocess.Popen([str(self.binary), str(out), '1', str(ring)], stderr=subprocess.PIPE)
+                    p = subprocess.Popen([str(self.binary), str(out), '1', str(ring)], stderr=subprocess.PIPE,
+                                         env={**os.environ, 'PCM_CAPTURE_TIMELINE': '1'})
                     self.assertIn(b'PCM_CAPTURE start', p.stderr.readline())
+                    self.assertIn(b'PCM_CLOCK mono=', p.stderr.readline())
                     for i in range(100, 200):
                         off = 32 + (i % 256) * 324
                         struct.pack_into('<I', m, off, i * 2 + 1)
@@ -53,8 +55,10 @@ class PcmTapTest(unittest.TestCase):
                         struct.pack_into('<I', m, off, i * 2 + 2)
                         struct.pack_into('<I', m, 24, i + 1)
                         time.sleep(.001)
-                    p.communicate(timeout=4)
+                    _, trace = p.communicate(timeout=4)
                     self.assertEqual(p.returncode, 0)
+                    self.assertIn(b'PCM_FRAME sample=0 frame=100 ', trace)
+                    self.assertIn(b'PCM_FRAME sample=14400 frame=190 ', trace)
             with wave.open(str(out)) as w:
                 self.assertEqual((w.getframerate(), w.getnchannels(), w.getsampwidth(), w.getnframes()),
                                  (16000, 1, 2, 16000))

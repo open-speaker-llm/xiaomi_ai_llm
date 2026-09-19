@@ -18,7 +18,7 @@ docs/
 1. [getting-started/bringup.md](getting-started/bringup.md) —— 完整路线图：串口 → SSH → 部署 → 验证 → 自启动
 2. 过程中按指引进入对应 runbook：[boot0-ssh](runbooks/boot0-ssh.md) → [boot1-ssh](runbooks/boot1-ssh.md) → [autostart](runbooks/autostart.md)
 3. 跑通后日常使用 [getting-started/quickstart.md](getting-started/quickstart.md) 和 [runbooks/operations.md](runbooks/operations.md)
-4. boot1 开启免唤醒追问：[原生 ASR 组件](../device/native_asr/README.md)，按固件校验后安装。
+4. boot1 先安装[原生 ASR 组件](../device/native_asr/README.md)；需要容纳首轮停顿续说时，再按[快速上手](getting-started/quickstart.md#boot1-首轮本地判停)安装本地判停包。两种收听入口分别验收。
 5. 遇到术语卡住，查 [concepts/glossary.md](concepts/glossary.md)
 
 **路径 B：我有嵌入式/语音经验，想直奔重点**
@@ -43,8 +43,9 @@ docs/
 | boot1 失败提示拦截（2026-09-06 已实测） | [修复与验证记录](history/2026-09-06-boot1-fallback-guard.md)、[部署说明](../device/aivs_guard/README.md) |
 | boot0/boot1 当前能力与差异 | [双系统能力表](concepts/native-first.md#双系统能力对照2026-09-06) |
 | boot1 免唤醒追问，不运行 Mac ASR | [构建安装](../device/native_asr/README.md)、[正式集成与提示音修复记录](history/2026-09-06-boot1-native-followup.md) |
+| 说话未完就转 LLM、停顿后尾句丢失 | [收音原理](concepts/native-first.md#首轮收音与结果提交)、[部署](../device/native_endpoint/README.md)、[排障](runbooks/troubleshooting.md#首轮提前截断或启用判停后没有回答) |
+| 首轮判停验收与设计依据 | [按阶段查证](history/first-turn-endpoint/README.md)、[最终日常验收](history/first-turn-endpoint/native-daily-20260919.md) |
 | 回看 PCM + Mac 识别旧路线 | [旧组件与回退](../device/pcm_tap/README.md) |
-
 | boot1 打通 SSH（镜像注入） | [runbooks/boot1-ssh.md](runbooks/boot1-ssh.md) |
 | 保持双系统 SSH、关闭原生 OTA、手动升级 | [runbooks/owner-maintenance.md](runbooks/owner-maintenance.md) |
 | 查看 2026-09-05 SSH 恢复与双系统验证结果 | [history/2026-09-05-ssh-ota-recovery.md](history/2026-09-05-ssh-ota-recovery.md) |

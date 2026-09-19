@@ -13,6 +13,9 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef PCM_ENDPOINT_SHADOW
+#include "../endpoint_probe/shadow_vad.h"
+#endif
 static volatile sig_atomic_t active=1;
 static void stop(int sig){(void)sig;active=0;}
 static double now(void){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return t.tv_sec+t.tv_nsec/1e9;}
@@ -27,6 +30,8 @@ static int write_wav(const char *path,int16_t *buf,uint32_t n){
     int err=fwrite(buf,2,n,f)!=n;err|=fclose(f)!=0;return err;
 }
 int main(int argc,char**argv){
+    const char *trace_env=getenv("PCM_CAPTURE_TIMELINE");
+    int timeline=trace_env && !strcmp(trace_env,"1");
     int check=argc>=2 && !strcmp(argv[1],"--check");
     double seconds=0.1;
     const char *path=PCM_RING_PATH;
@@ -49,9 +54,15 @@ int main(int argc,char**argv){
     uint32_t producer=r->producer_pid,read_frame=__atomic_load_n(&r->published,__ATOMIC_ACQUIRE);
     uint32_t target=(uint32_t)(seconds*100)*PCM_SAMPLES,used=0;
     int16_t *samples=calloc(target,sizeof(int16_t));if(!samples){munmap(r,sizeof(*r));return 1;}
+#ifdef PCM_ENDPOINT_SHADOW
+    struct shadow_vad shadow;
+    if(shadow_init(&shadow)){free(samples);munmap(r,sizeof(*r));return 1;}
+#endif
     signal(SIGTERM,stop);signal(SIGINT,stop);
     double start=now(),last=start;int failure=0;
     fprintf(stderr,"PCM_CAPTURE start producer=%u seconds=%.2f\n",producer,seconds);
+    if(timeline){struct timespec wall;clock_gettime(CLOCK_REALTIME,&wall);
+        fprintf(stderr,"PCM_CLOCK mono=%.6f wall=%lld.%09ld next_frame=%u\n",start,(long long)wall.tv_sec,wall.tv_nsec,read_frame);}
     while(active && used<target && now()-start<seconds+3){
         if(access("/tmp/mipns/mute",F_OK)==0){failure=1;break;}
         uint32_t next=__atomic_load_n(&r->published,__ATOMIC_ACQUIRE);
@@ -63,10 +74,20 @@ int main(int argc,char**argv){
         memcpy(samples+used,b->samples,sizeof(b->samples));
         __atomic_thread_fence(__ATOMIC_SEQ_CST);
         if(__atomic_load_n(&b->sequence,__ATOMIC_ACQUIRE)!=expected){failure=1;break;}
-        read_frame++;used+=PCM_SAMPLES;last=now();
+        double observed=now();
+#ifdef PCM_ENDPOINT_SHADOW
+        if(shadow_feed(&shadow,samples+used,observed)){failure=1;break;}
+#endif
+        if(timeline && (used==0 || ((used/PCM_SAMPLES)%10)==0 || observed-last>0.05))
+            fprintf(stderr,"PCM_FRAME sample=%u frame=%u observed_mono=%.6f gap_ms=%.3f queued=%u\n",
+                    used,read_frame,observed,(observed-last)*1000,next-read_frame);
+        read_frame++;used+=PCM_SAMPLES;last=observed;
     }
     if(!active || used!=target)failure=1;
     if(!failure && !check)failure=write_wav(argv[1],samples,used);
+#ifdef PCM_ENDPOINT_SHADOW
+    shadow_finish(&shadow,failure);
+#endif
     fprintf(stderr,"PCM_CAPTURE done samples=%u seconds=%.2f status=%s\n",used,now()-start,failure?"error":"ok");
     free(samples);munmap(r,sizeof(*r));return failure;
 }
