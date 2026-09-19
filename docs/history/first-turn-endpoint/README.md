@@ -1,6 +1,6 @@
 # 首轮截断与本地判停：研究和验收索引
 
-这些记录保留每个阶段当时的结论、失败样本及修正依据；其中“尚未接入”“已恢复旧版”不代表最终状态。**2026-09-20 最终日常包已启用并通过现场 C2 验收**，随后整机重启、自启动与重启后静默/停顿续说均通过；全天运行仍待验证。当前用法见[快速上手](../../getting-started/quickstart.md#boot1-首轮本地判停)、[原理](../../concepts/native-first.md#首轮收音与结果提交)、[运维](../../runbooks/operations.md#boot1-首轮本地判停)；源代码和构建入口仍在 `device/endpoint_probe/` 与 `device/native_endpoint/`。
+这些记录保留每个阶段当时的结论、失败样本及修正依据；其中“尚未接入”“已恢复旧版”不代表最终状态。**2026-09-20 最终日常包已启用并通过现场 C2 验收**，随后整机重启、自启动与重启后静默/停顿续说均通过；用户断电冷启动后的首问/追问也已核验通过，全天运行仍待验证。当前用法见[快速上手](../../getting-started/quickstart.md#boot1-首轮本地判停)、[原理](../../concepts/native-first.md#首轮收音与结果提交)、[运维](../../runbooks/operations.md#boot1-首轮本地判停)；源代码和构建入口仍在 `device/endpoint_probe/` 与 `device/native_endpoint/`。
 
 | 阶段 | 关键证据与结论 |
 |---|---|

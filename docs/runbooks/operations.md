@@ -185,7 +185,7 @@ tail -n 40 /tmp/native_followup/events.log
 | 重新启用已完整安装的同版包 | 空闲时停止客户端，设开关为 `1`，再运行 init.sh 并检查 READY |
 | 完整回滚 | 空闲时执行本次安装输出的 `/data/endpoint-backup-时间/restore.sh`；它恢复原客户端、配置及 SO，并归档旧指令日志后重启，避免旧问题重放 |
 
-不要直接删除 `/tmp/xiaomi_native_wake_probe/routes*`，其中的拒绝记录阻止超时、取消和故障的旧结果进入 LLM。不要用 `killall` 或仅替换 `native_asr.so` 代替停止和恢复流程。当前版本已完成一次整机重启、自启动及重启后现场验收，全天稳定性仍待验证，见[自启动验证范围](autostart.md#首轮判停的启动与验证范围)。
+不要直接删除 `/tmp/xiaomi_native_wake_probe/routes*`，其中的拒绝记录阻止超时、取消和故障的旧结果进入 LLM。不要用 `killall` 或仅替换 `native_asr.so` 代替停止和恢复流程。当前版本已完成整机 reboot 及现场验收，并核验用户断电冷启动后的自动恢复和首问/追问，全天稳定性仍待验证，见[自启动验证范围](autostart.md#首轮判停的启动与验证范围)。
 
 ## 4. 配置文件
 
