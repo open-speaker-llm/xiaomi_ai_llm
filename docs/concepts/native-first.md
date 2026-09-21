@@ -19,22 +19,43 @@ LLM 只接管小米原生不擅长的开放问答。
 
 ## 2. 主流程
 
-```text
-用户说"小爱同学"
-  → /bin/wakeup.sh 被原生链路调用
-  → native_first_client.sh 的 hook 记录 WuW/think/ready 事件
-  → boot1 本地判停包启用且就绪时，控制当前首轮的收音结束
-  → 小米原生 ASR/NLP 处理
-  → boot0：读取 domain/action 与 speak，按路由策略选择原生或 LLM
-  → boot1：读取非空 final RecognizeResult 与 Speak.text
-       → 受本地判停控制的请求必须有同轮 quiet 完成记录；异常残句拒绝转 LLM
-       → 命中直接转 LLM 的提问或失败文案：转 LLM
-       → guard 在匹配失败 Speak 后暂停播放器，shell 接手
-       → 未命中：原生链路继续处理，不据此保证原生一定答对
-  → 音箱直连 LLM 拿回答
-  → TTS 播放：优先可选 EdgeTTS 服务；不可用时走原生 mibrain TTS
-  → 音箱播放
+图中展开双系统首轮路由，并以 boot1 原生实时 ASR 展示连续追问。LLM/TTS 画出音箱直连主线；可选服务端链路见第 6、7 节。
+
+```mermaid
+flowchart TD
+    wake["真实唤醒小爱"] --> hook["wakeup.sh hook 记录事件<br/>原生收音与小米云 ASR/NLP"]
+    vad["boot1 首轮本地 VAD<br/>仅启用且就绪时接管判停"] -.->|控制首轮收音结束| hook
+    hook --> system{"当前系统"}
+
+    system -->|boot0| result0["读取 domain / action / query / speak"]
+    result0 --> route0{"结构化字段与文本辅助路由"}
+    route0 -->|原生路径| native["小爱继续执行与回答<br/>boot0 按需恢复播放器和补播"]
+    route0 -->|转 LLM| llm["音箱直连 LLM<br/>携带当前会话历史"]
+
+    system -->|boot1| final1["只读取非空 final<br/>受控轮还须匹配同轮 quiet 完成记录"]
+    final1 -->|受控轮异常、取消或超时| reject["拒绝残句及迟到结果<br/>不请求 LLM，不写历史"]
+    final1 -->|提交条件满足| direct{"命中直接转 LLM 的触发词？"}
+    direct -->|是| llm
+    direct -->|否| speak["等待原生 Speak.text"]
+    speak --> match{"命中失败文案？"}
+    match -->|否| native
+    match -->|是| guard["拦截匹配的失败提示<br/>客户端接手转 LLM"]
+    guard --> llm
+
+    llm --> tts["按 TTS_ENGINE 合成并播放<br/>端侧或服务端 EdgeTTS；失败可用原生 TTS"]
+    tts -->|完整播放后| enabled{"已启用 boot1 原生追问？"}
+    enabled -->|否| idle["退出会话，回到 IDLE"]
+    enabled -->|是| listen["创建 ASR-only 追问会话<br/>原生 VAD 判停，小米云识别<br/>关闭该会话的原生 NLP/TTS"]
+    listen -->|本轮有效 final，沿用同一 LLM session| llm
+    listen -->|静默、超时或失败| idle
+    listen -->|再次真实唤醒| handoff["取消旧追问并拒收旧结果<br/>交还小爱原生会话"]
+    handoff --> wake
 ```
+
+- 本地判停未启用或未就绪时，新唤醒保留原生收音；已受控但异常结束的轮次不能通过迟到的 final 补交残句。首轮等待和拒绝条件详见下节。
+- 图中的 boot0/boot1 是客户端读取与路由的差异；原生家电动作仍由小米执行链路完成。未命中失败文案不代表原生一定答对。
+- 追问回路以已安装的 boot1 `native_live` 为例；boot0 使用录音与文件 ASR，详见第 8 节。再次唤醒的交接发生在续听期间，不表示已经实现停止 LLM 播放的语音打断。
+- 图中省略 LLM 请求失败、播放失败和有限短句补全等分支；异常退出不会因此被当作一次完整对话。
 
 hook 的实现方式是把 `/bin/wakeup.sh` 用 bind mount 替换为自己的脚本（`mounted /bin/wakeup.sh -> /tmp/wakeup.sh.native_first_client`），原生链路每次唤醒都会调用它，脚本借此拿到事件流，且不修改只读 rootfs。
 

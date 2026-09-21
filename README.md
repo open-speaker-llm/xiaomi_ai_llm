@@ -30,17 +30,23 @@ boot1 / S12A ROM 1.76.54 可安装音箱本地判停：说“问问 DeepSeek，�
 
 ## 工作原理
 
-```text
-"小爱同学" 唤醒
-  → boot1 已启用且就绪时由本机 VAD 控制首轮收音结束
-  → 小米原生 ASR/NLP 处理；boot1 客户端只读取非空 final
-  → native_first_client.sh 按系统读取结果（boot1 配合 C 快速拦截器）
-       → boot0：按 domain/action 与文本辅助路由，成功时按需 replay
-       → boot1：按提问触发词或失败 Speak 文案路由，guard 快速拦截失败提示
-       → 原生能力继续由小爱处理；需转 LLM 时音箱自己直连拿回答（主线）
-  → 交给 TTS_ENGINE：server 微服务 / device 端侧 ettsc / 原生 mibrain 兜底
-  → 音箱播放
+```mermaid
+flowchart TD
+    wake["用户唤醒小爱"] --> speech["原生收音与小米云识别"]
+    vad["boot1 可选本地 VAD<br/>启用且就绪时控制首轮收音结束"] -.-> speech
+    speech --> route{"音箱端路由"}
+    route -->|保留原生处理| native["小爱执行与回答<br/>家电、天气、音量等"]
+    route -->|命中转接规则| llm["音箱直连 LLM"]
+    llm --> tts["语音合成与播放<br/>EdgeTTS / 原生 TTS 兜底"]
+    tts --> followup{"已开启连续追问？"}
+    followup -->|是| listen["免唤醒收听与语音识别"]
+    followup -->|否| idle["结束会话，等待下次唤醒"]
+    listen -->|有效追问，沿用同一上下文| llm
+    listen -->|静默或超时| idle
+    listen -->|再次唤醒小爱，交还原生| speech
 ```
+
+图示为音箱直连 LLM 的主线，连续追问须先安装并启用对应组件。boot0 按 `domain/action` 与文本辅助路由；boot1 按提问触发词或失败文案路由，并拦截匹配的失败提示。首轮本地 VAD 仅适用于匹配固件的 boot1，不负责文字识别，也不改变追问的判停策略。小米云识别及所选 LLM/TTS 云服务仍需联网。
 
 主线是**音箱直连 LLM**（`LLM_PIPELINE=native`）：音箱脱离开发 Mac 独立运行，TTS 由 `TTS_ENGINE` 决定。两条链路对比见 [docs/concepts/native-first.md](docs/concepts/native-first.md)。
 
