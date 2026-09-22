@@ -1,77 +1,63 @@
-# 文档导航
+<a id="文档导航"></a>
 
-本目录按"你想做什么"分四层组织：
+<a id="推荐阅读路径"></a>
 
-```text
-docs/
-  getting-started/   上手教程：按顺序跟着做，从零到第一次 LLM 响应
-  concepts/          原理：native-first 架构、启动链路与分区、术语表
-  runbooks/          操作手册：日常运维、SSH 注入、自启动、排障（按需查阅）
-  history/           探索历程：路线为什么是现在这样、哪些方向试过且失败
-  archive/           重构前文档原貌快照（只用于查证，不要从这里开始）
-```
+<a id="按任务查找"></a>
 
-## 推荐阅读路径
+# 文档导读
 
-**路径 A：我想动手（新手）**
+这个项目有两条阅读线：一条带你把音箱用起来，另一条解释它为什么这样工作。第一次阅读不必遍历所有目录；先沿着自己的问题走，遇到配置、构建或固件细节时再进入参考页。
 
-1. [getting-started/bringup.md](getting-started/bringup.md) —— 完整路线图：串口 → SSH → 部署 → 验证 → 自启动
-2. 过程中按指引进入对应 runbook：[boot0-ssh](runbooks/boot0-ssh.md) → [boot1-ssh](runbooks/boot1-ssh.md) → [autostart](runbooks/autostart.md)
-3. 跑通后日常使用 [getting-started/quickstart.md](getting-started/quickstart.md) 和 [runbooks/operations.md](runbooks/operations.md)
-4. boot1 先安装[原生 ASR 组件](../device/native_asr/README.md)；需要容纳首轮停顿续说时，再按[快速上手](getting-started/quickstart.md#boot1-首轮本地判停)安装本地判停包。两种收听入口分别验收。
-5. 遇到术语卡住，查 [concepts/glossary.md](concepts/glossary.md)
+## 先建立全貌
 
-**路径 B：我有嵌入式/语音经验，想直奔重点**
+从[项目首页](../README.md)看一次实际对话，再读[当前状态](status.md)，了解自己的设备和固件能用到哪一步。如果还不熟悉 ASR、TTS、VAD，这些词分别指语音识别、语音合成和语音活动检测；其余术语可以随时查[词表](concepts/glossary.md)。
 
-1. [concepts/native-first.md](concepts/native-first.md) —— 路由标准、播放控制、boot0/boot1 兼容，10 分钟看完核心设计
-2. [concepts/boot-and-partitions.md](concepts/boot-and-partitions.md) —— 双系统分区布局和它带来的所有麻烦
-3. `device/native_first_client.sh` —— 主状态机；boot1 的快速失败播报拦截另见 [guard](../device/aivs_guard/README.md)
-4. [history/journey.md](history/journey.md) 的失败路线表 —— 避免重走死路
+## 把音箱用起来
 
-**路径 C：我只想看故事**
+按下面的顺序，每完成一层再增加下一层。已经完成的步骤可以跳过。
 
-- [history/journey.md](history/journey.md) —— 从拆机接串口到 native-first 的完整探索历程：密码绕过的七次失败、failsafe 丢失事故、squashfs 注入 v1–v6、KWS 弯路、追问探索
+| 顺序 | 要回答的问题 | 阅读入口 | 完成标志 |
+|---|---|---|---|
+| 1 | 我的音箱是否适用，需要准备什么？ | [设备与准备](reference/hardware.md) | 确认型号、固件、串口与恢复条件 |
+| 2 | 如何取得可靠的维护入口？ | [从零接入](getting-started/bringup.md) | 可以 SSH，具备备份和恢复路径 |
+| 3 | 怎样让它回答第一个问题？ | [跑通第一轮对话](getting-started/quickstart.md) | 原生命令和 LLM 问答分别通过 |
+| 4 | 怎样继续追问，避免首轮提前截断？ | [逐步完善对话](getting-started/conversation.md) | 分别验收追问与首轮判停 |
+| 5 | 断电之后如何自己恢复？ | [配置自启动](runbooks/autostart.md) | 整机重启后无需手动拉起 |
+| 6 | 平时怎样检查、调整和恢复？ | [日常操作](runbooks/operations.md) | 能区分客户端、ASR 和判停的状态 |
 
-## 按任务查找
+选用服务端时，再读[可选服务端](reference/server.md)；它不是音箱直连方案的前置步骤。已经安装本地判停包的设备应按[组件整包维护说明](../device/native_endpoint/README.md)操作，不重新照抄首次部署步骤。
 
-| 你要做什么 | 读这个 |
+## 理解它为什么这样工作
+
+读[一次对话的完整过程](concepts/native-first.md)：从唤醒与收音，走到路由、播放，再到追问和退出。随后读[启动链路与双系统](concepts/boot-and-partitions.md)，理解为什么同一份客户端要适配两套原生系统。
+
+如果想比较不同接入思路，读[路线与取舍](concepts/comparison.md)。如果想知道哪些方法失败过、后来又如何找到新入口，读[探索故事](history/journey.md)，再按[历史索引](history/README.md)进入对应专题。历史结论只描述当时的版本；当前行为以原理页和状态页为准。
+
+## 按问题查找
+
+| 现在遇到的问题 | 入口 |
 |---|---|
-| 从零打通一台音箱 | [getting-started/bringup.md](getting-started/bringup.md) |
-| SSH 已可用，快速联调 | [getting-started/quickstart.md](getting-started/quickstart.md) |
-| 日常启动/停止/看日志/切 boot | [runbooks/operations.md](runbooks/operations.md) |
-| boot0 打通 SSH（串口/failsafe） | [runbooks/boot0-ssh.md](runbooks/boot0-ssh.md) |
-| boot1 失败提示拦截（2026-09-06 已实测） | [修复与验证记录](history/2026-09-06-boot1-fallback-guard.md)、[部署说明](../device/aivs_guard/README.md) |
-| boot0/boot1 当前能力与差异 | [双系统能力表](concepts/native-first.md#双系统能力对照2026-09-06) |
-| boot1 免唤醒追问，不运行 Mac ASR | [构建安装](../device/native_asr/README.md)、[正式集成与提示音修复记录](history/2026-09-06-boot1-native-followup.md) |
-| 说话未完就转 LLM、停顿后尾句丢失 | [收音原理](concepts/native-first.md#首轮收音与结果提交)、[部署](../device/native_endpoint/README.md)、[排障](runbooks/troubleshooting.md#首轮提前截断或启用判停后没有回答) |
-| 首轮判停验收与设计依据 | [按阶段查证](history/first-turn-endpoint/README.md)、[最终日常验收](history/first-turn-endpoint/native-daily-20260919.md) |
-| 回看 PCM + Mac 识别旧路线 | [旧组件与回退](../device/pcm_tap/README.md) |
-| boot1 打通 SSH（镜像注入） | [runbooks/boot1-ssh.md](runbooks/boot1-ssh.md) |
-| 保持双系统 SSH、关闭原生 OTA、手动升级 | [runbooks/owner-maintenance.md](runbooks/owner-maintenance.md) |
-| 查看 2026-09-05 SSH 恢复与双系统验证结果 | [history/2026-09-05-ssh-ota-recovery.md](history/2026-09-05-ssh-ota-recovery.md) |
-| 断电重启后自动运行 | [runbooks/autostart.md](runbooks/autostart.md) |
-| 没响应/串台/音量异常/追问失败 | [runbooks/troubleshooting.md](runbooks/troubleshooting.md) |
-| 理解 native-first 怎么路由 | [concepts/native-first.md](concepts/native-first.md) |
-| 理解 boot0/boot1/system0/system1 | [concepts/boot-and-partitions.md](concepts/boot-and-partitions.md) |
-| 和 open-xiaoai/mi-gpt/xiaogpt 有什么不同 | [concepts/comparison.md](concepts/comparison.md) |
-| 查术语：KWS、VAD、ALSA、rootfs… | [concepts/glossary.md](concepts/glossary.md) |
-| 测试怎么跑 | [../TESTING.md](../TESTING.md) / [../tests/manual_native_first_cases.md](../tests/manual_native_first_cases.md) |
-| 2026-09-07 对话可靠性优化与剩余问题 | [当日优化总结](history/2026-09-07-dialog-reliability.md) |
-| 某条路线是否已经试过 | [history/README.md](history/README.md) |
+| 没响应、失败提示漏音、追问异常、音量或 TTS 问题 | [排障手册](runbooks/troubleshooting.md) |
+| 切换模型、选择 TTS、调整会话历史 | [配置参考](reference/configuration.md) |
+| 查看组件状态、停止或重启助手 | [日常操作](runbooks/operations.md) |
+| 打通 boot0 / boot1 SSH | [boot0 手册](runbooks/boot0-ssh.md) / [boot1 手册](runbooks/boot1-ssh.md) |
+| 系统切换后 SSH 失联、需要维护固件或控制 OTA | [双系统维护](runbooks/owner-maintenance.md) |
+| 构建失败提示 guard / 原生追问 / 首轮判停 / 端侧 TTS | [guard](../device/aivs_guard/README.md) / [native_asr](../device/native_asr/README.md) / [native_endpoint](../device/native_endpoint/README.md) / [ettsc](../device/ettsc/README.md) |
+| 修改代码后如何验证 | [测试方法](../TESTING.md) / [真实音箱用例](../tests/manual_native_first_cases.md) |
+| 某项能力究竟验收到了哪一步 | [当前状态与证据](status.md) |
 
 ## 文档约定
 
-所有文档使用统一的示例环境，**照抄前先替换成你自己的值**：
+文中的 IP、串口名都是示例；执行前替换成自己的值。**开发机命令**在仓库根目录执行，**音箱命令**在 SSH 登录后执行。各步骤会说明运行位置。
 
 | 项 | 示例值 | 说明 |
 |---|---|---|
-| Mac（可选服务端）IP | `192.168.8.150` | 仅选择 server LLM/TTS 或旧 Mac ASR 路线时需要常驻 |
-| 音箱 IP | `192.168.8.152` | 路由器后台可查 |
-| 服务端端口 | `8080` | `config.yaml` 可改 |
-| 串口设备 | `/dev/tty.usbserial-3120` | `ls /dev/tty.*` 查看实际名称 |
-| 仓库目录 | 命令默认在仓库根目录执行 | 文中不再写绝对路径 |
+| 音箱 IP | `192.168.8.152` | 在路由器中确认实际地址 |
+| 可选服务端 IP | `192.168.8.150` | 仅选择相应 server 路线时使用 |
+| 服务端端口 | `8080` | 启动脚本使用此端口；自定义时同步调整客户端地址 |
+| Mac 串口设备 | `/dev/tty.usbserial-3120` | 用 `ls /dev/tty.*` 查实际名称 |
 
-音箱的 dropbear 版本较老，新版 OpenSSH 需要显式允许 `ssh-rsa`。建议在 Mac 的 `~/.ssh/config` 加一段，后续所有文档中的 `ssh xiaomi` / `scp -O ... xiaomi:...` 都依赖它：
+后文使用 `ssh xiaomi`。在开发机 `~/.ssh/config` 添加以下配置，首次连接时核对音箱身份：
 
 ```text
 Host xiaomi
@@ -81,16 +67,25 @@ Host xiaomi
     PubkeyAcceptedKeyTypes +ssh-rsa
 ```
 
-不想配别名时，等价的完整命令是：
+不使用别名时，等价命令是：
 
 ```sh
 ssh -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa root@192.168.8.152
 ```
 
-需要直接通过 SSH 切到 `boot1` 时：
+SSH 与镜像写入手册保留完整命令，便于在救援环境查阅。型号、分区和校验值必须按实际设备核对。
 
-```sh
-ssh -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa root@192.168.8.152 'fw_env -s boot_part boot1 && sync && reboot'
-```
+## 文档怎样继续维护
 
-高风险操作手册（boot0-ssh / boot1-ssh）中保留完整命令形式，保证在没有任何本地配置的环境里也能照着做。
+| 内容 | 唯一主要维护位置 |
+|---|---|
+| 项目定位和阅读入口 | 根目录 `README.md` |
+| 当前能力、验收日期、剩余边界 | `docs/status.md` |
+| 第一次安装与验证顺序 | `docs/getting-started/` |
+| 机制与设计理由 | `docs/concepts/` |
+| 日常动作、故障诊断与恢复 | `docs/runbooks/` |
+| 硬件、配置和服务端接口 | `docs/reference/` |
+| 组件构建、ABI、安装基线、回滚限制 | 对应 `device/*/README.md` |
+| 某次实验的事实、反例和证据 | `docs/history/`；原始快照保留在 `docs/archive/` |
+
+新增能力时，先修改它所属的说明，再更新状态页和必要的入口链接。不要把同一段验收日志追加到首页、教程、架构和运维各处。历史记录保留当时的结论，后续变化由状态页指向新的证据；测试数量必须注明对应版本，不能跨版本累加。

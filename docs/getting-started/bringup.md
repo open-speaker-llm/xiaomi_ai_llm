@@ -1,69 +1,43 @@
-# 从零打通小爱音箱到 LLM
+<a id="从零打通小爱音箱到-llm"></a>
 
-文档类型：从零接入路线图
-适用范围：手里有一台小米 AI 音箱（MDZ-25-DA / S12A），想让它接入自己的 LLM 服务
-当前结论：先打通 boot0 SSH，再补齐 boot1 SSH，之后把客户端脚本放到 `/data`，最后配置自启动
+<a id="1-最终要实现什么"></a>
 
-> 本文是总路线图：每一步说清"做什么、为什么、怎么判断成功"，写镜像等高风险细节交给对应 runbook。示例 IP 等约定见 [../README.md](../README.md#文档约定)。
+<a id="2-完整路线图"></a>
 
-## 1. 最终要实现什么
+<a id="3-准备-mac-环境"></a>
 
-```text
-小爱同学，开灯              → 仍然走小米原生，灯能打开
-小爱同学，今天天气怎么样      → 仍然走小米原生，播报天气
-小爱同学，呼叫 DeepSeek     → 小米原生不会处理
-                            → native-first 拦截失败播报
-                            → 音箱把识别文字直接发给配置的 LLM API
-                            → 音箱合成并播放 LLM 回答
-回答结束后直接追问           → 同一 LLM 上下文（需启用对应系统的追问组件）
-```
+<a id="4-先通过串口进入音箱"></a>
 
-这不是把小爱替换掉，而是让小爱先处理它擅长的事，处理不了再转 LLM。原理见 [../concepts/native-first.md](../concepts/native-first.md)。
+<a id="5-打通-boot0-ssh"></a>
 
-## 2. 完整路线图
+<a id="6-上传音箱端文件并首次联调"></a>
 
-一台新音箱通常没有 SSH，不能 `scp` 上传脚本；只靠串口传文件又慢又不可持续。音箱还有两套系统（boot0/boot1），异常时可能自动切换——只打通一边的 SSH，切过去就失联，又得接串口。所以完整路线是：
+<a id="7-打通-boot1"></a>
 
-```text
-拆机接串口（TTL，插座免焊）
-  → boot0/failsafe 打通 SSH        ← runbooks/boot0-ssh.md
-  → 用 SSH 上传脚本到 /data
-  → 配置音箱端 LLM/TTS 并启动客户端（Mac 服务端可选）
-  → 验证 native-first 主流程
-  → 打通 boot1 SSH                 ← runbooks/boot1-ssh.md
-  → boot1 安装 guard 和原生 ASR 追问组件
-  → 验证 boot0/boot1 主流程和各自的追问路径
-  → 配置 /data/init.sh 自启动      ← runbooks/autostart.md
-```
+<a id="8-配置断电自启动"></a>
 
-为什么有两套系统、它们差在哪，见 [../concepts/boot-and-partitions.md](../concepts/boot-and-partitions.md)。
+<a id="9-下一步读什么"></a>
 
-## 3. 准备 Mac 环境
+# 从零接入：先取得可靠的维护入口
 
-本机用于 SSH、编译和部署。使用音箱直连 LLM + 设备 TTS + 原生追问时，日常运行不需要 Mac 在线；配置步骤见 [quickstart.md](quickstart.md)。下面的 Python 服务端环境仅用于选择 server 模式或旧 Mac ASR 路线时。
+第一次改造音箱，先解决的是“怎样进入设备，以及出问题后怎样回来”。拿到可靠的 SSH 入口后，再部署语音助手，最后补齐另一套系统和自启动。本文是路线图，分区写入的完整备份、校验与回退步骤留在对应操作手册。
 
-在仓库根目录：
+开始前阅读[设备与准备](../reference/hardware.md)。如果 SSH 已经可用，直接前往[跑通第一轮对话](quickstart.md)。示例 IP 和登录别名见[文档约定](../README.md#文档约定)。
 
-```sh
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-cp .env.example .env
-```
+## 1. 先看要走过的几步
 
-在 `.env` 中填入至少一个 LLM key，例如：
+| 阶段 | 为什么需要 | 何时可以继续 |
+|---|---|---|
+| 串口与恢复 | SSH 尚未建立时，需要能看到启动过程并进入恢复入口 | 能读取日志、确认系统和恢复条件 |
+| 首个系统的 SSH | 用网络可靠地备份和上传文件 | 可登录，已有可核验备份 |
+| 第一轮问答 | 先验证原生与 LLM 两条链路 | 原生命令、天气、LLM 问答分别通过 |
+| 另一套系统 | 设备可能切换启动槽位，只打通一边容易失联 | 两边均单独验证 SSH 与语音功能 |
+| 追问和首轮判停 | 在基本闭环稳定后逐项改善对话 | 每个组件安装后独立验收 |
+| 自启动 | 让部署在整机重启后仍可恢复 | 不手动启动也能完成真实对话 |
 
-```text
-DEEPSEEK_API_KEY=...
-```
+两套系统共用 `/data`，但原生服务版本不同；背景见[启动链路与双系统](../concepts/boot-and-partitions.md)。
 
-启动服务并做健康检查：
-
-```sh
-./start_server.sh
-curl http://127.0.0.1:8080/
-```
-
-## 4. 先通过串口进入音箱
+## 2. 接上串口，确认恢复条件
 
 拆开音箱后盖，主板上有现成的 **JST 串口插座，不用焊接**——用杜邦线把 USB-TTL 模块（如 CH340）的 `TXD/RXD/GND` 三根线插上去即可（注意模块 TXD 接音箱 RXD、RXD 接音箱 TXD，GND 对 GND），波特率 115200、8N1。打通 SSH 之前，这是唯一的控制通道；之后它仍是刷写出错时唯一的救援通道，整个过程请保持串口可用。
 
@@ -98,83 +72,35 @@ screen /dev/tty.usbserial-3120 115200
 
 退出 screen：`Ctrl+A → K → Y`。
 
-如果需要进入 failsafe，优先切回 boot0。进入 U-Boot（启动时按任意键中断）后：
 
-```text
-s12# setenv boot_part boot0
-s12# saveenv
-s12# reset
-```
+串口连接后先读取启动日志，确认设备、当前系统和可以使用的恢复入口。原始 boot0 固件曾提供 failsafe；如果 boot0 内核已经被替换，入口可能不存在。项目实机有过[原始 failsafe 丢失的记录](../history/journey.md#14-学费failsafe-永久丢失)，不能仅凭 `boot_part=boot0` 判断还能进入。
 
-看到 `Press the [f] key and hit [enter]` 时立即按 `f → Enter`。
+## 3. 打通第一套系统的 SSH
 
-## 5. 打通 boot0 SSH
+按 [boot0 SSH 手册](../runbooks/boot0-ssh.md)核对适用前提，完成临时入口、备份、SSH hook 和验证。若当前设备已在可用系统中提供 SSH，不为照搬路线重复刷写；按实际状态进入下一步。
 
-boot0 SSH 是后续高效开发的第一道门。完整操作手册（含原理、风险、备份、回退）：
-
-→ [../runbooks/boot0-ssh.md](../runbooks/boot0-ssh.md)
-
-打通后，建议在 Mac 的 `~/.ssh/config` 配置 `xiaomi` 别名（见 [../README.md](../README.md#文档约定)），然后验证：
+在开发机配置 `xiaomi` 别名后，验证：
 
 ```sh
 ssh xiaomi
 ```
 
-如果提示 host key 冲突：
+首次连接需核对身份。主机密钥变化时先确认设备与系统切换原因，再处理旧记录；不要把清除主机密钥当作所有连接问题的修复。
 
-```sh
-ssh-keygen -R 192.168.8.152
-```
+## 4. 先跑通一轮原生与 LLM 问答
 
-## 6. 上传音箱端文件并首次联调
+按[快速上手](quickstart.md)上传客户端、配置模型和 TTS，然后依次验证：原生家电命令、天气、带完整问题的 DeepSeek 调用。此时先不增加追问或判停，让问题能定位到一条清楚的链路。
 
-SSH 可用后，按 [quickstart.md](quickstart.md) 完成：上传 `/data` 脚本、编辑 `native_first.env`、启动客户端、看日志、跑三条验证用例。
+开发电脑在这里负责部署。仅选择 server LLM/TTS 时，才需要[额外启动服务端](../reference/server.md)。
 
-判断标准：
+## 5. 补齐另一套系统
 
-- 开灯：原生成功，不应进 LLM。
-- 天气：原生播报，不应进 LLM。
-- 呼叫 DeepSeek：应进入 LLM。
+能够登录 boot0，并不能证明 boot1 也能登录；共享 `/data` 也不意味着原生语音服务相同。按 [boot1 SSH 手册](../runbooks/boot1-ssh.md)处理匹配固件，保持至少一套可启动系统和串口恢复条件。
 
-跑完这一步，boot0 上的主流程就算打通了。
+切到 boot1 后，按快速上手的 [guard 步骤](quickstart.md#3-boot1-补齐失败提示拦截)安装快速拦截器，再重复三条首轮验证。两套系统要分别验收，不复制 boot0 的原生音频库覆盖 boot1。日后控制 OTA 和维护镜像见[双系统维护](../runbooks/owner-maintenance.md)。
 
-## 7. 打通 boot1
+## 6. 从可用走向日常使用
 
-设备异常或系统策略可能让音箱启动到另一套系统。如果只在 boot0 有 SSH：
+首轮通过后，按[逐步完善对话](conversation.md)选择原生追问和首轮本地判停。它们是两种不同的收听入口，分别安装、分别验收；本地判停安装器还要求匹配已知基线，不能把新设备视为自动满足条件。
 
-- 启动到 boot1 后 SSH 不进去，每次都要接串口切回，调试非常痛苦。
-- native-first 在 boot0/boot1 上面对的小米原生结果源不同（2019 与 2023 ROM），必须分别验证。
-
-长期方案是两边都能 SSH，共享 `/data` 里同一份客户端脚本，由脚本自动适配结果源。操作手册：
-
-→ [../runbooks/boot1-ssh.md](../runbooks/boot1-ssh.md)
-
-打通后切到 boot1，安装 [AIVS 快速拦截器](../../device/aivs_guard/README.md)，重复第 6 步三条用例与 [P3 失败提示拦截用例](../../tests/manual_native_first_cases.md#p3-boot1-失败提示漏播对照)。2026-09-06 已在 S12A 的 boot1/system1（ROM 1.76.54）实测：匹配到的小爱失败提示可被拦截并转 LLM，修正版重启后用户确认正常转接、没有先播失败提示。SSH 下切换 boot 的命令见 [../runbooks/operations.md](../runbooks/operations.md#5-boot-分区切换)。
-
-boot1 的免唤醒上下文追问已实现：按 [原生 ASR 安装说明](../../device/native_asr/README.md) 部署匹配固件的组件，再完成真实追问、静默退出及原生报时对照。boot0 保留本地录音 + 小米文件 ASR，不能复制 boot0 的音频库来替代 boot1 的实现。
-
-boot1 如需解决首轮句中停顿被截断，再安装[本地判停包](../../device/native_endpoint/README.md)，按[首轮验收用例](../../tests/manual_native_first_cases.md#ep-首轮本地判停)验证静默、超长、正常续说与新唤醒。它保留小米云 ASR，不要求新增识别服务；两套系统不可混用该固件适配。
-
-## 8. 配置断电自启动
-
-没有自启动时，每次断电重启都要 SSH 手动启动客户端。长期方案：
-
-- 在 system0/system1 的 `/etc/rc.local` 注入一行通用入口（只注入一次）。
-- 真正的启动逻辑放在可写的 `/data/init.sh`，后续只改它。
-
-部署模板：
-
-```sh
-cp /data/data_init_native_first.sh /data/init.sh
-chmod +x /data/init.sh
-sh /data/init.sh
-```
-
-rc.local 注入和验证见 → [../runbooks/autostart.md](../runbooks/autostart.md)
-
-## 9. 下一步读什么
-
-- 日常启动、停止、看日志、切 boot：[../runbooks/operations.md](../runbooks/operations.md)
-- 出问题：[../runbooks/troubleshooting.md](../runbooks/troubleshooting.md)
-- 想理解底层：[../concepts/boot-and-partitions.md](../concepts/boot-and-partitions.md)
-- 想知道这条路线是怎么摸索出来的：[../history/journey.md](../history/journey.md)
+最后配置[自启动](../runbooks/autostart.md)，通过整机重启核验，再把[日常操作](../runbooks/operations.md)作为常用入口。每一步不符合预期时，先停在这一层，按[排障手册](../runbooks/troubleshooting.md)定位。

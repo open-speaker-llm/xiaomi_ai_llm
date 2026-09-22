@@ -1,25 +1,32 @@
-# Native-first 架构说明
+<a id="native-first-架构说明"></a>
 
-文档类型：当前主线架构
-适用范围：理解为什么先走小米原生、什么时候转 LLM、boot0/boot1 如何兼容
-当前结论：boot0 按原生 domain/action 路由；boot1 只提交最终识别、按 AIVS 文本规则路由。可选本地首轮判停已于 2026-09-20 完成日常接入验收，追问仍使用原生 VAD。
+<a id="boot0结构化结果与文本辅助"></a>
 
-## 1. 目标
+<a id="boot1aivs-文本规则与快速拦截"></a>
 
-native-first 不是重写一个小爱，而是把小爱已经做得稳定的部分留下：
+<a id="boot0-的-query-占位值"></a>
 
-- 高质量唤醒："小爱同学"
-- 小米原生 ASR/NLP
-- 家电、音量、天气等原生能力
-- 原生执行链路里的设备上下文
+<a id="双系统能力对照更新至-2026-09-20"></a>
 
-LLM 只接管小米原生不擅长的开放问答。
+<a id="tts-引擎mac-微服务-vs-音箱端直连与-llm-链路正交"></a>
 
-音箱端由 shell 状态机（`device/native_first_client.sh`）负责主流程，boot1 配合 C 快速拦截器（`device/aivs_guard/`）；可选 FastAPI 服务（`server/`）提供 LLM/TTS 辅助链路。
+# 一次对话的完整过程
 
-## 2. 主流程
+理解这个项目，可以从用户的一句话开始：小爱先听见它，原生服务完成识别，客户端决定由谁回答，最后再决定是否继续收听。各组件围绕这条链路协作。本文解释机制；安装看[上手路线](../getting-started/bringup.md)，验收进度看[当前状态](../status.md)。
 
-图中展开双系统首轮路由，并以 boot1 原生实时 ASR 展示连续追问。LLM/TTS 画出音箱直连主线；可选服务端链路见第 6、7 节。
+<a id="1-目标"></a>
+
+## 1. 先保留音箱已经擅长的部分
+
+小米原生链路掌握唤醒、麦克风前端、语音识别、家电和设备上下文。native-first 复用这些能力，用 LLM 补充开放问答。音箱本机运行客户端与适配组件，联网请求模型；这不等于在音箱上运行大语言模型。
+
+主状态机在 `device/native_first_client.sh`。boot0 与 boot1 的原生用户态不同，客户端需要使用不同结果源；两套系统及共享 `/data` 的关系见[启动链路](boot-and-partitions.md)。
+
+<a id="2-主流程"></a>
+
+## 2. 把主线连起来
+
+图中展开双系统首轮路由，并以 boot1 原生实时 ASR 展示连续追问。LLM/TTS 画出音箱直连主线；可选服务端职责见[回答与播放](#回答与播放)。
 
 ```mermaid
 flowchart TD
@@ -52,213 +59,102 @@ flowchart TD
     handoff --> wake
 ```
 
-- 本地判停未启用或未就绪时，新唤醒保留原生收音；已受控但异常结束的轮次不能通过迟到的 final 补交残句。首轮等待和拒绝条件详见下节。
-- 图中的 boot0/boot1 是客户端读取与路由的差异；原生家电动作仍由小米执行链路完成。未命中失败文案不代表原生一定答对。
-- 追问回路以已安装的 boot1 `native_live` 为例；boot0 使用录音与文件 ASR，详见第 8 节。再次唤醒的交接发生在续听期间，不表示已经实现停止 LLM 播放的语音打断。
-- 图中省略 LLM 请求失败、播放失败和有限短句补全等分支；异常退出不会因此被当作一次完整对话。
+原生家居动作仍由小米执行链路完成。图中省略 LLM/播放失败与有限短句补全等分支；“未命中失败文案”不代表原生一定答对。boot0 的追问沿用录音与文件 ASR，不走图中的 boot1 ASR-only 组件。
 
-hook 的实现方式是把 `/bin/wakeup.sh` 用 bind mount 替换为自己的脚本（`mounted /bin/wakeup.sh -> /tmp/wakeup.sh.native_first_client`），原生链路每次唤醒都会调用它，脚本借此拿到事件流，且不修改只读 rootfs。
+## 3. 唤醒之后，什么时候算说完
+
+原生链路调用 `/bin/wakeup.sh` 时，客户端通过 bind mount 的 hook 记录事件。boot0 常见 `WuW`；boot1 有时只有 `think/ready`，客户端按系统适配。hook 不需要每次改写只读 rootfs。
 
 ### 首轮收音与结果提交
 
-提前截断有两个层次：客户端以前可能取到尚未定稿的 partial 并立即转 LLM，同一 dialog 后来的 final 又被去重；即使改成只读 final，小米原生判停也可能已在句中停顿时结束上行，此时 final 本身就缺少后半句。麦克风仍采到后续声音，不代表该段声音仍被送进同一次云识别。证据见[基线](../history/first-turn-endpoint/baseline-20260917.md)和[真实首轮反例](../history/first-turn-endpoint/native-first-endpoint-20260919.md)。
+提前回应可能发生在两个位置：客户端把尚未定稿的 partial 当作问题，或原生收音已经在句中停顿时结束。只改为等待 final，可以解决前者，却无法找回没有继续上传的声音。
 
-现在客户端统一只处理非空 final；boot1 另提供可选首轮本地判停：
+boot1 客户端只提交非空 final。可选 `native_endpoint` 再把收音结束交给本机 Silero VAD：模型观察原生处理后的 PCM，小米云继续识别文字。仅启用且就绪时接管真实唤醒首轮；未就绪的新唤醒保留原生收音。
 
-1. 预加载的音箱端 Silero VAD 观察原生处理后的 PCM；声音继续由小米云识别，不通过 Mac，也不新增 ASR 服务。
-2. 仅对准确关联的真实唤醒首轮改写 Wakeup/Recognize 的自然录音设置，由本机控制结束；不按“呼叫某模型”的特定短语决定要不要多听。
-3. 模型按语音活动提出结束候选。原生入口复核本轮身份、辅助进程、提议时效及音频消费进度，再沿原会话发送结束。临时积压最多容纳 500 ms，必须追平全部音频才可判停；超载拒绝该轮。
-4. 正常 quiet 完成记录与同一 dialog 的非空 final 同时具备，才允许进入原有 LLM 路由。6 秒未开口、20 秒硬上限、故障或再次唤醒取消都不能冒充正常完成；迟到的 final 也不能补交旧残句或写入历史。
-5. 新唤醒、免唤醒追问和旧请求使用独立身份；退出和进程重建保留旧拒绝记录，避免恢复后重放。
-
-| 项目 | 当前行为与代价 |
+| 判定 | 当前行为 |
 |---|---|
-| 未开口 | 从首个 PCM 帧起约 6 秒结束，静默轮不进 LLM |
-| 句末 | 检测到语音后约 2 秒静音；已实测容纳约 1.5 秒停顿和轻声补充 |
-| 整轮上限 | 唤醒后约 20 秒，达到上限拒绝残句 |
-| 资源 | 一个常驻模型；最终现场 RSS 约 27.7 MiB，早期 20 秒文件测试约单核 16–17%；并非所有负载下的上限 |
-| 能力边界 | 不判断语义完整，不保证长停顿、远距离或所有噪声下都不截断；原生命令也会承担句末等待 |
-| 不可用时 | 新唤醒保留原生收音，日志明确未就绪；当前受控异常轮拒绝提交 |
+| 首帧起约 6 秒未开口 | 无语音退出，不请求 LLM |
+| 检测到语音后约 2 秒静音 | 提出正常句末候选 |
+| 唤醒后整轮约 20 秒 | 达到上限，拒绝残句 |
+| 故障、过载或再次唤醒取消 | 拒绝旧轮，迟到结果也不能补交 |
 
-这是收音层修正。原有 `NATIVE_DIALOG_INPUT_GUARD` 是识别后针对少量明确短句的补全规则，两者独立；短句规则无法找回已经停止上传的声音。本地判停也不替代失败文案匹配或修复 TTS 播放卡顿。
+结束候选还要经过原生入口复核：同一轮身份、帮助进程存活、提议时效和音频消费进度都必须匹配。临时积压最多容纳 500 ms，必须追平全部音频才可判停；超载拒绝该轮，不跳帧冒充已经听完。
 
-使用与恢复见[运维手册](../runbooks/operations.md#boot1-首轮本地判停)，构建及版本限制见[组件说明](../../device/native_endpoint/README.md)。
+对受控首轮，**同一 dialog 的正常 quiet 完成记录与非空 final 同时具备**，才允许进入原有 LLM 路由。拒绝记录会跨恢复保留，避免旧请求在进程重建后重放。VAD 判断的是语音活动，超过约 2 秒的长停顿仍可能结束，原生命令也会承担句末等待。
 
-## 3. 路由标准
+这里与 `NATIVE_DIALOG_INPUT_GUARD` 的作用不同：后者只对“帮我查一下”等少数明确缺内容的短句提示补充，无法恢复已经停止上传的音频。构建、资源、固件与安装限制见 [native_endpoint](../../device/native_endpoint/README.md)；研究证据见[首轮判停专题](../history/first-turn-endpoint/README.md)。
 
-### boot0：结构化结果与文本辅助
-
-读取 `nlp_result_get` 中同一条最新结果的 `domain/action/query/to_speak`。现有代码先检查失败文案或 `michat/model`，再检查原生能力白名单；非白名单转 LLM。典型原生 domain 为 `smartMiot soundboxControl weather time music player alarm timer system volume`。
-
-`domain` 表示能力类别，不是通用成功/失败状态；例如 `qabot/query` 可能有正常回答，也可能有失败提示。实际路由还需结合配置与文本，不能把非白名单都解释为小米明确报错。
-
-### boot1：AIVS 文本规则与快速拦截
-
-- `RecognizeResult` 给出用户提问；命中 `DIRECT_LLM_QUERY_PATTERNS`（默认 DeepSeek 的大小写写法）时直接转 LLM。
-- 其余提问等待原生 `SpeechSynthesizer/Speak` 的 `payload.text`，命中 `UNSUPPORTED_PATTERNS` 后转 LLM。shell 与 guard 共用这份表达式。
-- 适配器在匹配后填入的 `michat/model` 是客户端内部路由标记，**不是 boot1 固件返回的失败状态**。
-- 未找到已验证可替代文本匹配的业务失败字段。`open_mic/valid_speech/valid_speak` 出现在历史追问实验中，尚无正常回答与失败提示的分类对照，且记录位于 finish 阶段。
-
-2026-09-06 已在 S12A 的 boot1/system1（ROM 1.76.54）实测：匹配到的小爱失败提示可被拦截并转 LLM，修正版重启后用户确认正常转接、没有先播失败提示。判定仍依赖文本规则，未知文案可能漏判，正常回答含相似词也可能误判；不保证所有文案、时序或固件都无漏音。详见 [实测与历史字段复核](../history/2026-09-06-boot1-fallback-guard.md)。
-
-### boot0 的 query 占位值
-
-日志里可能出现：
-
-```text
-domain=weather action=query query=token speak=杭州上城今天...
-```
-
-这里 `query=token` 是小米内部字段，不代表用户真的说了 token。真正应该播报的是 `speak`，真正应该判断的是 `domain=weather`。
-
-## 4. 播放控制
-
-为了避免原生失败播报和 LLM 串台，脚本会：
-
-- 在 `think` 阶段 freeze `mediaplayer`（boot0；boot1 见下文）。
-- 拿到原生结果后判断路由。
-- 原生成功：resume 播放器，并按需要 replay `speak`。
-- 原生失败：保持拦截，按 `LLM_PIPELINE` 选择音箱直连 LLM 或经服务端调用。
-
-LLM 请求与播报期间会设置 `/tmp/native_first_busy`，guard 在 busy 状态不执行拦截；LLM 回答文本本身不经过原生失败分类，包括降级原生 TTS 的正常流程。该保护不消除小爱原生回答的文本误判风险。
-
-控制类短播报支持"下一次唤醒取消旧播报"，避免用户已经进入下一轮对话时又听到上一轮"开啦/关啦"。对应配置：
-
-```sh
-NATIVE_REPLAY_CANCEL_ON_WAKE=1
-NATIVE_REPLAY_CANCEL_DOMAINS="smartMiot soundboxControl volume system"
-```
-
-天气这类纯语音回答不要放进取消列表，否则结果可能不播报。
-
-## 5. boot0 与 boot1 兼容
-
-同一份 `/data/native_first_client.sh` 会面对两套不同用户态（原因见 [boot-and-partitions.md](boot-and-partitions.md)）：
-
-| 系统 | rootfs | 小米 ROM | 原生结果源 |
-|---|---|---|---|
-| boot0/system0 | `/dev/mtdblock4` | 1.54.8，2019 | `mibrain nlp_result_get` → `ubus_nlp_result` |
-| boot1/system1 | `/dev/mtdblock5` | 1.76.54，2023 | `/tmp/mico_aivs_lab/instruction.log` → `aivs_lab_instruction` |
-
+<a id="3-路由标准"></a>
+<a id="5-boot0-与-boot1-兼容"></a>
 <a id="双系统能力对照2026-09-06"></a>
 
-### 双系统能力对照（更新至 2026-09-20）
+## 4. 识别之后，交给谁回答
 
-下表针对本项目 S12A 实测固件和已安装组件；通用模板仍须按安装说明启用相应能力。
-
-| 能力 | boot0 / 1.54.8 | boot1 / 1.76.54 |
+| 系统 | 客户端读取什么 | 怎样决定路由 |
 |---|---|---|
-| 原生唤醒、报时、家电等功能 | 保留原生链路 | 保留原生链路 |
-| 首轮转 LLM | domain/action 与失败文本辅助路由 | 提问触发词或失败 Speak 文案；没有已验证的通用失败状态字段 |
-| 失败提示拦截 | think 阶段预冻结播放器 | C guard 发现匹配失败 Speak 后及时暂停；仍可能误判或漏判文案 |
-| LLM 与 TTS 不依赖常驻 Mac | 可用音箱直连 LLM + 设备 TTS | 同样可用 |
-| 免唤醒追问与同一上下文 | 原有录音方案 + 小米文件 ASR，仍标为实验方案 | 原生实时 ASR-only；有声上下文追问已实测 |
-| 追问识别不依赖 Mac | 支持原生文件 ASR，Mac 回退可选 | native_live 不调用 Mac ASR，仍需小米云 |
-| 首轮停顿续说 | 未接入本地判停 | 可选 native_endpoint：约 2 秒句末静音、6 秒未开口退出、20 秒总上限 |
-| 追问收听窗口 | 由本地录音配置控制，默认 window 8 秒 | 原生 VAD 判定，空闲收听约 6 秒；20 秒是整轮保护超时 |
-| SSH、自启动、原生 OTA 拦截 | 已配置验证 | 已配置验证，原生追问组件重启后自动加载 |
-| 播放中语音打断 | 未实现 | 未实现 |
+| boot0 / system0 | `mibrain nlp_result_get` 的 `domain/action/query/to_speak` | 先判断失败文本或 `michat/model`，再看原生能力白名单，其他转 LLM |
+| boot1 / system1 | AIVS 日志的非空 final `RecognizeResult` 与 `Speak.text` | 先看直接转 LLM 的触发词，否则等待并匹配失败 Speak 文案 |
 
-核心功能基本齐备不代表两边会对每个问题作相同路由，也不代表速度、识别准确率或长期稳定性相同。本轮未切回 boot0 重新进行完整对照。boot1 续听“欸”声补丁已部署并经设备检查确认命中，最终听觉复验仍待用户确认。证据见 [正式集成记录](../history/2026-09-06-boot1-native-followup.md)。
+boot0 的 `domain` 是能力类别，不是统一的成功标志；`qabot/query` 可以对应正常回答，也可以对应失败提示。日志中 `query=token` 也可能只是内部占位值。客户端需要结合文本和规则，不能只看一个字段。
 
-boot1/system1 上 `mibrain nlp_result_get` 可能不刷新；原生 ASR/TTS 指令会写进 `mico_aivs_lab` 的 `instruction.log`，例如：
+boot1 默认直接触发词匹配 DeepSeek 的大小写写法。没有命中时，匹配 `UNSUPPORTED_PATTERNS` 才接管失败回答；尚无已验证的通用业务失败字段替代该规则。适配器填入的 `michat/model` 是内部路由标记，不是固件返回的失败状态。
 
-```text
-SpeechRecognizer/RecognizeResult
-SpeechSynthesizer/Speak
-Dialog/Finish
-```
+`NATIVE_RESULT_SOURCE=auto` 按根分区选择结果源。boot1 不照搬 boot0 的 `think` 预冻结，也跳过不兼容的 dsnoop/音频库覆盖；提前冻结或复制旧系统原生库，可能影响原生识别。应保留两套适配，不用一套系统的二进制“补齐”另一套。
 
-脚本通过检测当前 rootfs 自动选择结果源，对应配置：
+功能与验收差异统一列在[双系统能力表](../status.md#双系统能力对照)。
 
-```sh
-NATIVE_RESULT_SOURCE=auto
-NATIVE_AIVS_LAB_RESULT_SYSTEM1=1
-```
+<a id="4-播放控制"></a>
+<a id="6-服务端"></a>
+<a id="7-两种-llm-链路音箱直连主线vs-经-mac辅助"></a>
+<a id="回答与播放"></a>
 
-boot1 还有三个实测得出的行为差异，`auto` 配置都已自动处理：
+## 5. 回答和播放怎样衔接
 
-- **唤醒事件不同**：boot1 的 hook 事件可能只有 `think/ready`，没有 boot0 常见的 `WuW`。`WAKE_ON_THINK_SYSTEM1=1` 会在 boot1 上把 `think` 当作状态机触发源。
-- **think 阶段不预冻结**：boot1 上 `think` 阶段提前 freeze `mediaplayer` 可能影响原生 ASR/NLP 继续产出结果，所以保留播放器运行到失败指令出现；安装 [AIVS 快速拦截器](../../device/aivs_guard/README.md) 后，由它监听新增失败 `Speak` 并提前暂停，shell 随后接手 fallback；缺少 helper 时仍按原轮询逻辑。boot0 保留 think 预冻结。
-- **不接管音频采集**：`AUDIO_CAPTURE_SETUP=auto` 在检测到 boot1 时跳过 `dsnoop` 和 `libxaudio_engine.so` 覆盖，否则可能导致原生 `recorder` 崩溃——表现为能唤醒但开关灯、天气都不响应。
+先控制原生失败播报，才能避免它与 LLM 回答重叠。boot0 在 `think` 阶段预冻结播放器，路由后恢复或接管；boot1 的匹配固件组件可在解析入口提前拦截，`aivs_guard` 另监听日志作后备。两者都依赖同一份文本规则，未知文案或相似正常回答仍可能漏判、误判。
 
-重要原则：**不要试图把两套系统"硬填平"**。不要复制 boot0 的 `mibrain_service`、`mipns-xiaomi`、`libxaudio_engine.so` 或 `wakeup.sh` 去覆盖 boot1。当前长期方案就是在脚本里保留两套结果源适配器。
+LLM 请求与播放使用 busy 标记区分自有回答；LLM 文本不会被当成新的原生失败文案。部分控制类短播报支持下一次唤醒取消旧播报，天气等纯语音结果不应放入同一取消列表。
 
-## 6. 服务端
+接下来是两个独立选择：谁调用模型，以及 native 主线的声音从哪里来。
 
-Mac 服务端（FastAPI）做三件事：
+| 链路 | 运行方式 |
+|---|---|
+| `LLM_PIPELINE=native` | 音箱直接调用 LLM，携带本轮会话历史 |
+| `LLM_PIPELINE=server` | 音箱发文字给 FastAPI，由服务端完成 LLM 与 TTS |
+| native 下 `TTS_ENGINE=device` | 音箱 `ettsc` 调 EdgeTTS，可逐句合成 PCM 并按序播放 |
+| native 下 `TTS_ENGINE=server` | 将文字交给 TTS 服务，服务端切句并返回语音流 |
 
-1. `POST /api/v1/stream/text_chat` 接收 fallback 文本，按 `BACKEND` 选择 LLM（DeepSeek/MiniMax/Claude/OpenAI）。
-2. LLM 流式输出经 `sentence_splitter` 按中文句子边界切分，逐句送 EdgeTTS，先发 WAV 头再流式输出 PCM——首句合成完即可开播，不必等全文。
-3. `POST /api/v1/tts/stream` 纯文本→流式 WAV（不含 LLM），供音箱直连模式使用，也是可移植迷你 TTS 服务的核心。
-4. 保留 Whisper ASR 端点（`/api/v1/route/asr`、`/api/v1/stream/chat`）作为历史路线、测试和兜底。
+端侧 `ettsc` 当前使用阻塞 IO、同步 WebSocket 和 rustls 内置根证书。早期 OpenSSL 与 tokio 的实验属于历史，不是当前依赖；构建细节见 [ettsc](../../device/ettsc/README.md)。
 
-## 7. 两种 LLM 链路：音箱直连（主线）vs 经 Mac（辅助）
+端侧逐句链路可以同时播放当前句和合成下一句。单句合成失败先重试，再在排空 PCM 后按序尝试原生 TTS；补播或播放失败会结束本轮，避免把未完成的回答记成完整历史。历史播放卡顿仍有独立待办，不从这套恢复机制推断所有停顿已消失。
 
-fallback 到 LLM 时走哪条链路由 `LLM_PIPELINE` 决定。**当前主线是音箱直连 LLM（`native`），经 Mac 调 LLM（`server`）作为辅助 / 回退**：
+会话历史默认放在 `/tmp/native_first_llm_hist`，保留最近 6 轮，整机重启会清空。配置选择见[配置参考](../reference/configuration.md)，可选接口见[服务端参考](../reference/server.md)。
 
-| 模式 | 定位 | 链路 | Mac 角色 |
-|---|---|---|---|
-| `native` | **主线** | 音箱 shell 自己直连 LLM 拿回答 → 交给 TTS（见下 `TTS_ENGINE`）；失败降级原生 `mibrain` | 可选 TTS 服务；`TTS_ENGINE=device` 或原生兜底时不需要 Mac |
-| `server` | 辅助 / 回退 | 音箱把文本 POST 给 `/api/v1/stream/text_chat`，Mac 调 LLM + EdgeTTS 流式返回 | 调 LLM + TTS |
+<a id="8-连续追问状态"></a>
 
-`native` 作为主线的理由：音箱脱离开发 Mac 独立运行——唤醒、ASR、NLP 全是小米原生，LLM 由音箱直连。TTS 是可选增强：不部署 Mac 服务端时，可以用音箱端 EdgeTTS（`TTS_ENGINE=device`），失败再退回小爱原生 `mibrain` TTS；如果希望用 Mac/路由器/NAS 上的 TTS 微服务，则用 `/api/v1/tts/stream`（音色在 `config.yaml` 的 `tts.edgetts.voice` 配置）。`server` 保留用于：开发联调时方便、或音箱侧不便放 key 时的回退。
+## 6. 回答之后，怎样继续聊
 
-> 配置说明：默认 `LLM_PIPELINE=native`（主线）。native 模式必须在 `/data/native_first.env` 填 `DEEPSEEK_API_KEY`，否则无法直连 LLM。要回退到经 Mac 调 LLM，设 `LLM_PIPELINE=server`。
+boot1 播放完整结束后，已启用的原生追问组件主动创建一个 NONWAKEUP、ASR-only 会话。它使用原生麦克风前端和小米云识别，只关闭该会话的 NLP/TTS，把有效最终文本送进同一个 LLM session，再播放、再续听。
 
-### TTS 引擎：Mac 微服务 vs 音箱端直连（与 LLM 链路正交）
+首轮本地判停不接管这个入口。追问仍由原生 VAD 控制，空闲约 6 秒，20 秒是整轮保护超时。保持安静会退出；组件按请求身份隔离旧文本和迟到指令。
 
-"谁出声"是和 `LLM_PIPELINE` 独立的另一维度，由 `TTS_ENGINE` 决定。`native` LLM 链路下两种都能用：
+如果续听期间再次真实唤醒“小爱同学”，组件先取消旧追问，释放归属与 busy，再交还原生会话。交接后旧轮清理不能影响新一轮。播放中并行唤醒使用另一路原生回调与 AEC 参考，不等于已经支持暂停或停止 LLM；“退下”等结束语仍按普通追问交给模型。
 
-| `TTS_ENGINE` | 链路 | 依赖 | 失败兜底 |
-|---|---|---|---|
-| `server`（默认） | 整段发 Mac `/api/v1/tts/stream`，端点 Python 切句、EdgeTTS 流式返回 WAV → `aplay` | 需要 Mac/迷你 TTS 微服务在线 | 微服务 ping 不通 → 原生 `mibrain` |
-| `device` | 音箱端 `ettsc` 自己 wss 连微软 EdgeTTS、Sec-MS-GEC 鉴权、拿整段 MP3 → 原生 `miplayer` | **不需要任何 helper**，音箱独立完成 | ettsc 失败（如 403）→ 原生 `mibrain` |
+组件还隔离自有追问的提示音、管理会话音量与正常结束指令；详细 ABI 和状态设计见 [native_asr](../../device/native_asr/README.md)。boot0 保留录音与文件 ASR；旧 PCM + Mac 识别作为回退，不与当前 boot1 管理器同时加载。
 
-`device` 档不需要常驻 Mac 或自建 TTS 微服务；音箱仍联网调用微软 EdgeTTS。实现见 [`device/ettsc/README.md`](../../device/ettsc/README.md)，两条实测定下的硬约束：
+<a id="9-状态灯反馈"></a>
+<a id="状态反馈"></a>
 
-- **纯阻塞 IO，不用 tokio**：tokio 的 epoll 异步 reactor 在这台音箱（musl 静态 / kernel 4.9 / zig 构建）上不工作——TCP 内核层能连上但 `connect().await` 永不返回。换 `std::net::TcpStream` 阻塞 + 同步 `tungstenite` + `native-tls`（vendored OpenSSL 静态）后正常。
-- **TLS 用 OpenSSL 而非 rustls**：ClientHello 同源于 curl，稳过本地网络。
+## 7. 用户能看到什么反馈
 
-> 维护点：EdgeTTS 的 `Sec-MS-GEC-Version` 跟着 Chromium 版本走，微软抬高最低版本会 `403`（和 Mac 端 edge-tts 同性质，Mac 靠 `pip -U` 白嫖更新）。端侧把版本号/UA/Origin 做成配置（`DEVICE_TTS_GEC_VERSION` 等），过期时改 `/data/native_first.env` 一行、不必重编。
+| 阶段 | 默认灯效 |
+|---|---|
+| 唤醒、原生处理中 | 蓝灯 |
+| 转入 LLM、追问识别成功 | 绿色快闪后转绿 |
+| LLM 生成与播放 | 绿色转圈 |
+| 可以继续追问 | 绿灯常亮 |
+| 出错或无文本退出 | 橙色快闪后灭 |
+| 回到待机 | 灭灯 |
 
-关键设计点（都是实测踩坑后定的）：
+客户端通过 LED sysfs 显示这些状态；不支持时跳过，`LED_FEEDBACK_ENABLED=0` 可关闭。灯色是交互提示，不能替代组件健康检查。节奏参数见[配置模板](../../device/native_first.env.example)。
 
-- **中文切句放在端点 Python 做**，不在 busybox shell 里——shell 按字节处理 UTF-8 会把 `。！？` 切碎成乱码。音箱只管"整段发 + fifo 流式播放"。
-- **语音链路使用非思考模式**：当前 DeepSeek 模型名为 `deepseek-flash`（V4.1 Flash）。保留 `LLM_THINKING=disabled`，减少等待思考阶段结束后才输出回答的延迟；shell 只取 `content`，不播报 `reasoning_content`。实际首声延迟还受网络、回答长度和 TTS 影响。
-- **降级探测**：每次 fallback 前快速 ping TTS 微服务（`TTS_HEALTH_TIMEOUT`），在线走 EdgeTTS，离线走原生 `mibrain text_to_speech`（已验证能完整念几百字长文本）。
-- **会话历史**保存在 `LLM_HISTORY_DIR`（默认 `/tmp/native_first_llm_hist`，重启清空，可自行配置持久目录），保留最近 `LLM_HISTORY_TURNS` 轮多轮上下文。
-
-相关配置见 `device/native_first.env.example` 的"音箱端直连 LLM"段。回退随时可做：`LLM_PIPELINE=server` 即切回经 Mac 的老链路。
-
-## 8. 连续追问状态
-
-boot1 / S12A ROM 1.76.54 已实现并安装原生 ASR 连续追问：LLM 播报结束后主动创建 NONWAKEUP 会话，在 Recognize 上报中关闭 NLP/TTS，只把该 dialog 的最终识别文本送入当前 LLM session，随后继续播报和续听。无需 Mac Whisper 或外部录音识别程序，仍需小米云服务联网。
-
-- 采集继续由原生音频前端负责，不抢占 ALSA、不暂停 mipns，也不生成临时 WAV。
-- 脚本提示音在 `wakeup.sh` hook 处跳过；绕过脚本直接播放的本地“欸”等提示音，按本次续听的线程归属将 WAV 读取缓冲区置为静音。普通唤醒保留原样；静默结束后清理原生队列、恢复音量。
-- 本次追问中的原生 NLP/设备动作被隔离；普通首轮唤醒仍走小爱的原生处理。
-- 使用 `SYSTEM1_FOLLOWUP_RECORD_MODE=native_live`，需先安装匹配固件的组件。通用示例仍默认关闭。
-- 此免唤醒入口仍由原生 VAD 控制句末和静默窗口；20 秒配置是整体保护超时。首轮 `NATIVE_ENDPOINT_ENABLED` 不改变这里的判停策略。尚未实现播放中打断，不特别处理结束语。
-- boot0 保留原录音与文件 ASR 方式。此前 [PCM + Mac ASR](../../device/pcm_tap/README.md) 实现保留供回退；旧下行 reopen/文件识别失败结论不适用于新入口。
-
-详见 [原生组件安装](../../device/native_asr/README.md)、[集成验证记录](../history/2026-09-06-boot1-native-followup.md)、[入口研究](../history/2026-09-06-boot1-native-asr-research.md)。
-
-## 9. 状态灯反馈
-
-灯效用颜色区分"现在是原生小爱还是 LLM 在处理"，让用户不看屏也能判断进度。由 `native_first_client.sh` 直接写 LED sysfs（`/sys/devices/i2c-1/1-003c/led_rgb`），设备不支持时静默跳过、不影响主流程；可用 `LED_FEEDBACK_ENABLED=0` 整体关闭。
-
-| 阶段 | 灯效 | 含义 |
-|---|---|---|
-| 唤醒瞬间 | 蓝灯常亮（hook 按住 `LED_WAKE_HOLD_SECONDS`，默认 4s） | 听到"小爱同学"，已唤醒 |
-| 原生处理中 | 蓝灯常亮 | 小米原生 ASR/NLP 在判定，可能原生直接答 |
-| 转 LLM | 绿色快闪 3 下后转绿 | 原生答不了，已接管转大模型 |
-| LLM 生成/播放 | 绿色转圈 | 大模型在生成 / 逐句播放回答 |
-| 等待追问 | 绿灯常亮 | 回答播完可以继续追问；boot0 按录音配置计时，boot1 native_live 按原生 VAD 判定 |
-| 追问识别成功 | 绿色快闪 3 下后转绿 | 追问录音 ASR 出文本，转下一轮 LLM |
-| 出错/无文本 | 橙色快闪 3 下后灭 | LLM 调用失败 / 追问录音失败 / ASR 空，本轮结束 |
-| 回到待机 | 灭灯 | 对话结束，交还原生小爱 |
-
-颜色约定：蓝=原生小爱，绿=LLM（整个 LLM 链路统一绿色系），橙=出错。原生 `think` 转圈灯效在接管期间默认抑制（`SUPPRESS_NATIVE_THINK_LED=1`），避免"确认转 LLM"前出现一段语义不清的蓝色转圈。
-
-闪烁/转圈节奏由 `LED_BLINK_ON_SECONDS`、`LED_CHASE_DELAY_SECONDS`、`LED_SOLID_REFRESH_SECONDS` 等参数控制，默认值见 [device/native_first.env.example](../../device/native_first.env.example)。
+读到这里，已经能沿着一轮对话定位组件职责。接下来可看[系统如何启动它们](boot-and-partitions.md)，或进入[日常操作](../runbooks/operations.md)把这些概念对应到状态与日志。

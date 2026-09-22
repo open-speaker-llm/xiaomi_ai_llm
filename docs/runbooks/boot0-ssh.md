@@ -6,6 +6,8 @@
 
 > 高风险手册保留完整命令形式，不依赖 `ssh xiaomi` 别名，保证在干净环境也能照做。IP、串口设备名均为示例值。
 
+> **恢复前提**：本页的 failsafe 步骤依赖仍保留该入口的 boot0 内核。项目实机曾发生[覆盖内核后 failsafe 丢失](../history/journey.md#14-学费failsafe-永久丢失)，不能仅凭槽位名称推断入口可用。先确认实际启动日志和恢复条件；已有 SSH 时从[快速上手](../getting-started/quickstart.md)进入，不重复刷写。
+
 ## 1. 先理解目标
 
 打通 boot0 SSH 后，Mac 可以直接：

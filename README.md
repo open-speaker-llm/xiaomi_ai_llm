@@ -1,34 +1,28 @@
 # 小米 AI 音箱 LLM 助手
 
-> Bring your own LLM to a Xiaomi AI Speaker — keep "小爱同学" for what it's good at, route everything else to DeepSeek / MiniMax / Claude. Documentation is in Chinese.
+> Bring your own LLM to a Xiaomi AI Speaker. 保留小爱的日常能力，为老音箱接上大模型。
+
+一台 2019 年的小米 AI 音箱，还能继续做什么？这个项目从日常使用出发：开灯、调音量、问天气，继续交给熟悉的小爱；想聊一个开放问题时，让音箱连接自己的 LLM 服务，把回答念出来，并接着聊下去。
 
 [![B 站视频演示：让 2019 年的小米音箱接上现代大模型](docs/assets/bilibili-video-preview.jpg)](https://www.bilibili.com/video/BV1Vzja69ELB/)
 
-▶️ **点击图片前往 B 站观看完整视频**
+▶️ [观看完整演示](https://www.bilibili.com/video/BV1Vzja69ELB/)
 
-让一台 2019 年的小米 AI 音箱（MDZ-25-DA / S12A）接上现代大模型：
-
-- **原生能做的，继续交给小爱**：唤醒、开关灯、音量、天气、闹钟等走小米原生链路，体验不打折。
-- **原生不会答的，转给 LLM**：拦截"我还在学习中"这类失败播报，**音箱自己直连 LLM**（DeepSeek / MiniMax / Claude / OpenAI）拿回答，再合成语音播放。TTS 独立选择：可走 Mac/迷你服务端 EdgeTTS，也可走音箱端 `ettsc` 直连 EdgeTTS，失败时兜底小爱原生 `mibrain` TTS。也保留"经 Mac 调 LLM"作为辅助/回退。
-
-实际体验：
+## 用起来是什么样
 
 ```text
-小爱同学，开灯              → 灯开了（原生，毫秒级）
-小爱同学，今天天气怎么样      → 原生播报天气
-小爱同学，呼叫 DeepSeek     → 原生不支持，转 LLM："我在，有什么可以帮你？"
-小爱同学，给我讲讲量子纠缠    → LLM 流式回答，逐句合成播放
+小爱同学，开灯                         → 小米原生执行
+小爱同学，今天天气怎么样               → 小米原生回答
+小爱同学，问问 DeepSeek，介绍一下西湖   → 大模型回答并播报
+回答结束、绿灯续听时：那什么时候去呢？ → 沿用同一上下文继续聊
+保持安静                               → 结束追问，回到待机
 ```
 
-## 首轮停顿续说
-
-boot1 / S12A ROM 1.76.54 可安装音箱本地判停：说“问问 DeepSeek，为什么月亮白天也能看见”，停约 1.5 秒再补“请用一句话回答”，会保留后半句，再按原有规则交给小爱或 LLM。识别仍走小米云，无需 Mac 识别或新增服务。
-
-当前策略是约 6 秒未开口退出、说话后约 2 秒静音判句末、整轮最多 20 秒。只提交最终识别；受控首轮还必须正常结束，超时、取消或故障的残句不进入 LLM 和历史。它不判断语义是否完整，超过约 2 秒的长停顿仍可能结束。
-
-已在实机启用并完成现场验收；通用模板默认关闭，须先部署匹配固件的组件。2026-09-20 已通过整机重启后的静默/停顿续说复验，以及用户断电冷启动后的自动恢复、首问和上下文追问核验；全天稳定性尚未验证。入口见[快速上手](docs/getting-started/quickstart.md#boot1-首轮本地判停)和[原理说明](docs/concepts/native-first.md#首轮收音与结果提交)。
+连续追问需要安装并启用对应组件。boot1 还可以增加首轮停顿续说：说到一半停约 1.5 秒，再轻声补充，音箱会继续收听；它按语音活动判停，不判断句意是否完整。
 
 ## 工作原理
+
+项目采用 **native-first（原生优先）**：复用小米的唤醒、识别和设备控制，音箱上的客户端按规则选择原生处理或转入 LLM。LLM 回答通过语音合成播放，播放完成后再进入追问窗口。
 
 ```mermaid
 flowchart TD
@@ -46,48 +40,48 @@ flowchart TD
     listen -->|再次唤醒小爱，交还原生| speech
 ```
 
-图示为音箱直连 LLM 的主线，连续追问须先安装并启用对应组件。boot0 按 `domain/action` 与文本辅助路由；boot1 按提问触发词或失败文案路由，并拦截匹配的失败提示。首轮本地 VAD 仅适用于匹配固件的 boot1，不负责文字识别，也不改变追问的判停策略。小米云识别及所选 LLM/TTS 云服务仍需联网。
+主线是**音箱直连 LLM**。搭配设备端 EdgeTTS 和原生追问，可以不运行常驻 Mac；开发电脑只用于构建、部署和维护。小米云识别、所选 LLM 与 TTS 云服务仍需要网络，模型并非都在音箱本地运行。可选服务端用于 TTS、联调或回退。
 
-主线是**音箱直连 LLM**（`LLM_PIPELINE=native`）：音箱脱离开发 Mac 独立运行，TTS 由 `TTS_ENGINE` 决定。两条链路对比见 [docs/concepts/native-first.md](docs/concepts/native-first.md)。
+想继续了解分支如何判断、首轮和追问有什么区别，读[一次对话的完整过程](docs/concepts/native-first.md)。
 
-| TTS 路线 | 配置 | 适合场景 |
-|---|---|---|
-| Mac/迷你 TTS 服务端 EdgeTTS | `TTS_ENGINE=server` | 想要服务端切句流式、方便在 Mac 上更新 EdgeTTS 音色 |
-| 音箱端直连 EdgeTTS | `TTS_ENGINE=device` | 不想部署 Mac 服务端，但仍想用 EdgeTTS 音色；需先构建并部署 `/data/ettsc` |
-| 小爱原生 TTS 兜底 | `TTS_FALLBACK_NATIVE=1` | EdgeTTS 服务不可用或端侧失败时保证 LLM 回答不哑 |
+<a id="硬件与风险声明"></a>
+<a id="首轮停顿续说"></a>
+<a id="当前边界"></a>
 
-另保留**经 Mac 调 LLM**（`LLM_PIPELINE=server`）作开发联调 / 回退。
+## 开始之前，先确认适用范围
 
-这条 **native-first（原生优先）** 路线的核心判断：不要替换小爱，而是复用它最稳的部分——高质量唤醒、原生 ASR 和家电控制——只接管它不擅长的开放问答。boot0 主要按原生 `domain/action` 路由；boot1 读取 AIVS 的提问与 `Speak.text`，按直接触发词或失败文案转 LLM，快速拦截器负责及时暂停失败播报。详见 [docs/concepts/native-first.md](docs/concepts/native-first.md)。
+目前实测设备是 **MDZ-25-DA / S12A**。安装需要拆机接串口、建立 SSH，并可能修改系统分区；已有主板插座可免焊接，但写入错误仍可能导致无法启动。先阅读[设备与准备](docs/reference/hardware.md)，确认备份和恢复条件，再进入安装步骤。
 
-## 硬件与风险声明
+核心问答、boot1 上下文追问、首轮本地判停已有实机记录，整机重启和断电冷启动恢复也已核验。全天稳定性、更多噪声与距离条件仍待验证；尚未实现停止 LLM 的播放中语音打断。完整的双系统能力、验收证据和剩余边界统一维护在[当前状态](docs/status.md)。
 
-**适用设备**：小米 AI 音箱（本项目实测机型，其他型号思路可参考但命令不能照搬）。实测硬件参数：
+## 从哪里开始读
 
-| 项 | 值 |
+| 你现在的位置 | 下一步 |
 |---|---|
-| 产品型号 | MDZ-25-DA |
-| 系统 hostname / 内部代号 | S12A |
-| PCB 丝印 | `DKSND-S12C-ECHO-AB-20180820` |
-| 主控 SoC | Amlogic A113X（四核 Cortex-A53） |
-| 内核 | Linux 4.9.61 (aarch64) |
-| WiFi / 蓝牙 | Marvell 88W8977-NMV2，双频 Wi-Fi 4 (802.11 a/b/g/n) + Bluetooth 5.2（含 BLE） |
-| 存储 | 江波龙（Longsys）FORESEE 品牌 SPI NAND，1Gb（128MB），存 OS / 固件 / 启动代码（分区布局见 [docs/concepts/boot-and-partitions.md](docs/concepts/boot-and-partitions.md)） |
-| 音频 ADC | ES7243 |
-| 麦克风采集 | PDM，设备 `/dev/snd/pcmC0D2c`（被 `mipns` 独占） |
-| 调试串口 | 主板 JST 插座，115200 8N1 |
+| 想先理解整个项目 | [文档导读](docs/README.md)：按问题逐层展开 |
+| 手里有音箱，还没有 SSH | [从零接入](docs/getting-started/bringup.md)：先取得可靠的维护入口 |
+| SSH 已可用，准备第一次部署 | [跑通第一轮对话](docs/getting-started/quickstart.md) |
+| 首轮已可用，想增加追问与停顿续说 | [逐步完善对话](docs/getting-started/conversation.md) |
+| 已部署，想维护或排障 | [日常操作](docs/runbooks/operations.md) / [排障](docs/runbooks/troubleshooting.md) |
+| 想了解探索过程 | [从串口到原生优先的故事](docs/history/journey.md) |
 
-![小米 AI 音箱 S12A 主板上的 JST 串口插座位置](docs/assets/s12a-mainboard-uart-jst.jpg)
+<a id="快速启动已完成部署时"></a>
+<a id="服务端能力"></a>
+<a id="与同类项目对比"></a>
+<a id="测试"></a>
 
-上图是拆开后的 S12A 主板参考，左下角白色 JST 插座为调试串口位置；不同批次的丝印和插座朝向可能略有差异，接线前先确认 `TX/RX/GND`。
+## 仓库结构
 
-> 型号标识有不一致：PCB 丝印是 `S12C-ECHO`、系统 hostname 是 `S12A`、产品型号是 `MDZ-25-DA`。这里如实并列，以实测为准。
+| 目录或文件 | 负责什么 |
+|---|---|
+| `device/` | 音箱主客户端、原生 ASR、判停、TTS 和播放适配 |
+| `server/` | 可选 FastAPI 服务，入口和接口见[服务端参考](docs/reference/server.md) |
+| `tools/speaker-maintenance/` | 固件补丁、组件安装和维护检查 |
+| `docs/` | 阅读路径、原理、操作、参考与历史证据 |
+| `tests/`、`TESTING.md` | 自动化回归与[实机验收方法](TESTING.md) |
+| `device/native_first.env.example`、`config.yaml` | 设备和服务端的[配置入口](docs/reference/configuration.md) |
 
-**风险声明**：
-
-- **需要拆机接串口，但不用焊接**——主板上有现成的 JST 串口插座,用杜邦线把 USB‑TTL 模块（如 CH340）的 `TXD/RXD/GND` 插上去即可。串口是打通 SSH 之前唯一的控制通道，也是刷写出错后唯一的救援通道。
-- 过程涉及 **读写 NAND 系统分区**，操作失误可能导致设备无法启动（变砖）。本仓库操作手册都附带了备份和回退步骤，但请确保理解每条命令再执行，风险自担。
-- 改造不影响小爱原有功能，但显然会失去保修。
+选择接入路线时，可继续阅读[本项目的取舍](docs/concepts/comparison.md)。
 
 ## 开源与法律免责声明
 
@@ -108,110 +102,6 @@ flowchart TD
 本仓库**自有代码**以 [MIT 许可证](LICENSE) 开源——可自由使用、修改、商用、再分发，只需保留版权与许可声明。
 
 边界说明：MIT 仅覆盖本仓库自己编写的代码；引用的第三方项目、Rust/Python 依赖各自适用其原有许可证；上文免责声明中关于「不分发小米原厂文件/隐私数据、不用于未授权设备」的约定仍然有效。
-
-## 从哪里开始读
-
-| 你是谁 | 从这里开始 |
-|---|---|
-| 手里有音箱，想从零打通 | [docs/getting-started/bringup.md](docs/getting-started/bringup.md) —— 串口 → SSH → 部署 → 第一次 LLM 响应的完整路线图 |
-| SSH 已可用，想快速跑起来 | [docs/getting-started/quickstart.md](docs/getting-started/quickstart.md) |
-| 想先理解原理再动手 | [docs/concepts/native-first.md](docs/concepts/native-first.md) + [docs/concepts/boot-and-partitions.md](docs/concepts/boot-and-partitions.md) |
-| SSH 突然失联 / 控制自动升级 | [双系统 SSH 与受控升级](docs/runbooks/owner-maintenance.md) / [2026-09-05 恢复实测](docs/history/2026-09-05-ssh-ota-recovery.md) |
-| 日常操作 / 出了问题 | [docs/runbooks/operations.md](docs/runbooks/operations.md) / [docs/runbooks/troubleshooting.md](docs/runbooks/troubleshooting.md) |
-| 想看这一切是怎么一步步摸索出来的 | [docs/history/journey.md](docs/history/journey.md) —— 从接串口到 native-first 的完整探索历程 |
-
-完整文档地图和阅读路径见 [docs/README.md](docs/README.md)。
-
-## 仓库结构
-
-```text
-server/                 可选 FastAPI 服务：LLM/TTS 辅助链路、旧 PCM 路线独立 Whisper ASR
-device/                 主客户端、native_asr/、native_endpoint/、失败提示 guard、设备 TTS
-  endpoint_probe/       判停共用底层实现、独立测试与实验工具（不直接用于日常启动）
-docs/
-  getting-started/      从零打通、快速上手
-  concepts/             native-first 架构、启动链路与分区、术语表
-  runbooks/             日常运维、SSH 注入、自启动、排障
-  history/              探索历程、first-turn-endpoint/ 判停证据与失败反例
-  archive/              重构前文档原貌快照（查证用）
-tests/                  自动化测试 + 真实音箱人工用例
-config.yaml             LLM / ASR / TTS 配置
-start_server.sh         Mac 服务端启动入口
-```
-
-## 快速启动（已完成部署时）
-
-可选：Mac/迷你 TTS 服务端（`TTS_ENGINE=server` 时使用，仓库根目录）：
-
-```sh
-./start_server.sh
-```
-
-这一步是可选的：也可以用 `TTS_ENGINE=device` 让音箱端 `ettsc` 直连 EdgeTTS；两种 EdgeTTS 失败时都可用 `TTS_FALLBACK_NATIVE=1` 退回小爱原生 TTS。
-
-音箱端（SSH 登录后）：
-
-```sh
-SERVER=http://192.168.8.150:8080 BACKEND=deepseek \
-sh /data/native_first_client.sh > /tmp/native_first_client.log 2>&1 &
-tail -f /tmp/native_first_client.log /tmp/native_first_events.log
-```
-
-> 文档中的 IP（Mac `192.168.8.150`、音箱 `192.168.8.152`）均为示例，替换成你自己的。约定见 [docs/README.md](docs/README.md#文档约定)。
-
-完整步骤见 [docs/getting-started/quickstart.md](docs/getting-started/quickstart.md)。
-
-## 服务端能力
-
-- **TTS 服务（`TTS_ENGINE=server` 用）**：纯文本 → 流式 WAV，按中文句子边界切分逐句 EdgeTTS 合成（默认音色 `zh-CN-YunjianNeural`），首句即可开播。未部署或不可达时，音箱可自动走端侧/原生兜底。
-- **LLM + TTS 一体（server 辅助模式用）**：接收音箱 fallback 文本，调 DeepSeek / MiniMax / OpenAI / Claude（`config.yaml` 配置，`.env` 放 key）后流式合成。
-- 保留 Whisper ASR 接口，作为历史路线、测试和兜底能力。
-
-| 端点 | 用途 |
-|---|---|
-| `GET /` | 健康检查 |
-| `POST /api/v1/tts/stream` | **native 主线 TTS**：纯文本→流式 WAV（不含 LLM），供音箱直连 / 可移植迷你 TTS 服务 |
-| `POST /api/v1/stream/text_chat` | server 辅助链路：文本进 LLM，流式返回 TTS 音频 |
-| `POST /api/v1/route/asr` | 录音 ASR + 路由（测试/兜底） |
-| `POST /api/v1/stream/chat` | 录音上传 → ASR → LLM → TTS 一体化（历史接口） |
-
-## 测试
-
-```sh
-./scripts/run_tests.sh                    # 自动化：服务端逻辑 + shell 语法 + 配置一致性
-tests/manual_native_first_cases.md        # 真实音箱人工用例
-```
-
-说明见 [TESTING.md](TESTING.md)。
-
-## 当前边界
-
-- **首轮本地判停仅适配上述 boot1 固件**，新增约 2 秒句末等待和本机模型开销；免唤醒追问仍由原生 VAD 判停。判停未就绪时保留原生收音，不能因此认为停顿保护仍然有效。部署、关闭与回滚见[运维手册](docs/runbooks/operations.md#boot1-首轮本地判停)。
-
-- native-first 首轮 fallback 是主线；boot0 与 boot1 两套系统（2019/2023 ROM）均已适配。2026-09-06 已在 S12A 的 boot1/system1（ROM 1.76.54）实测：匹配到的小爱失败提示可被拦截并转 LLM，修正版重启后用户确认正常转接、没有先播失败提示。见 [实测记录](docs/history/2026-09-06-boot1-fallback-guard.md)。判定仍依赖文本规则，未知文案可能漏判，正常回答含相似词也可能误判；不保证所有文案、时序或固件都无漏音。
-- **音箱直连 LLM（`LLM_PIPELINE=native`）是当前主线**：LLM 由音箱 shell 直接调用。TTS 可选 `server`（Mac/迷你服务端 EdgeTTS）、`device`（音箱端 `ettsc` 直连 EdgeTTS）或原生 `mibrain` 兜底。`server` 模式（经 Mac 调 LLM）保留作开发联调 / 回退。详见 [docs/concepts/native-first.md](docs/concepts/native-first.md)。
-- boot1 原生 ASR 连续追问已实现并安装：LLM 播报结束后创建 ASR-only 会话，将识别文本送入同一个 LLM session，不需要 Mac 识别程序，仍需连接小米云。自动播报→续听→静默退出、重启加载及 42 项测试已通过；现场听觉验收进度见 [实测记录](docs/history/2026-09-06-boot1-native-followup.md)。[构建与安装](device/native_asr/README.md)。用户已完成西湖上下文追问实测；续听“欸”声补丁已部署并通过设备检查，听觉复验待确认。原 PCM + Mac 路线保留供回退；boot0 原录音与小米文件 ASR 保留。
-
-boot0 与 boot1 的核心使用能力已基本齐备：原生小爱、失败转 LLM、设备端 LLM/TTS、免唤醒上下文追问及开机自启动。两套系统的路由和识别路径不同，尚未做完整的同条件速度、准确率与长期稳定性对照；详见 [双系统能力表](docs/concepts/native-first.md#双系统能力对照2026-09-06)。两者都仍需联网访问小米识别服务及所选 LLM/TTS 服务。
-
-## 与同类项目对比
-
-下表中其他项目沿用 2026-06 的资料，未随本轮能力更新重新核验；它们的最新状态以各自仓库为准。
-
-小爱接入 LLM 大致有三条路线：**云账号**（[mi-gpt](https://github.com/idootop/mi-gpt) / [xiaogpt](https://github.com/yihong0618/xiaogpt)，不碰硬件、用账号当遥控器）、**刷机接管**（[open-xiaoai](https://github.com/idootop/open-xiaoai)，夺麦克风/扬声器）、**本机原生优先**（本项目，音箱本机读小米 NLP 结果、只接管它答不了的）。
-
-| 维度 | **本项目** | open-xiaoai | mi-gpt | xiaogpt |
-|---|---|---|---|---|
-| 接入原理 | 本机读取原生结果：boot0 NLP 字段；boot1 AIVS 文本 + C 拦截器 | 刷机接管麦克风/扬声器 | 云账号 API 控制 | 云账号轮询对话记录 |
-| 需要 root/刷机 | 拿 root，不全量刷机 | **全量刷机** | 不需要 | 不需要 |
-| 需要常驻电脑 | **不需要** | 需要 Server | 需要 PC/NAS | 需要 PC/Docker |
-| 需要额外配置小米云账号程序 | **不需要；仍使用设备原生小米云服务** | 不依赖 | 依赖 | 依赖 |
-| 支持设备 | 仅 MDZ-25-DA/S12A 老机 | 仅 2 款新机 | 多数机型 | 多数机型 |
-| 路由策略 | boot0 按 domain/action；boot1 按提问/失败文案 | 全量接管 | 关键词触发 | 关键词触发 |
-| 连续对话 | boot0 录音 + 小米文件 ASR；boot1 原生实时 ASR；均可免唤醒追问，未实现播放中打断 | 真打断 | ✅ | ✅ |
-| 维护状态 | 活跃 | 已停更 | 已停更 | 活跃 |
-
-本项目可在不部署常驻电脑、无需额外配置小米云账号轮询程序的情况下运行；小米云识别、原生服务及所选 LLM/TTS 云服务仍是依赖。代价是需要拆机接串口并适配固件，目前只实测一款老机。完整对比（三种哲学、独有优势、可借鉴方向）见 [docs/concepts/comparison.md](docs/concepts/comparison.md)。
 
 ## 相关项目
 

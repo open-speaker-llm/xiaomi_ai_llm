@@ -1,25 +1,32 @@
-# 快速上手
+<a id="快速上手"></a>
 
-文档类型：SSH 已可用后的快速联调
-适用范围：已打通 SSH + 已能向 `/data` 上传文件的小米音箱；TTS 可选 Mac 服务端或音箱端 `ettsc`
-当前结论：如果你还没有 SSH，先读 [bringup.md](bringup.md)
+<a id="0-前提"></a>
 
-> 示例 IP、`ssh xiaomi` 别名等约定见 [../README.md](../README.md#文档约定)。
+<a id="1-上传音箱端文件"></a>
 
-## 0. 前提
+<a id="2-选择-tts-路线"></a>
 
-- Mac 和音箱在同一网络（如果不部署 Mac TTS 服务端，只需要 Mac 能通过 SSH 上传文件）。
-- 音箱可以 SSH 登录（`~/.ssh/config` 已配置 `xiaomi` 别名）。
-- 音箱 `/data` 可写。
-- 仅在选用 Mac 服务端时需要知道其 IP，例如 `192.168.8.150`。音箱端直连模式仍需要互联网。
+<a id="boot1-失败提示快速拦截"></a>
 
-如果还没有 SSH，先走完整路线：[bringup.md](bringup.md)。
+<a id="3-启动音箱客户端"></a>
 
-## 1. 上传音箱端文件
+<a id="4-确认启动成功"></a>
 
-以下上传步骤用于初次部署。已有本地判停包的设备请走[整包维护说明](../../device/native_endpoint/README.md#安装)，不要直接覆盖客户端。
+<a id="5-三条验证用例"></a>
 
-在 Mac 仓库根目录执行：
+<a id="6-之后"></a>
+
+# 跑通第一轮对话
+
+这一页只做一件事：让已具备 SSH 的音箱保留原生功能，并完成一次 LLM 问答。先完成这条最小闭环，随后再增加追问、首轮判停和自启动。
+
+前提是型号与固件已确认、开发机能 `ssh xiaomi`、音箱 `/data` 可写且能访问所选云服务。没有 SSH 时从[零开始接入](bringup.md)。下文使用[统一地址约定](../README.md#文档约定)。
+
+**本页用于首次部署。** 已安装本地判停包的设备按[整包维护说明](../../device/native_endpoint/README.md#安装)操作，不直接覆盖客户端或共享的 `native_asr.so`。
+
+## 1. 上传客户端，建立私有配置
+
+在开发机仓库根目录上传：
 
 ```sh
 scp -O device/native_first_client.sh device/native_first.env.example \
@@ -27,14 +34,15 @@ scp -O device/native_first_client.sh device/native_first.env.example \
     xiaomi:/data/
 ```
 
-登录音箱后执行：
+登录音箱后执行。已有配置不会被下面的首次创建命令覆盖：
 
 ```sh
 [ -f /data/native_first.env ] || cp /data/native_first.env.example /data/native_first.env
 chmod +x /data/native_first_client.sh /data/vad_record.sh /data/data_init_native_first.sh
+vi /data/native_first.env
 ```
 
-编辑配置 `vi /data/native_first.env`，至少确认：
+以 DeepSeek 为例，在配置文件中确认以下项，并填写自己的密钥：
 
 ```sh
 BACKEND=deepseek
@@ -44,45 +52,20 @@ DEEPSEEK_API_KEY=sk-...
 TTS_FALLBACK_NATIVE=1
 ```
 
-`LLM_PIPELINE=native` 时，音箱自己直连 LLM。TTS 由 `TTS_ENGINE` 选择，失败时由 `TTS_FALLBACK_NATIVE=1` 退回小爱原生 `mibrain` TTS。
+同一变量只保留一条有效赋值。配置文件由客户端直接读取，不需要在命令行重复填写密钥；其他模型和高级覆盖项见[配置参考](../reference/configuration.md)。
 
-## 2. 选择 TTS 路线
+## 2. 选好回答的声音从哪里来
 
-| 路线 | 配置 | 需要做什么 |
+LLM 产生文字，TTS 把文字变成声音。音箱直连模型时，TTS 仍有两条路线，选一条部署即可。
+
+| 你的部署方式 | 设置 | 前置工作 |
 |---|---|---|
-| Mac/迷你 TTS 服务端 EdgeTTS | `TTS_ENGINE=server` | 配置 `TTS_SERVER` 并启动下面的服务端 |
-| 音箱端直连 EdgeTTS | `TTS_ENGINE=device` | 构建并部署 `/data/ettsc`，不需要 Mac 服务端 |
-| 小爱原生 TTS 兜底 | `TTS_FALLBACK_NATIVE=1` | 保持默认，EdgeTTS 失败时自动出声 |
+| 音箱独立运行 | `TTS_ENGINE=device` | 按 [ettsc 说明](../../device/ettsc/README.md)准备 Rust/Zig 工具链，构建并部署 `/data/ettsc` |
+| 有常驻电脑提供 TTS | `TTS_ENGINE=server` | 按[服务端说明](../reference/server.md)启动服务，配置 `TTS_SERVER` |
 
-如果使用 Mac/迷你 TTS 服务端：
+通用模板默认 `TTS_ENGINE=server`。若要不依赖常驻电脑，需要显式切到 `device` 并完成组件安装。`TTS_FALLBACK_NATIVE=1` 允许 EdgeTTS 失败时尝试小爱原生 TTS，兜底也需单独验证。
 
-```sh
-TTS_ENGINE=server
-SERVER=http://192.168.8.150:8080
-TTS_SERVER=http://192.168.8.150:8080
-```
-
-启动服务端：
-
-```sh
-./start_server.sh
-```
-
-健康检查：
-
-```sh
-curl http://127.0.0.1:8080/
-```
-
-后台运行时看日志：
-
-```sh
-tail -f /tmp/server.log | grep -E '📥|🎤|🌐|🔊|🤖|✅|⚠️'
-```
-
-EdgeTTS 音色在 `config.yaml` 的 `tts.edgetts.voice` 配置，默认是 `zh-CN-YunjianNeural`。
-
-如果使用音箱端直连 EdgeTTS：
+选择设备端 TTS，准备好工具链后在开发机执行：
 
 ```sh
 cd device/ettsc
@@ -90,7 +73,7 @@ cd device/ettsc
 ./deploy.sh 192.168.8.152
 ```
 
-音箱配置：
+音箱 `/data/native_first.env` 中设置：
 
 ```sh
 TTS_ENGINE=device
@@ -98,85 +81,55 @@ DEVICE_TTS_BIN=/data/ettsc
 DEVICE_TTS_VOICE=zh-CN-YunjianNeural
 ```
 
-`dist/ettsc` 是本地构建产物，不提交到仓库；如果不想使用 EdgeTTS，保持 `TTS_FALLBACK_NATIVE=1` 即可退回小爱原生 TTS。
-
-### boot1 失败提示快速拦截
-
-boot1 除客户端脚本外，还需按 [guard 构建部署说明](../../device/aivs_guard/README.md) 安装 `/data/aivs_speech_guard`，保持 `AIVS_GUARD_ENABLED=1` 与 `FREEZE_NATIVE_PLAYER_ON_FALLBACK=1`。只上传 shell 不会获得快速拦截；helper 缺失时退回原有轮询。2026-09-06 已在 S12A 的 boot1/system1（ROM 1.76.54）实测：匹配到的小爱失败提示可被拦截并转 LLM，修正版重启后用户确认正常转接、没有先播失败提示。
-
-## 3. 启动音箱客户端
-
-登录音箱：
+选择服务端 TTS，则在音箱配置中设置实际地址：
 
 ```sh
-ssh xiaomi
+TTS_ENGINE=server
+SERVER=http://192.168.8.150:8080
+TTS_SERVER=http://192.168.8.150:8080
 ```
 
-前台调试：
+## 3. boot1 补齐失败提示拦截
+
+boot0 可以继续下一步。boot1 按 [guard 构建部署说明](../../device/aivs_guard/README.md)安装 `/data/aivs_speech_guard`，保留 `AIVS_GUARD_ENABLED=1` 与 `FREEZE_NATIVE_PLAYER_ON_FALLBACK=1`。
+
+只上传 shell 不会获得快速拦截，helper 缺失时退回轮询。稍后安装原生 ASR 组件还会提供匹配固件的提前拦截路径；文本规则的误判、漏判边界仍然存在。
+
+## 4. 启动，并确认已进入待机
+
+在音箱执行。若已有客户端运行，先按[日常操作](../runbooks/operations.md#客户端)在空闲时停止，不启动第二个实例。
 
 ```sh
-SERVER=http://192.168.8.150:8080 BACKEND=deepseek sh /data/native_first_client.sh
-```
-
-后台运行：
-
-```sh
-SERVER=http://192.168.8.150:8080 BACKEND=deepseek sh /data/native_first_client.sh > /tmp/native_first_client.log 2>&1 &
-```
-
-## 4. 确认启动成功
-
-```sh
+sh /data/native_first_client.sh > /tmp/native_first_client.log 2>&1 &
 tail -f /tmp/native_first_client.log /tmp/native_first_events.log
 ```
 
-应看到类似：
+配置沿用 `/data/native_first.env`。预期日志包括：
 
 ```text
 [HOOK] mounted /bin/wakeup.sh -> /tmp/wakeup.sh.native_first_client
-[HOOK] watchdog pid=...
 [IDLE] 等待原生唤醒词：小爱同学
 ```
 
-## 5. 三条验证用例
+`IDLE` 表示客户端已经待机，接下来仍要分别验证原生处理、模型调用和出声。
 
-按顺序一条一条测，每条等播报或日志稳定后再测下一条：
+## 5. 按顺序完成三条验证
 
-| 说 | 期望 |
+每条等动作或播报完成后再说下一条。家电用例以音箱原本已经能控制该设备为前提。
+
+| 说什么 | 检查什么 |
 |---|---|
-| 小爱同学，开灯 | 走原生，不进 LLM |
-| 小爱同学，今天天气怎么样 | 走原生播报 |
-| 小爱同学，呼叫 DeepSeek | 原生不支持，转 LLM |
+| 小爱同学，开灯 | 真实家电动作完成，没有进入 LLM |
+| 小爱同学，今天天气怎么样 | 原生播报仍可用 |
+| 小爱同学，问问 DeepSeek，用一句话介绍西湖 | LLM 回答并完整播放 |
 
-boot1 还应执行 P3：用会触发失败提示的问题核对转 LLM 前无失败音，再问时间并重启复测。云端文案会变化，需记录实际文本。
+boot1 再执行 [P3 失败提示用例](../../tests/manual_native_first_cases.md#p3-boot1-失败提示漏播对照)：用实际会触发失败提示的问题验证转接，再用正常报时作对照。直接说出 DeepSeek 触发词通过，不等于失败提示拦截也已验证。
 
-更完整人工用例见 [../../tests/manual_native_first_cases.md](../../tests/manual_native_first_cases.md)。
+出现问题时，带着这一步的日志进入[排障手册](../runbooks/troubleshooting.md)。全部通过后，首轮闭环就建立了。
 
-### boot1 开启原生免唤醒追问
+<a id="boot1-开启原生免唤醒追问"></a>
+<a id="boot1-首轮本地判停"></a>
 
-先完成首轮验证并确认设备为 S12A boot1 / ROM 1.76.54。下面是尚未安装本地判停包时的基础追问部署；已有判停包不要用此安装器覆盖共享 SO。在开发机仓库根目录使用 Zig 构建，再安装：
+## 下一步：让对话自然接续
 
-```sh
-sh device/native_asr/build.sh /tmp/native-asr-build
-python3 tools/speaker-maintenance/install_boot1_native_followup.py --host 192.168.8.152 --build-dir /tmp/native-asr-build
-```
-
-安装器验证固件、备份客户端和配置、启用 `SYSTEM1_FOLLOWUP_RECORD_MODE=native_live` 并重启客户端；无需再手动启动第二个实例。首次 SSH 主机身份须已确认，`/data/native_first.env` 须已配置。失败提示 guard 与设备 `ettsc` 仍按前文分别安装。
-
-回答结束、绿灯续听时直接说下一句；同一 LLM session 保留上下文。空闲收听约 6 秒，由原生 VAD 判定，`NATIVE_ASR_LISTEN_TIMEOUT=20` 仅是整轮保护超时。保持安静后退出，再喊“小爱同学”即可使用原生功能。
-
-选择 `LLM_PIPELINE=native`、`TTS_ENGINE=device` 并部署 `ettsc` 后，LLM、TTS 和追问都不需 Mac 常驻，仍需云服务联网。通用模板默认不启用 boot1 追问；安装器校验通过后才启用。完整验证和回退见 [组件说明](../../device/native_asr/README.md) 与 [人工用例](../../tests/manual_native_first_cases.md)。
-
-### boot1 首轮本地判停
-
-此项用于“小爱同学”真实唤醒后的首轮，不替代免唤醒追问。仅适配 S12A boot1 / ROM 1.76.54，通用模板 `NATIVE_ENDPOINT_ENABLED=0`。先确认原生 ASR 组件可用，再按[判停包构建与安装](../../device/native_endpoint/README.md)部署；只上传本页第 1 步的脚本或把开关改成 1，不会自动安装模型与运行库。
-
-安装后需看到 `ENDPOINT_READY` 和 native_asr `healthy`，再做[EP 系列现场验收](../../tests/manual_native_first_cases.md#ep-首轮本地判停)。可正常使用约 1.5 秒句中停顿；说完后约等 2 秒交给云端完成识别。无语音约 6 秒退出、整轮最多 20 秒，异常和上限残句不交给 LLM。
-
-判停在音箱内运行，识别仍需小米云；不需要 Mac 常驻。日常状态与回滚见[运维](../runbooks/operations.md#boot1-首轮本地判停)。已经安装判停包的设备应整包维护，避免仅覆盖客户端或用旧追问安装器覆盖共享的 `native_asr.so`。
-
-## 6. 之后
-
-- 日常启动、停止、看日志、切 boot：[../runbooks/operations.md](../runbooks/operations.md)
-- 不符合预期：[../runbooks/troubleshooting.md](../runbooks/troubleshooting.md)
-- 断电重启自动运行：[../runbooks/autostart.md](../runbooks/autostart.md)
+继续阅读[逐步完善对话](conversation.md)，分别安装和验收免唤醒追问、首轮本地判停；只需要基本问答时，也可以直接配置[自启动](../runbooks/autostart.md)。已经部署的设备不需要反复执行本页的首次上传步骤。

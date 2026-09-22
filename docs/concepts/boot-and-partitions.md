@@ -1,348 +1,100 @@
-# 小米音箱启动链路与系统分区说明
+<a id="小米音箱启动链路与系统分区说明"></a>
 
-文档类型：原理说明  
-适用范围：理解 boot0/boot1、system0/system1、kernel、rootfs，以及为什么两套系统行为不同  
-当前结论：当前设备 boot0/boot1 kernel 内容相同，boot0/system0 与 boot1/system1 的差异主要来自 rootfs 用户态版本不同
+# 从上电到助手：启动链路与双系统
 
-本文说明这台小米 AI 音箱从上电到运行 `native_first_client.sh` 的完整链路，并解释 `boot0`、`boot1`、`system0`、`system1`、`kernel`、`initramfs`、`rootfs`、OpenWrt/LEDE 等概念。术语速查见 [glossary.md](glossary.md)。
+同一份客户端在 boot0 和 boot1 上会面对不同的小米服务，原因藏在启动链路里。先分清三个层次：**boot 负责启动内核，system 提供原生系统，data 保存两边共用的文件。**
 
-## 1. 当前设备结论
+本页描述项目实测 S12A 的布局和已有核验，不是对你手中设备的实时检查。型号见[硬件参考](../reference/hardware.md)，具体写入和恢复步骤见[双系统维护](../runbooks/owner-maintenance.md)。
 
-当前设备的分区布局：
+<a id="2-完整启动链路"></a>
 
-```text
-mtd0: bootloader
-mtd1: tpl
-mtd2: boot0
-mtd3: boot1
-mtd4: system0
-mtd5: system1
-mtd6: data
-```
+<a id="3-关键概念"></a>
 
-当前只读核验结果：
+<a id="31-bootrom"></a>
 
-```text
-boot0 sha256 = boot1 sha256
-boot0/boot1 当前内容相同
-```
+<a id="32-u-boot--bootloader"></a>
 
-当前 kernel：
+<a id="5-kernel"></a>
+
+<a id="6-initramfs"></a>
+
+<a id="10-openwrt--lede"></a>
+
+## 1. 上电之后发生什么
 
 ```text
-Linux S12A 4.9.61 #1 SMP PREEMPT Wed Sep 20 08:55:48 2023 aarch64
+上电 → 芯片 BootROM → U-Boot
+  → 根据 boot_part 选择 boot0 或 boot1
+  → 加载 kernel 与 initramfs，完成早期初始化
+  → 挂载 system0 或 system1 为根文件系统 /
+  → OpenWrt/LEDE init 启动网络、ubus、小米语音与音频服务
+  → 在 /data 可用后，由 rc.local 调用 /data/init.sh
+  → 启动 native_first_client.sh 及已启用组件
 ```
 
-当前 system 版本：
+BootROM 是芯片固有的早期代码；串口中的 `s12#` 是 U-Boot 提示符。kernel 管理硬件、进程与文件系统，initramfs 是内核切换到完整系统前的小环境。OpenWrt/LEDE 提供 init、procd 和 ubus 等基础设施，小米用户态服务在其上提供语音能力。术语可查[词表](glossary.md)。
 
-| 分区 | rootfs 设备 | 小米 ROM | Build time |
-|---|---|---:|---|
-| system0 | `/dev/mtdblock4` | `1.54.8` | `Mon, 28 Oct 2019 14:35:07 +0800` |
-| system1 | `/dev/mtdblock5` | `1.76.54` | `Wed, 20 Sep 2023 17:07:08 +0800` |
+<a id="1-当前设备结论"></a>
 
-因此当前设备上，`boot0` 与 `boot1` 的 kernel 已经相同；`boot0/system0` 与 `boot1/system1` 的主要行为差异来自 `system0` 和 `system1` 的小米用户态 rootfs 不同。
+<a id="4-boot0--boot1"></a>
 
-## 2. 完整启动链路
+<a id="7-system0--system1"></a>
 
-```text
-上电
-  ↓
-BootROM
-  ↓
-U-Boot / bootloader
-  ↓
-读取 boot_part，选择 boot0 或 boot1
-  ↓
-加载 kernel + initramfs
-  ↓
-kernel 启动
-  ↓
-initramfs / early init 初始化基础设备
-  ↓
-挂载 system0 或 system1 为 rootfs
-  ↓
-rootfs 成为 /
-  ↓
-OpenWrt/LEDE init 系统启动
-  ↓
-启动 ubus、网络、dropbear、小米语音服务、音频服务
-  ↓
-挂载共享 /data
-  ↓
-/data/init.sh 自启动 native_first_client.sh
-```
+<a id="8-rootfs"></a>
 
-## 3. 关键概念
+<a id="13-当前设备状态总结"></a>
 
-### 3.1 BootROM
+## 2. 分区各自保存什么
 
-BootROM 是芯片内部固化的第一段代码。它不在普通 NAND 分区里，主要负责找到外部存储里的 bootloader。
-
-正常开发和调试基本不会直接操作 BootROM。只有设备坏到 U-Boot 都进不去时，才会涉及 BootROM 级别救援。
-
-### 3.2 U-Boot / bootloader
-
-U-Boot 是可交互的启动管理器。串口里看到：
-
-```text
-s12#
-```
-
-就是 U-Boot 命令行。
-
-U-Boot 读取环境变量决定启动哪个 boot 分区：
-
-```sh
-printenv boot_part
-```
-
-常见值：
-
-```text
-boot_part=boot0
-boot_part=boot1
-```
-
-可以在 U-Boot 中切换：
-
-```text
-s12# setenv boot_part boot1
-s12# saveenv
-s12# reset
-```
-
-也可以在 Linux 里通过 SSH 切换：
-
-```sh
-fw_env -s boot_part boot1 && reboot
-fw_env -s boot_part boot0 && reboot
-```
-
-## 4. boot0 / boot1
-
-`boot0` 和 `boot1` 是两个启动分区：
-
-```text
-mtd2: boot0
-mtd3: boot1
-```
-
-它们主要包含：
-
-```text
-kernel + initramfs
-```
-
-可以把它们理解为两套“启动器”。U-Boot 根据 `boot_part` 选择其中一个。
-
-当前设备上，`boot0` 和 `boot1` 的内容相同。这是设备调试过程中曾把 `boot1` 写入 `boot0` 后形成的当前状态。原始出厂状态下，`boot0` 与 `boot1` 可能并不完全相同，例如 failsafe 能力曾经主要依赖 `boot0`。
-
-## 5. kernel
-
-kernel 是 Linux 内核，负责底层硬件和系统资源：
-
-```text
-CPU
-内存
-进程
-文件系统
-NAND
-网络
-声卡
-I2C
-驱动
-```
-
-当前设备 kernel：
-
-```text
-Linux 4.9.61
-build time: Wed Sep 20 08:55:48 2023
-```
-
-kernel 启动后，还不能马上运行完整系统，因为真正的 `/bin`、`/etc`、`/usr` 等文件还在 `system0/system1` 里。因此 kernel 会先使用 initramfs。
-
-## 6. initramfs
-
-initramfs 是内核启动早期使用的临时根文件系统。
-
-它通常负责：
-
-```text
-初始化基础设备
-加载必要驱动
-解析启动参数
-判断正常启动还是 failsafe
-选择并挂载真正的 rootfs
-切换到真正系统
-```
-
-可以把 initramfs 理解成“启动早期的小工具箱”。它存在于 boot 分区随 kernel 一起加载。
-
-## 7. system0 / system1
-
-`system0` 和 `system1` 是两个系统分区：
-
-```text
-mtd4: system0
-mtd5: system1
-```
-
-它们主要包含完整 rootfs：
-
-```text
-/bin
-/etc
-/lib
-/sbin
-/usr
-/etc/init.d
-/usr/bin/mibrain_service
-/usr/bin/mipns-xiaomi
-/usr/bin/mico_aivs_lab
-```
-
-当前设备上：
-
-```text
-system0 = 小米 ROM 1.54.8，2019 版
-system1 = 小米 ROM 1.76.54，2023 版
-```
-
-这就是为什么同一份 `/data/native_first_client.sh` 在 boot0 与 boot1 下行为不同：脚本文件相同，但它面对的小米原生服务版本不同。
-
-## 8. rootfs
-
-rootfs 是“当前被挂载为 `/` 的根文件系统”，不是一个单独分区名。
-
-当前启动到 system1 时：
-
-```text
-/dev/mtdblock5 on / type squashfs
-```
-
-含义：
-
-```text
-当前 rootfs = system1
-```
-
-启动到 system0 时通常会看到：
-
-```text
-/dev/mtdblock4 on / type squashfs
-```
-
-含义：
-
-```text
-当前 rootfs = system0
-```
-
-## 9. 挂载
-
-挂载就是把一个存储分区接到 Linux 目录树里的某个位置。
-
-示例：
-
-```text
-/dev/mtdblock5 挂载到 /
-```
-
-表示 system1 成为当前系统根目录。
-
-`/data` 也是一个挂载点。它是共享、可写、持久化分区：
-
-```text
-/data
-```
-
-boot0/system0 和 boot1/system1 都能看到同一份 `/data`，所以以下文件两边共用：
-
-```text
-/data/native_first_client.sh
-/data/native_first.env
-/data/init.sh
-/data/dropbear/authorized_keys
-```
-
-## 10. OpenWrt / LEDE
-
-OpenWrt/LEDE 是这台音箱 rootfs 里的 Linux 发行版框架。
-
-当前两套 system 的基础 LEDE 版本都显示：
-
-```text
-LEDE Reboot SNAPSHOT 70-1-1
-```
-
-它负责：
-
-```text
-/etc/init.d/*
-/etc/rc.d/*
-procd
-ubus
-网络
-服务启动顺序
-```
-
-但 LEDE 只是底座。小米语音能力来自小米自己的用户态服务。
-
-## 11. 小米服务层
-
-系统启动后，会启动一批小米服务，例如：
-
-```text
-mipns-xiaomi
-mibrain_service
-mico_aivs_lab
-mediaplayer
-ubus
-```
-
-当前项目最关心的是这些服务的差异：
-
-| 启动组合 | 原生结果来源 | 当前脚本适配 |
+| 分区 | 内容 | 与项目的关系 |
 |---|---|---|
-| boot0/system0 | `mibrain nlp_result_get` | `NATIVE_RESULT_SOURCE=auto` 选择 `ubus_nlp_result` |
-| boot1/system1 | `/tmp/mico_aivs_lab/instruction.log` | `NATIVE_RESULT_SOURCE=auto` 选择 `aivs_lab_instruction` |
+| mtd0 / bootloader，mtd1 / tpl | 启动引导 | 决定系统如何开始运行 |
+| mtd2 / boot0，mtd3 / boot1 | kernel + initramfs | 选择启动环境；原始 failsafe 能力也与此有关 |
+| mtd4 / system0 | 2019 原生用户态，ROM 1.54.8 | 运行时根设备通常为 `/dev/mtdblock4` |
+| mtd5 / system1 | 2023 原生用户态，ROM 1.76.54 | 运行时根设备通常为 `/dev/mtdblock5` |
+| mtd6 / data | 共享、可写、持久化文件 | 客户端、配置、自启动脚本和公钥 |
 
-boot1/system1 上，`mibrain nlp_result_get` 可能不刷新；`mico_aivs_lab` 的 `instruction.log` 中会出现原生 ASR/TTS 指令，例如：
+“rootfs”是当前挂载到 `/` 的根文件系统，不是另一个分区。例如 `/dev/mtdblock5 on / type squashfs` 表示 system1 正在提供根目录。
 
-```text
-SpeechRecognizer/RecognizeResult
-SpeechSynthesizer/Speak
-Dialog/Finish
+在音箱只读检查实际根分区：
+
+```sh
+mount | grep ' on / '
 ```
 
-boot1 的失败判定使用 `Speak.text` 文本规则，不应把客户端填入的 `michat/model` 当作固件状态。2026-09-06 已部署 C 快速拦截器并实测无先行失败提示，见 [记录](../history/2026-09-06-boot1-fallback-guard.md)；think 阶段仍不预冻结。
+已有核验记录中，两套 boot 内容相同、内核为 Linux 4.9.61；这是调试时曾把 boot1 写入 boot0 后的状态，不是出厂保证。两套 system 仍不同，所以应用行为仍有差别。
 
-因此不要简单复制 boot0 的服务文件去覆盖 boot1，也不要试图把两套系统“硬填平”。当前长期方案是在 `native_first_client.sh` 中保留两套结果源适配。
+<a id="11-小米服务层"></a>
 
-## 12. 和当前项目的关系
+<a id="12-和当前项目的关系"></a>
 
-因为 `/data` 共享，所以两套系统使用同一份 `/data/native_first_client.sh`；因为 `system0/system1` 的小米服务层不同，所以脚本内部需要按当前 rootfs 做适配。适配细节（结果源、唤醒事件、音频采集差异）见 [native-first.md](native-first.md#5-boot0-与-boot1-兼容)。
+## 3. 为什么共享脚本，还需要两套适配
 
-## 13. 当前设备状态总结
+两套系统都能看到同一个 `/data/native_first_client.sh`、`/data/native_first.env`、`/data/init.sh` 和 `/data/dropbear/authorized_keys`。但脚本调用的原生进程、结果来源和音频行为由当前 system 决定。
 
-```text
-boot0 == boot1
-kernel = Linux 4.9.61, 2023-09-20
+| 系统 | 主要结果源 | 客户端适配 |
+|---|---|---|
+| boot0/system0 | `mibrain nlp_result_get` | `ubus_nlp_result`，结构化字段与文本辅助路由 |
+| boot1/system1 | AIVS `instruction.log` | `aivs_lab_instruction`，final 与 Speak 文本规则 |
 
-system0 != system1
-system0 = ROM 1.54.8, 2019-10-28
-system1 = ROM 1.76.54, 2023-09-20
+`NATIVE_RESULT_SOURCE=auto` 根据根分区选择适配。boot1 上旧 `nlp_result_get` 可能不刷新，也不能照搬 boot0 的音频采集覆盖。复制旧系统原生二进制去覆盖新系统可能破坏识别；应保留各自适配，详见[对话架构](native-first.md#4-识别之后交给谁回答)。
 
-/data 共享
-native_first_client.sh 两边共用
-小米服务层两边不同
-```
+<a id="9-挂载"></a>
 
-所以当前差异的主因是：
+## 4. 哪些文件在重启后还在
 
-```text
-system0/system1 rootfs 中的小米用户态版本不同
-```
+| 位置 | 特性 | 常见内容 |
+|---|---|---|
+| `/` 下的 squashfs | 只读，修改通常涉及镜像 | 原生程序、系统库、init 入口 |
+| `/data` | 可写并持久化，两套系统共享 | 项目脚本、私有配置、组件包和回滚备份 |
+| `/tmp` | 临时运行空间，整机重启重建 | 日志、会话状态、默认对话历史、展开的判停运行库 |
 
-不是当前 `boot0/boot1` kernel 不同。
+bind mount 可以在运行时让某个路径指向另一份文件，例如替换唤醒 hook 或组件服务配置，但不会永久改写 squashfs。组件需要通过启动管理器在每次开机重建覆盖；不能把一次手动挂载视为已经持久安装。
+
+## 5. 两套系统为什么都要验证
+
+原生升级或失败切换机制可能改变启动槽位。只打通一边的 SSH，切到另一边就可能失联；只改一边 `rc.local`，另一边能 SSH 却不会自动启动助手。关闭 OTA 也不等于关闭所有失败切换。
+
+这里有一个容易忽略的恢复条件：原始 boot0 的 failsafe 入口可能随内核覆盖而丢失。项目中发生过这样的事故，见[探索记录](../history/journey.md#14-学费failsafe-永久丢失)。因此，不能只靠“切回 boot0”推断一定能进入救援模式。
+
+操作前确认实际启动环境、备份、目标备用分区和串口恢复能力。切换命令集中在[日常操作](../runbooks/operations.md#切换系统)，镜像校验与受控升级在[维护手册](../runbooks/owner-maintenance.md)，助手的后期启动入口见[自启动](../runbooks/autostart.md)。

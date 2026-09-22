@@ -1,248 +1,129 @@
-# native-first 自启动 init hook
+<a id="native-first-自启动-init-hook"></a>
 
-文档类型：长期部署操作手册  
-适用范围：让音箱断电重启后自动启动 `native_first_client.sh`  
-当前结论：2026-09-06 实机已补齐 system1 的 `/data/init.sh` 入口并验证重启后客户端自动启动；system0 沿用既有入口。旧记录不替代实际镜像检查。
+<a id="1-当前结论"></a>
 
-本文记录让音箱断电重启后自动运行 `native_first_client.sh` 的候选方案。
+<a id="11-2026-09-06-实机补齐与验证"></a>
 
-> 2026-09-06 后续验证：持久安装客户端与 `/data/aivs_speech_guard` 后，boot1 重启会由客户端自动拉起快速拦截器；用户确认转 LLM 前无失败提示。见 [修复记录](../history/2026-09-06-boot1-fallback-guard.md)。已有 init.sh 入口无需为 guard 单独改写；新设备仍需先安装 helper。
+<a id="12-2026-06-06-历史写入记录"></a>
 
-2026-09-06 已验证 boot1 的 native_asr 原生追问组件可随客户端重建服务覆盖并自动加载。只具备 SSH/rc.local 入口不等于已安装组件；安装与健康检查见 [原生追问说明](../../device/native_asr/README.md)。
+<a id="2-和-ssh-hook-的关系"></a>
 
-## 首轮判停的启动与验证范围
+<a id="3-开源项目参考"></a>
 
-安装 `native_endpoint` 后沿用现有入口：`rc.local → /data/init.sh → native_first_client.sh → manager.sh start`。客户端仅在 boot1 且开关启用时加载判停；运行包持久存于 `/data/native_endpoint/`，校验后解压至 `/tmp`，模型 READY 后才接管新唤醒。不需要再改 rootfs、加另一条自启动命令或依赖 Mac 在线。
+<a id="4-不推荐的方案"></a>
 
-2026-09-20 已验证服务启动、停止、实际回滚和重新启用，并完成安装该包后的**整机 reboot 与现场复验**：boot ID 改变，仍在 system1，SSH 恢复后助手自行进入 IDLE，native_asr healthy，本地判停 READY，控制器和模型各一个。未手动启动客户端或管理器。重启后仅唤醒保持安静、停顿约 1.5 秒后轻声补充两轮均通过；LLM 播完、免唤醒窗口静默退出后再次回到 IDLE。安装文件哈希与重启前一致。随后用户另行拔电重启；新的 boot ID、自动启动日志、单模型实例和首问/追问完成记录共同确认冷启动恢复正常。**全天稳定性仍未验证**。后续版本仍需按 EP7 独立复验，见[人工测试](../../tests/manual_native_first_cases.md#ep-首轮本地判停)与[本次证据](../history/first-turn-endpoint/native-daily-20260919.md#整机重启与现场验收2026-09-20)。失败时按[日常运维](operations.md#boot1-首轮本地判停)回滚，保留原 SSH/init 入口。
+<a id="41-直接写-dataai-crontabcrontabdat"></a>
 
-## 1. 当前结论
+<a id="42-直接改-etccrontabsroot"></a>
 
-推荐长期方案：
+<a id="43-在-etcinitdsshen-里顺手启动-native-first"></a>
 
-1. 在 `system0/system1` 的 `/etc/rc.local` 中注入一行通用入口。
-2. 把真正的启动逻辑放在可写、持久化的 `/data/init.sh`。
-3. 后续调整启动命令时只改 `/data/init.sh`，不再反复改系统分区。
+<a id="5-推荐的-datainitsh"></a>
 
-建议注入到 `rc.local` 的内容：
+<a id="6-验证步骤"></a>
+
+<a id="7-风险和回滚"></a>
+
+# 配置自启动：让音箱重启后自己恢复
+
+手动启动并完成真实问答后，再把同一条链路交给开机入口。这里分清两件事：系统是否调用 `/data/init.sh`，以及该脚本是否能启动已经部署好的客户端和组件。
+
+## 1. 理解启动入口
+
+```text
+当前 system 的 rc.local
+  → 共享 /data/init.sh
+  → native_first_client.sh
+  → 已安装并启用的 guard / 原生追问 / 首轮判停管理器
+```
+
+推荐在两套系统的 `/etc/rc.local` 中只保留通用入口，把可调整逻辑放在持久、可写的 `/data`：
 
 ```sh
 [ -f "/data/init.sh" ] && sh /data/init.sh >/dev/null 2>&1 &
 ```
 
-原因：
+本机 init 的后期阶段执行 `rc.local`，比 SSH 的 `S45sshen` 更适合等待原生语音服务。SSH 与助手使用不同生命周期，不能因为能 SSH 就推断助手已经自启动。
 
-- 当前 `system0` 和 `system1` 都有 `/etc/rc.local`。
-- 当前 `system0` 和 `system1` 的 `/etc/init.d/done` 都会在 `START=95` 阶段执行 `/etc/rc.local`。
-- `START=95` 足够靠后，比 SSH 的 `S45sshen` 更适合启动 native-first 客户端。
-- `/data` 是可写且持久化的，适合放后续可调整的启动脚本。
+## 2. 先检查，不重复写系统分区
 
-## 1.1 2026-09-06 实机补齐与验证
-
-本轮检查发现 system1 只有空的 `rc.local`，虽能 SSH 和使用小爱，但没有启动 LLM 客户端。手动启动后用户确认转 LLM 正常，因此只补齐 `rc.local -> /data/init.sh`。从 boot0 写备用 system1、读回校验后切回 boot1，确认开机自动启动并进入 `[IDLE]`，无需手动执行。
-
-构建使用 `patch_s12a_rootfs.py --autostart-only`，详细输入输出哈希、验证范围见 [实测记录](../history/2026-09-06-boot1-autostart.md)。下文 2026-06-06 的日志与镜像名称仅作为历史记录。
-
-## 1.2 2026-06-06 历史写入记录
-
-已完成：
-
-- `system1` 已写入 `rc.local -> /data/init.sh` hook。
-- `system0` 已写入 `rc.local -> /data/init.sh` hook。
-- `/data/init.sh` 已部署为 native-first 自启动脚本。
-- 当前设备已切回 `boot0`，并验证 native-first 自动启动成功。
-
-本次本地工作目录：
-
-```text
-/private/tmp/xiaomi_autostart_20260606_1420
-```
-
-关键文件：
-
-```text
-system0_live.img
-system1_live.img
-system0_autostart.img
-system1_autostart.img
-system0_after_write.img
-system1_after_write.img
-```
-
-写入命令：
+在音箱读取当前入口：
 
 ```sh
-cat /private/tmp/xiaomi_autostart_20260606_1420/system1_autostart.img \
-| ssh root@192.168.8.152 'mtd -f write - system1'
-
-cat /private/tmp/xiaomi_autostart_20260606_1420/system0_autostart.img \
-| ssh root@192.168.8.152 'mtd -f write - system0'
+cat /etc/rc.local
+ls -l /data/init.sh /data/native_first_client.sh
 ```
 
-`system1` 写入时观察到已知坏块：
+已有通用入口时，只需检查 `/data` 中的脚本和配置。入口缺失时，先按[双系统维护中的自启动补丁流程](owner-maintenance.md#为已有维护镜像补齐助手自启动)检查镜像基线，从另一套已验证系统写备用分区、读回校验后再切换。不要在这里直接写活动根分区。
 
-```text
-Skipping bad block at 0x00060000
-```
+rootfs 修改前保持串口可用，保留至少一套可启动系统。仅开关本地判停不需要再次修改 rootfs。
 
-这与此前 boot1 SSH 注入时的坏块情况一致。不要用 `dd of=/dev/mtdblock5` 写 `system1`。
+## 3. 部署或检查 init.sh
 
-当前 boot0 自启动验证日志：
-
-```text
-ROOT=/dev/mtdblock4 squashfs ro,noatime
-boot0
-[14:35:22] autostart begin client=/data/native_first_client.sh server=http://192.168.8.150:8080 backend=deepseek
-[14:39:40] starting native-first client
-[14:39:43.910] [HOOK] mounted /bin/wakeup.sh -> /tmp/wakeup.sh.native_first_client
-[14:39:44.010] [IDLE] 等待原生唤醒词：小爱同学
-```
-
-boot1 自启动验证日志：
-
-```text
-ROOT=/dev/mtdblock5 squashfs ro,noatime
-boot1
-[17:07:20] autostart begin client=/data/native_first_client.sh server=http://192.168.8.150:8080 backend=deepseek
-[14:33:18] starting native-first client
-[14:33:19.864] [HOOK] mounted /bin/wakeup.sh -> /tmp/wakeup.sh.native_first_client
-[14:33:20.510] [IDLE] 等待原生唤醒词：小爱同学
-```
-
-boot1 自启动较早，`/tmp/mico_aivs_lab/instruction.log` 可能尚未生成。`native_first_client.sh` 已修正为：只要 root 是 `/dev/mtdblock5` 且 `NATIVE_AIVS_LAB_RESULT_SYSTEM1=1`，`NATIVE_RESULT_SOURCE=auto` 就直接选择 `aivs_lab_instruction`。
-
-## 2. 和 SSH hook 的关系
-
-之前打通 SSH 使用的是 rootfs init hook：
-
-```text
-/etc/init.d/sshen
-/etc/rc.d/S45sshen -> ../init.d/sshen
-```
-
-核心动作：
+首次部署且没有自定义 `/data/init.sh` 时，在音箱安装已上传的模板：
 
 ```sh
-mount --bind /data/dropbear/authorized_keys /etc/dropbear/authorized_keys
-echo "1" > /tmp/ssh_en
-```
-
-这个方案证明了 rootfs 注入 init hook 可行。
-
-但 native-first 不适合直接复用 `S45sshen`：
-
-- `S45sshen` 太早，主要目标是让 dropbear 启动。
-- native-first 依赖 `/data`、网络、`ubus`、`mibrain_service`、`mipns-xiaomi`、`mediaplayer` 等，应该晚启动。
-
-因此 native-first 更适合走 `rc.local` 或独立 `S99native_first`。
-
-## 3. 开源项目参考
-
-Open-XiaoAI 的 Rust Client 文档中，开机自启动也是让用户下载 `boot.sh` 到 `/data/init.sh`，然后重启音箱。
-
-Open-XiaoAI 的补丁里对 `/etc/rc.local` 的改动是：
-
-```diff
- [ -f "/data/init.sh" ] && sh /data/init.sh >/dev/null 2>&1 &
-```
-
-这个做法的价值是：rootfs 只注入一次通用入口，后续功能脚本全部由 `/data/init.sh` 控制。
-
-另一个 `open-lx01` 项目也明确说明：rootfs 是只读的，`/tmp` 和 `/data` 可写，rootfs 修改必须通过固件/镜像完成。这和我们当前设备观察一致。
-
-## 4. 不推荐的方案
-
-### 4.1 直接写 `/data/ai-crontab/crontab.dat`
-
-已观察到它是二进制格式，不是普通文本 crontab。
-
-设备上虽然存在：
-
-```text
-/usr/bin/mico_ai_crontab
-ubus object: ai_crontab
-/data/ai-crontab/crontab.dat
-```
-
-但 `ai_crontab new` 的 `personal_skill` 参数格式还没闭环验证。直接改 `crontab.dat` 风险高，不推荐作为当前主线。
-
-### 4.2 直接改 `/etc/crontabs/root`
-
-当前设备上 `crond` 在跑，但 `/etc/crontabs/root` 属于只读 rootfs，不适合作为不刷分区的持久方案。
-
-### 4.3 在 `/etc/init.d/sshen` 里顺手启动 native-first
-
-不推荐。
-
-原因是启动太早，且 SSH 与 native-first 是两个生命周期。把两者耦合后，后续排障复杂度会上升。
-
-## 5. 推荐的 `/data/init.sh`
-
-仓库模板：
-
-```text
-device/data_init_native_first.sh
-```
-
-部署成 `/data/init.sh` 后，它会：
-
-- 记录 `/tmp/native_first_autostart.log`。
-- 等待一段启动延迟。
-- 检查 `native_first_client.sh` 是否已存在。
-- 避免重复启动。
-- 按 `SERVER_WAIT_SECONDS` 短暂等待可选 TTS 服务端。
-- 默认 `START_WITHOUT_SERVER=1`，服务端不可达也会启动客户端；`TTS_ENGINE=device` 或原生 TTS 兜底都不依赖 Mac 服务端。
-- 后台启动 `native_first_client.sh`。
-
-## 6. 验证步骤
-
-注入 rootfs 前，只能手动模拟：
-
-```sh
-cp /data/data_init_native_first.sh /data/init.sh
+[ -f /data/init.sh ] || cp /data/data_init_native_first.sh /data/init.sh
 chmod +x /data/init.sh
-sh /data/init.sh
-tail -f /tmp/native_first_autostart.log /tmp/native_first_client.log
 ```
 
-完成 rootfs 注入后验证：
+已有脚本应先备份、比较内容，再决定是否调整。模板 [device/data_init_native_first.sh](../../device/data_init_native_first.sh) 会记录启动日志、等待原生环境、避免重复启动，并短暂探测可选服务端。默认 `START_WITHOUT_SERVER=1`，服务不可达也会启动客户端；设备 TTS 与原生兜底不依赖常驻 Mac。
+
+先在音箱空闲且客户端未运行时手动检查脚本：
 
 ```sh
+sh /data/init.sh
+tail -n 60 /tmp/native_first_autostart.log /tmp/native_first_client.log
+```
+
+这只验证脚本可运行，还没有证明整机启动会调用它。
+
+## 4. 单独验证整机启动
+
+确认已经保存配置与回滚入口，且音箱没有播报或收听时重启：
+
+```sh
+sync
 reboot
 ```
 
-重启后 SSH 进入音箱：
+重连后不要手动启动客户端，先读取日志：
 
 ```sh
-ps | grep -E 'native_first_client|mipns-xiaomi|mediaplayer' | grep -v grep
-tail -f /tmp/native_first_autostart.log /tmp/native_first_client.log /tmp/native_first_events.log
+sh /data/native_first_client.sh status
+tail -n 60 /tmp/native_first_autostart.log /tmp/native_first_client.log
 ```
 
-预期日志：
+预期看到 `autostart begin`、`starting native-first client`、`[HOOK]` 与 `[IDLE]`。随后验证原生报时和 LLM 首问；启用追问的设备再测试上下文衔接与静默退出。
 
-```text
-autostart begin client=/data/native_first_client.sh ...
-starting native-first client
-[HOOK] mounted /bin/wakeup.sh -> /tmp/wakeup.sh.native_first_client
-[IDLE] 等待原生唤醒词：小爱同学
-```
+### 首轮判停的启动与验证范围
 
-## 7. 风险和回滚
-
-这属于轻量 rootfs 修改，仍然算修改系统分区。
-
-风险控制：
-
-- 优先只注入 `rc.local` 的 `/data/init.sh` 入口，不把复杂业务逻辑写进 rootfs。
-- 先写非当前启动分区，切换验证。
-- 保持串口可用。
-- `boot0/boot1` 至少保留一个可启动系统。
-
-如果 `/data/init.sh` 出问题：
+已安装判停包时，客户端自动调用管理器。包持久保存在 `/data/native_endpoint/`，校验后展开到 `/tmp`，模型 READY 后才接管新唤醒；无需另加实验脚本。
 
 ```sh
+sh /data/native_endpoint/manager.sh verify
+sh /data/native_endpoint/manager.sh status
+sh /data/native_asr.sh status
+```
+
+需要同时确认包校验通过、`ENDPOINT_READY`、native_asr `healthy`，以及模型与控制器未重复启动。按 [EP7](../../tests/manual_native_first_cases.md#ep-首轮本地判停)在重启后复验静默和停顿续说。整机 reboot、断电冷启动与全天运行是不同验证项；已有证据统一见[状态页](../status.md)。
+
+## 5. 停用和恢复
+
+仅调整组件时，按[日常操作](operations.md)停止客户端并修改对应开关；完整回滚使用该次安装输出的备份脚本，不能只替换共享 SO。
+
+如果 `/data/init.sh` 本身导致问题，在确认目标备份名尚不存在、音箱空闲时，可停止客户端并临时移走入口：
+
+```sh
+sh /data/native_first_client.sh stop
 mv /data/init.sh /data/init.sh.disabled
 reboot
 ```
 
-这样 rootfs 入口仍存在，但不会执行 native-first。
+rootfs 通用入口仍在，但找不到 `/data/init.sh` 就不会执行。恢复前检查和修正脚本，再恢复文件名并重新验收。
+
+## 设计依据与历史
+
+原始自启动入口参考 open-xiaoai 的 `/data/init.sh` 方式。没有采用直接编辑二进制 `ai-crontab/crontab.dat`、在只读 rootfs 改 crontab，或把助手塞进过早的 SSH hook；这些方案的实验背景保留在[原始自启动记录](../archive/2026-06-07-pre-doc-reorg/AUTOSTART_INIT_HOOK.md)。
+
+2026-06 的镜像、写入日志和失败条件也在该归档；后来补齐 system1 入口的事实见 [2026-09-06 记录](../history/2026-09-06-boot1-autostart.md)。它们解释设计由来，不替代操作前对当前镜像的检查。
