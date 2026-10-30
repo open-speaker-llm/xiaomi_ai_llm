@@ -21,7 +21,7 @@ python3 scripts/embed_native_protocol.py --check
 | `json_text_field` | 从带前缀的原生日志中提取首个 `text` 字符串，保留转义供解码器处理 |
 | `llm_sse_content [status_file]` | LLM SSE → 逐片播报文本；结束时向可选状态文件写入 `complete` 或 `incomplete` |
 
-编码使用设备已有的 BusyBox `od` / `awk`；协议处理固定使用 C locale，按 UTF-8 字节输出。原生日志解码对孤立代理项保留替换字符的容错行为；LLM SSE 对无效转义和孤立代理项拒绝该帧，并将整轮标记为不完整。
+编码需要 `awk` 和一个字节读取工具：优先使用 `od`，设备没有 `od` 时使用 `hexdump -v -e '1/1 "%u\n"'`；不假定所有 BusyBox 固件都有 `od`。两个工具均缺失或选中的读取工具执行失败时，`json_escape` 返回非零并向 stderr 写入错误。两条路径均保留重复零字节和末尾换行。协议处理固定使用 C locale，按 UTF-8 字节输出。原生日志解码对孤立代理项保留替换字符的容错行为；LLM SSE 对无效转义和孤立代理项拒绝该帧，并将整轮标记为不完整。
 
 SSE 处理只发布 `choices` 中 index 0 的 `delta.content`；缺失 index 时沿用首个 choice。思考字段、其他 choice 和 usage 不会进入播报。完整 JSON 帧验证通过后立即输出并 flush，不等待整段回答；支持 CRLF、注释、跨 `data:` 行的 JSON，以及既有逐行 JSON 输入。单个 JSON 帧上限为 256 KiB、嵌套深度上限为 32，超限标记不完整。
 
@@ -29,4 +29,4 @@ SSE 处理只发布 `choices` 中 index 0 的 `delta.content`；缺失 index 时
 
 ## 验证边界
 
-`tests/test_native_protocol.py` 对维护源码和嵌入产物执行同一组合同：完整控制字符编码、Unicode/emoji/引号、错误和截断、逐片输出，以及产物一致性。上游保持打开时读取前两片输出的用例用于防止新增缓冲延迟；主客户端失败测试确认坏流不会触发完整播放或提交完整历史。可用时另用 BusyBox 的 shell、awk、od 运行兼容用例；本机缺少 BusyBox 会明确跳过，主机测试不替代音箱听觉验收。
+`tests/test_native_protocol.py` 对维护源码和嵌入产物执行同一组合同：完整控制字符编码、Unicode/emoji/引号、错误和截断、逐片输出，以及产物一致性。隔离 PATH 的测试覆盖仅有 hexdump、两种字节工具都缺失及读取工具失败。上游保持打开时读取前两片输出的用例用于防止新增缓冲延迟；主客户端失败测试确认坏流不会触发完整播放或提交完整历史。可用时另用 BusyBox 的 shell、awk 分别配合 od 和 hexdump 运行兼容用例；本机缺少 BusyBox 会明确跳过，主机测试不替代音箱听觉验收。

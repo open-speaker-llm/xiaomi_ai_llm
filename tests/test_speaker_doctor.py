@@ -3,6 +3,7 @@ import hashlib
 import os
 from pathlib import Path
 import shutil
+import shlex
 import stat
 import struct
 import subprocess
@@ -129,6 +130,18 @@ class SpeakerDoctorTest(unittest.TestCase):
     def snapshot(self):
         return {str(p.relative_to(self.root)): (stat.S_IMODE(p.stat().st_mode), p.stat().st_mtime_ns, p.read_bytes())
                 for p in self.root.rglob('*') if p.is_file() and not p.is_symlink()}
+
+    def reader_path(self, *readers):
+        """Expose only the listed byte readers, without inheriting host fallbacks."""
+        directory = self.root / 'reader-bin'
+        directory.mkdir()
+        for command in ('sh', 'awk', 'cat', 'tr', 'wc', 'readlink', 'sha256sum', *readers):
+            source = shutil.which(command)
+            if source is None:
+                self.skipTest(command + ' unavailable on this host')
+            (directory / command).symlink_to(source)
+        self.env['PATH'] = str(directory)
+        return directory
 
     def test_boot0_device_baseline_is_read_only_and_does_not_need_optional_components(self):
         before = self.snapshot()
@@ -288,6 +301,94 @@ class SpeakerDoctorTest(unittest.TestCase):
         self.assertIn('[PASS] ENDPOINT_ACTIVE_HASH', result.stdout)
         self.assertIn('不宣称正式 ENDPOINT_READY', result.stdout)
         self.assertEqual(self.snapshot(), before)
+
+    def test_boot1_works_with_hexdump_and_no_od(self):
+        self.boot1(endpoint=True)
+        self.reader_path('hexdump')
+        before = self.snapshot()
+        result = self.run_doctor()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('[INFO] ASR_SNAPSHOT', result.stdout)
+        self.assertIn('[INFO] ENDPOINT_SNAPSHOT', result.stdout)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_boot1_retains_od_fallback(self):
+        self.boot1(endpoint=True)
+        self.reader_path('od')
+        result = self.run_doctor()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('[INFO] ASR_SNAPSHOT', result.stdout)
+        self.assertIn('[INFO] ENDPOINT_SNAPSHOT', result.stdout)
+
+    def test_missing_byte_readers_leave_snapshots_unknown(self):
+        self.boot1(endpoint=True)
+        self.reader_path()
+        result = self.run_doctor()
+        self.assertEqual(result.returncode, 2, result.stdout)
+        for label in ('ASR_SNAPSHOT', 'ENDPOINT_SNAPSHOT'):
+            self.assertIn('[UNKNOWN] ' + label, result.stdout)
+            self.assertNotIn('[INFO] ' + label, result.stdout)
+        self.assertNotIn('[FAIL]', result.stdout)
+
+    def test_failed_reader_output_cannot_claim_readiness(self):
+        self.boot1(endpoint=True)
+        reader = shutil.which('hexdump')
+        directory = self.reader_path('hexdump')
+        (directory / 'hexdump').unlink()
+        # Even a full, valid prefix is untrusted when the reader reports failure.
+        self.put('/reader-bin/hexdump', '#!/bin/sh\n' + shlex.quote(reader) +
+                 ' "$@"\nexit 1\n', executable=True)
+        result = self.run_doctor()
+        self.assertEqual(result.returncode, 2, result.stdout)
+        for label in ('ASR_SNAPSHOT', 'ENDPOINT_SNAPSHOT'):
+            self.assertIn('[UNKNOWN] ' + label, result.stdout)
+            self.assertNotIn('[INFO] ' + label, result.stdout)
+        self.assertNotIn('[FAIL]', result.stdout)
+
+    def test_incomplete_or_invalid_byte_output_stays_unknown(self):
+        self.boot1(endpoint=True)
+        reader = shutil.which('hexdump')
+        directory = self.reader_path('hexdump')
+        (directory / 'hexdump').unlink()
+        for transform in ('NR>1 {print}', 'NR==1 {$0=256} {print}',
+                          'NR==1 {$0="invalid"} {print}', '{print} END {print 0}'):
+            with self.subTest(transform=transform):
+                self.put('/reader-bin/hexdump', '#!/bin/sh\n' + shlex.quote(reader) +
+                         ' "$@" | awk ' + shlex.quote(transform) + '\n', executable=True)
+                result = self.run_doctor()
+                self.assertEqual(result.returncode, 2, result.stdout)
+                for label in ('ASR_SNAPSHOT', 'ENDPOINT_SNAPSHOT'):
+                    self.assertIn('[UNKNOWN] ' + label, result.stdout)
+                    self.assertNotIn('[INFO] ' + label, result.stdout)
+                self.assertNotIn('[FAIL]', result.stdout)
+
+    def test_failed_plan_reads_are_unknown_not_invalid_state(self):
+        self.boot1(endpoint=True)
+        reader = shutil.which('hexdump')
+        directory = self.reader_path('hexdump')
+        (directory / 'hexdump').unlink()
+        self.put('/reader-bin/hexdump', '#!/bin/sh\n' + shlex.quote(reader) +
+                 ' "$@"\n[ "$3" = 0 ]\n', executable=True)
+        result = self.run_doctor()
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn('[INFO] ASR_SNAPSHOT', result.stdout)
+        self.assertIn('[UNKNOWN] ENDPOINT_SNAPSHOT', result.stdout)
+        self.assertNotIn('[INFO] ENDPOINT_SNAPSHOT', result.stdout)
+        self.assertNotIn('[FAIL]', result.stdout)
+
+    def test_unreadable_asr_prefix_does_not_turn_endpoint_unknown_into_failure(self):
+        self.boot1(endpoint=True)
+        reader = shutil.which('hexdump')
+        directory = self.reader_path('hexdump')
+        (directory / 'hexdump').unlink()
+        self.put('/reader-bin/hexdump', '#!/bin/sh\nfor file do :; done\n' + shlex.quote(reader) +
+                 ' "$@"\ncase "$file" in */native_followup/state) exit 1;; esac\n', executable=True)
+        result = self.run_doctor()
+        self.assertEqual(result.returncode, 2, result.stdout)
+        for label in ('ASR_SNAPSHOT', 'ENDPOINT_SNAPSHOT'):
+            self.assertIn('[UNKNOWN] ' + label, result.stdout)
+            self.assertNotIn('[INFO] ' + label, result.stdout)
+        self.assertNotIn('[FAIL]', result.stdout)
 
     def test_endpoint_manifest_cannot_escape_directory_or_repeat_entries(self):
         self.boot1(endpoint=True)

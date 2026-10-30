@@ -2,7 +2,7 @@
 
 这个入口用于确认本机候选包的内容、构建来源记录和目标约束。它不联网，不执行包内程序，不安装、升级、回退或重启音箱。现有[首次安装基线与回滚边界](README.md#安装)保持不变。
 
-本阶段完成 M05-A。完整 M05 仍需允许来源版本规则、固件 ABI 验证、空间预算、整包备份、切换事务和失败恢复验证。**包体检查通过不能作为部署许可，也不代表设备、云端或真人对话通过。**
+M05-A 的通用离线预检仍不批准部署。另有本文末尾的固定旧版受限维护事务，需私有整机备份和单独验证的目标候选。它不等于任意版本升级器。**包体检查通过不能作为部署许可，也不代表设备、云端或真人对话通过。**
 
 ## 构建候选包
 
@@ -105,4 +105,106 @@ printf '预检退出码：%s\n' "$check_rc"
 
 4. 使用同一候选目录再次执行构建命令，预期在编译前拒绝非空输出，既有包不变。发布新候选应换一个新目录，不能删除旧包来绕过版本化交付。
 
-未做的验收必须保持未做：真实 ARM 运行、音箱升级与回退、冷启动、云端请求和真人说话。本轮无设备修改，因此没有设备恢复步骤。
+以上离线检查不执行真实 ARM 程序、不升级音箱，也不代替冷启动、云端请求和真人说话验收。实际受限维护及恢复按下面的独立流程记录。
+
+## 固定旧日常版的低空间维护事务
+
+`prepare_native_endpoint_upgrade.py` 为已安装日常包生成一次性的设备事务，不连接音箱。允许来源固定为包清单摘要 `43d832ee500ff2058216ad004830657022cb05c31f0cdf271238c15abd2822a3`，还核对旧客户端、SO、ASR 管理器/控制器和 init 摘要。设备执行前再次校验 live 文件、boot1、`uname -m=aarch64`、五项原厂 ABI 摘要、无 LLM/追问忙碌标记及实验恢复标记和空间。这些标记不证明原生首问收音空闲；须安排短暂静默维护窗口，期间可能中断语音对话。不能删除包目录或放松首次安装器校验来替代这些检查。
+
+这里有两种架构：注入原生进程的 `native_asr.so` 和隔离模型运行库为 ELF32 小端 ARM；独立的 `native_asr_ctl` 为 ELF64 小端 AArch64 可执行文件，与设备内核匹配。二者不能互换。生成器的 ELF 标识检查不是实际执行验证；维护者仍须对具体候选完成独立 ARM 验证。
+
+此事务更新整包六项文件、活动客户端/SO、`/data/init.sh`、`/data/native_asr_ctl`，并新增 `/data/speaker_doctor.sh`。默认保留 `native_first.env`；显式使用 `--enable-followup-controls` 时，在原配置字节之后追加两行 `export FOLLOWUP_EXIT_ENABLED=1`、`export FOLLOWUP_RESET_ENABLED=1`，并把私有新配置纳入校验、发布和回退。既有密钥、端侧 TTS、声音等原配置内容不重写，现有 v2 `ettsc` 和 ASR 管理脚本保持不变。`release.json` 仍只留在主机。诊断返回 `2` 表示信息不足，不能拿它替代包摘要、ASR 控制器和判停管理器的健康检查。
+
+### 先准备可恢复的备份
+
+主机备份目录必须包含完整 `data-full.tar.gz`、13 项应用文件及 `verified-manifest.json`。记录的 `device_root` 必须为 `boot1`，`files` 为下列相对路径到 SHA256 的映射，`data_archive_sha256` 为完整私有归档摘要：
+
+```text
+native_endpoint/{runtime.tar.gz,native_asr.so,native_first_client.sh,manager.sh,lifecycle,package.sha256}
+native_first_client.sh  native_asr.so  native_asr.sh  native_asr_ctl
+init.sh  native_first.env  ettsc
+```
+
+这些摘要应先与同一台音箱及完整归档核对，不能仅对一份未经设备核对的目录自行生成记录。配置和完整 `/data` 归档含私有数据，保存在本机受限目录，不提交 Git、不公开。生成器重新检查全部文件及归档摘要；设备 preflight 再检查 live 摘要，避免备份之后设备状态已经变化。
+
+### 生成并检查事务
+
+以下为本次已构建候选的输入；实际维护时使用已独立验收的目录，输出必须为新目录：
+
+```sh
+python3 tools/speaker-maintenance/prepare_native_endpoint_upgrade.py \
+  --backup backups/full-upgrade-20261030 \
+  --package /private/tmp/xiaomi-full-upgrade-build-20261030-2gtsmejt/package \
+  --extras /private/tmp/xiaomi-full-upgrade-build-20261030-2gtsmejt/extras \
+  --expected-candidate 069f8d946a1582c598cd508a4bea18533d67e109bbad9b580c880efd20b0d4d0 \
+  --enable-followup-controls \
+  --output /private/tmp/新的升级事务目录
+```
+
+`extras` 必须含 `init.sh`、`native_asr_ctl`、`speaker_doctor.sh`。输出包括候选包、额外文件、固定前后摘要、启动守卫、恢复辅助函数、`transaction.sh` 和 `plan.json`。示例已按本次用户授权开启两个控制；省略该选项则完全保留原配置。开启时输出含权限 `0600` 的 `extras/native_first.env`，事务目录为 `0700`：它包含原密钥，只能在本机和本设备之间私密传输，不能提交 Git 或公开。工具检查配置语法但不执行、不打印内容。`plan.json` 只记录开关选择及摘要，并给出唯一事务标识、准确设备暂存/备份路径、runner 摘要和空间门槛；不要手改生成的 shell、清单或路径。
+
+本候选开启两个控制后的设备增量门槛为 `/data` **2120 KiB**、暂存完成后 `/tmp` 额外 **38312 KiB**、`MemAvailable` **71080 KiB**。预算含持久小文件恢复集、新小文件、运行包增长、事务文件余量、1 MiB data 预留、旧运行包临时副本和新运行库展开空间；以最终生成计划和设备实时检查为准，不能据历史 `df` 结果直接执行。
+
+上传事务目录内容到 `plan.json.device_stage` 后，先比对设备 `transaction.sh` 的 SHA256 与 `plan.json.runner_sha256`，再在音箱执行：
+
+```sh
+# STAGE 必须使用 plan.json 中实际生成的绝对路径。
+STAGE=/tmp/endpoint-upgrade-stage-实际事务标识
+sh "$STAGE/transaction.sh" preflight
+```
+
+preflight 只读检查，不停止服务或建立持久备份。返回 `0` 并输出 `UPGRADE_PREFLIGHT_OK` 后，在已授权的空闲维护窗口执行：
+
+```sh
+sh "$STAGE/transaction.sh" apply
+```
+
+需要抵抗 SSH 连接中断时，可由维护端将该命令按既有受控方式后台运行并保存退出状态与日志；“后台进程已启动”不能作为升级成功。只有出现 `UPGRADE_COMMITTED`、持久状态为 `COMMITTED`，且活动摘要和 ASR/判停状态都通过，才记录这次部署完成。人声和冷启动验收另记，不由部署脚本代做。
+
+### 低空间时的保护与恢复
+
+完整新旧 10 MiB 运行包无法同时持久保存在当前 `/data`。本事务采用以下顺序：
+
+1. 在设备持久备份小文件、私有配置及恢复程序，同时在 `/tmp` 校验保留旧运行包。旧完整归档已在主机保留并校验。
+2. 原子安装启动守卫并同步，写入 `APPLYING` 并再次同步。未提交事务在重启后不启动自定义客户端或判停；原厂启动链保持原生小爱服务。
+3. 先停止判停 supervisor/pool，再向 PID 文件及精确命令匹配的客户端发 TERM，以 0.5 秒间隔最多检查 60 次（进程扫描耗时另计）。固定旧版的 TERM 清理会返回 FIFO 主循环，因此只有同命令的 hook watchdog 等子进程全部退出、PID 文件和事件 FIFO 均清理完成、原父进程命令及启动标识仍一致时，才最终结束该父进程并确认退出；条件未满足则拒绝替换。随后停止原生写入者、归档旧指令/客户端日志，才原位替换唯一的大运行包。小文件以校验后的临时副本和 rename 发布，包清单最后更新。
+4. 核对候选包和活动副本，启动并检查 ASR/判停，持久提交后发布正式新版 init。提交末段失败时先重新安装并同步守卫，再尝试恢复，避免把恢复拒绝误报成已经安全回退。
+
+普通写入或启动失败时，事务使用仍在 `/tmp` 的旧运行包自动恢复，输出 `UPGRADE_ROLLED_BACK`。**突然断电并丢失 `/tmp` 时，只保证未提交事务不启动混版自定义链路；不会自动恢复旧判停或 LLM。** 此时必须从主机备份补回旧运行包，才能完整恢复。
+
+若出现 `UPGRADE_RECOVERY_REQUIRED`，不要删包、旧备份或 busy 标志来强行继续。守卫保持原生降级，需要查明原因后恢复。若输出 `UPGRADE_BOOT_GUARD_UNCONFIRMED`，表示连守卫重新安装都失败，不能宣称下次开机安全，需立即人工维护。
+
+仍有原 `/tmp` 暂存时，在设备执行以下命令；`BACKUP` 使用 `plan.json.device_backup`：
+
+```sh
+BACKUP=/data/endpoint-upgrade-实际事务标识
+STAGE=/tmp/endpoint-upgrade-stage-实际事务标识
+sh "$BACKUP/restore.sh" restore "$STAGE/old-runtime.tar.gz"
+```
+
+如果 `/tmp` 已清空，先从开发机上传已校验备份中的旧运行包：
+
+```sh
+HOST=root@192.168.8.152
+scp -O -oHostKeyAlgorithms=+ssh-rsa -oPubkeyAcceptedAlgorithms=+ssh-rsa \
+  backups/full-upgrade-20261030/native_endpoint/runtime.tar.gz \
+  "$HOST:/tmp/endpoint-old-runtime-实际事务标识.tar.gz"
+```
+
+`HOST` 使用本次现场核验的设备地址；地址变化时先核验设备身份，不依赖未配置的 SSH 别名。然后在设备执行：
+
+```sh
+BACKUP=/data/endpoint-upgrade-实际事务标识
+sh "$BACKUP/restore.sh" restore /tmp/endpoint-old-runtime-实际事务标识.tar.gz
+```
+
+恢复脚本校验旧运行包及持久小文件备份，恢复匹配整包、客户端、SO、控制器、旧配置和旧 init，并撤掉原先不存在且摘要仍匹配本次候选的 doctor。它保留既有 v2 `ettsc`。私有配置只接受本次 before 或 after 摘要：显式开启的两个控制可以随事务回退，其他用户改动则拒绝覆盖，先保留修改再安排恢复，不悄悄丢掉新密钥。成功标记为 `ROLLED_BACK`。手动恢复进入写入阶段后也受退出守卫保护；末段失败会重装守卫，不递归执行另一次恢复。持久备份不要立即删除，它仍是恢复凭据。
+
+### 本机故障测试
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
+  -s tests -p test_native_endpoint_upgrade.py -v
+```
+
+测试在临时目录中模拟 `/data`、固件、服务命令和空间；覆盖成功与手动回退、源/候选/备份不符、缺空间、忙碌、符号链接、大包写入中断、小文件 rename 失败、启动失败、提交末段失败、守卫安装失败，以及强杀事务并清空模拟 `/tmp` 后从主机副本恢复。进程用例使用本机自建的旧版 TERM trap/FIFO 行为，检查延迟清理、watchdog 残留、未清理 FIFO、父进程身份变化和 `/proc` 读取期间正常退出。它不连接设备，也不能代替真实闪存断电、原厂启动链、ARM 执行和真人语音验收。

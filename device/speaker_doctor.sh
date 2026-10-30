@@ -1,6 +1,6 @@
 #!/bin/sh
 # Read-only S12A diagnostics. Never source configuration or execute device tools.
-# POSIX shell plus BusyBox awk/od/sha256sum/df; no temporary files are created.
+# POSIX shell plus BusyBox awk/hexdump (or od)/sha256sum/df; no temporary files are created.
 LC_ALL=C
 export LC_ALL
 
@@ -356,17 +356,32 @@ else
 fi
 
 # Only fixed-size numeric prefixes are read; dialog IDs and text are never read out.
-words() {
-    od -An -v -tu1 -j "$2" -N "$3" "$1" 2>/dev/null | awk -v wanted="$3" '
-        {for(i=1;i<=NF;i++){v+=($i+0)*factor;n++;if(n%4==0){printf "%s%.0f",sep,v;sep=" ";v=0;factor=1}else if(n%4==1)factor=256;else factor*=256}}
-        BEGIN{factor=1} END{if(n!=wanted)exit 1;print ""}'
-}
+words() (
+    # S12A boot1 provides hexdump, but may not include od. Capture this tiny
+    # numeric prefix before parsing so a failed reader cannot pass via awk's rc.
+    if command -v hexdump >/dev/null 2>&1; then
+        bytes=$(hexdump -v -s "$2" -n "$3" -e '1/1 "%u\n"' "$1" 2>/dev/null) || exit 1
+    elif command -v od >/dev/null 2>&1; then
+        bytes=$(od -An -v -tu1 -j "$2" -N "$3" "$1" 2>/dev/null) || exit 1
+    else
+        exit 1
+    fi
+    printf '%s\n' "$bytes" | awk -v wanted="$3" '
+        {for(i=1;i<=NF;i++){
+            if($i!~/^[0-9]+$/ || $i+0>255 || n>=wanted){bad=1;exit}
+            v+=($i+0)*factor;n++
+            if(n%4==0){result=result sep sprintf("%.0f",v);sep=" ";v=0;factor=1}
+            else factor*=256
+        }}
+        BEGIN{factor=1} END{if(bad || n!=wanted || n%4)exit 1;print result}'
+)
 plan_native_pids() (
     file=$1;offset=$((52+$2*908));owner=$3;observer=$4;deadline=$5
-    first=$(words "$file" "$offset" 28)
-    ids=$(words "$file" "$((offset+364))" 20)
-    [ "$first" = "$(words "$file" "$offset" 28)" ] &&
-        [ "$ids" = "$(words "$file" "$((offset+364))" 20)" ] || exit 2
+    first=$(words "$file" "$offset" 28) || exit 2
+    ids=$(words "$file" "$((offset+364))" 20) || exit 2
+    first_again=$(words "$file" "$offset" 28) || exit 2
+    ids_again=$(words "$file" "$((offset+364))" 20) || exit 2
+    [ "$first" = "$first_again" ] && [ "$ids" = "$ids_again" ] || exit 2
     set -- $first
     [ "$#" = 7 ] && [ "$1" = 1314336819 ] && [ "$2" = "$owner" ] &&
         [ "$3" = "$deadline" ] && [ "$4" = 0 ] && [ "$5" = 0 ] &&
@@ -388,9 +403,13 @@ if [ "$ASR_REQUIRED" = 1 ]; then
         report UNKNOWN ASR_SNAPSHOT '自定义管理器/控制器路径的状态布局未审核。' '为该版本补充只读诊断适配；诊断不会执行它。'
     elif readable_file /tmp/native_followup/state; then
         state_file=$SAFE_FILE
-        a=$(words "$state_file" 0 32);b=$(words "$state_file" 0 32)
+        read_ok=1
+        a=$(words "$state_file" 0 32) || read_ok=0
+        b=$(words "$state_file" 0 32) || read_ok=0
         size=$(wc -c < "$state_file" | tr -d ' ')
-        if [ "$a" != "$b" ] || [ "$size" != 4224 ]; then
+        if [ "$read_ok" != 1 ]; then
+            report UNKNOWN ASR_SNAPSHOT '字节读取器缺失、读取失败或数字前缀不完整。' '确认 hexdump 或 od 可用，并在空闲时重新收集同版状态。'
+        elif [ "$a" != "$b" ] || [ "$size" != 4224 ]; then
             report UNKNOWN ASR_SNAPSHOT '状态快照变化、截断或版本布局不符。' '在空闲时重新读取同版状态；不要把旧快照当作健康。'
         else
             set -- $a
@@ -496,9 +515,13 @@ if [ "$ENDPOINT" = 1 ] && [ "$BOOT" = boot1 ]; then
         report UNKNOWN ENDPOINT_SNAPSHOT '自定义管理器的状态布局未审核。' '补充对应版本的只读适配。'
     elif readable_file /tmp/xiaomi_native_wake_probe/native-pool.state; then
         pool_file=$SAFE_FILE
-        a=$(words "$pool_file" 0 52);b=$(words "$pool_file" 0 52)
+        read_ok=1
+        a=$(words "$pool_file" 0 52) || read_ok=0
+        b=$(words "$pool_file" 0 52) || read_ok=0
         size=$(wc -c < "$pool_file" | tr -d ' ')
-        if [ "$a" != "$b" ] || [ "$size" != 3684 ]; then
+        if [ "$read_ok" != 1 ]; then
+            report UNKNOWN ENDPOINT_SNAPSHOT '字节读取器缺失、读取失败或数字前缀不完整。' '确认 hexdump 或 od 可用，并在空闲时重新收集同版状态。'
+        elif [ "$a" != "$b" ] || [ "$size" != 3684 ]; then
             report UNKNOWN ENDPOINT_SNAPSHOT '判停快照变化、截断或布局不符。' '空闲时重新收集同版状态，不从旧日志推断 READY。'
         else
             set -- $a
@@ -523,9 +546,11 @@ if [ "$ENDPOINT" = 1 ] && [ "$BOOT" = boot1 ]; then
                     live=$(awk -v deadline="$deadline" '{now=int($1*1000)%4294967296;d=(deadline-now+4294967296)%4294967296;print (d>0 && d<2147483648)?1:0;exit}' "$SAFE_FILE")
                     identities=$(plan_native_pids "$pool_file" "$active" "$2" "$3" "$deadline");plan_rc=$?
                     if [ "$plan_rc" = 2 ]; then
-                        report UNKNOWN ENDPOINT_SNAPSHOT '活动计划的数字快照在读取中变化。' '在空闲时重新收集同版快照。'
+                        report UNKNOWN ENDPOINT_SNAPSHOT '活动计划读取失败或数字快照在读取中变化。' '确认字节读取器可用，并在空闲时重新收集同版快照。'
                     elif [ "$plan_rc" != 0 ]; then
                         report FAIL ENDPOINT_SNAPSHOT '活动计划的魔数、归属、期限、模式或阶段与池不一致。' '核对同版状态，不能把损坏或旧计划当作就绪。'
+                    elif [ "$live" = 1 ] && [ -z "$ASR_PIDS" ]; then
+                        report UNKNOWN ENDPOINT_SNAPSHOT '缺少可核对的原生 ASR 进程身份快照。' '先核对 ASR_SNAPSHOT，不从判停状态单独推断原生识别就绪。'
                     elif [ "$live" = 1 ] && [ -n "$ASR_PIDS" ] && [ "$identities" = "$ASR_PIDS" ]; then
                         report INFO ENDPOINT_SNAPSHOT '状态头、租约及进程身份相符；仅为快照就绪迹象，不宣称正式 ENDPOINT_READY。' '需要时用首轮静默、停顿续说与新唤醒测试确认实际行为。'
                     else

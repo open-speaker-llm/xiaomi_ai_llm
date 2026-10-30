@@ -44,3 +44,6 @@ build/
 .agents/
 .claude/
 skills-lock.json
+
+# Private on-device backups (configuration, credentials, runtime assets).
+/backups/

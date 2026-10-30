@@ -2,9 +2,24 @@
 # This source is embedded into native_first_client.sh; do not source it on-device.
 
 json_escape() {
-    # od preserves record separators and trailing newlines, unlike line-based sed.
-    # Both utilities are already supplied by the speaker's BusyBox.
-    LC_ALL=C od -An -v -t u1 | LC_ALL=C awk '
+    # Byte readers preserve NUL and trailing newlines. Some speaker BusyBox
+    # builds provide hexdump but no od; both paths emit unsigned decimal bytes.
+    local reader
+    if command -v od >/dev/null 2>&1; then reader=od
+    elif command -v hexdump >/dev/null 2>&1; then reader=hexdump
+    else
+        printf '%s\n' '[JSON] requires od or hexdump' >&2
+        return 1
+    fi
+    {
+        if [ "$reader" = od ]; then LC_ALL=C od -An -v -t u1
+        else LC_ALL=C hexdump -v -e '1/1 "%u\n"'; fi || {
+            printf '%s\n' '[JSON] byte reader failed' >&2
+            # Preserve the producer failure through a POSIX shell pipeline.
+            printf '\nERROR\n'
+        }
+    } | LC_ALL=C awk '
+        $0 == "ERROR" { failed = 1; next }
         { for (i = 1; i <= NF; i++) {
             n = $i + 0;
             if (n == 34) printf "\\\"";
@@ -17,6 +32,7 @@ json_escape() {
             else if (n < 32) printf "\\u%04x", n;
             else printf "%c", n;
         } fflush(); }
+        END { if (failed) exit 1 }
     '
 }
 

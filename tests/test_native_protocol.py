@@ -67,6 +67,46 @@ class NativeProtocolTest(unittest.TestCase):
                 self.assertNotIn(b'\n', out)
                 self.assertNotIn(b'\t', out)
 
+    @unittest.skipUnless(shutil.which('hexdump'), 'hexdump needed for the od-free device path')
+    def test_json_escape_uses_hexdump_when_od_is_unavailable(self):
+        text = '\0' * 64 + ''.join(chr(i) for i in range(32)) + '"\\路径/你好😀\n\n'
+        for name, code in sources().items():
+            for value in (text, ''):
+                with self.subTest(name=name, size=len(value)), tempfile.TemporaryDirectory() as directory:
+                    for command in ('awk', 'hexdump'):
+                        Path(directory, command).symlink_to(shutil.which(command))
+                    run = subprocess.run(['/bin/sh', '-c', code + '\njson_escape'],
+                                         input=value.encode(), capture_output=True, timeout=5,
+                                         env={'PATH': directory, 'LC_ALL': 'C'})
+                    self.assertEqual((run.returncode, run.stderr), (0, b''))
+                    self.assertEqual(json.loads(b'"' + run.stdout + b'"'), value)
+                    self.assertNotIn(b'\n', run.stdout)
+
+    def test_json_escape_without_either_byte_reader_reports_failure(self):
+        for name, code in sources().items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                Path(directory, 'awk').symlink_to(shutil.which('awk'))
+                run = subprocess.run(['/bin/sh', '-c', code + '\njson_escape'],
+                                     input='不应变成空问题'.encode(), capture_output=True, timeout=5,
+                                     env={'PATH': directory, 'LC_ALL': 'C'})
+                self.assertNotEqual(run.returncode, 0)
+                self.assertEqual(run.stdout, b'')
+                self.assertTrue(run.stderr)
+
+    def test_json_escape_propagates_byte_reader_failure(self):
+        for name, code in sources().items():
+            for reader in ('od', 'hexdump'):
+                with self.subTest(name=name, reader=reader), tempfile.TemporaryDirectory() as directory:
+                    Path(directory, 'awk').symlink_to(shutil.which('awk'))
+                    stub = Path(directory, reader)
+                    stub.write_text('#!/bin/sh\nprintf "65\\n"\nexit 23\n')
+                    stub.chmod(0o755)
+                    run = subprocess.run(['/bin/sh', '-c', code + '\njson_escape'],
+                                         input=b'A', capture_output=True, timeout=5,
+                                         env={'PATH': directory, 'LC_ALL': 'C'})
+                    self.assertNotEqual(run.returncode, 0)
+                    self.assertTrue(run.stderr)
+
     def test_unicode_decoder_preserves_literal_escape_and_normalizes_speech_controls(self):
         text = '你好😀 "引号" \\u4f60 /路径\n\t\r\b\f'
         encoded = json.dumps(text)[1:-1] + '\n'
@@ -178,23 +218,25 @@ class NativeProtocolTest(unittest.TestCase):
                         proc.communicate(timeout=3)
 
     @unittest.skipUnless(shutil.which('busybox'), 'BusyBox needed for device utility compatibility')
-    def test_busybox_shell_awk_and_od_obey_the_same_unicode_contract(self):
+    def test_busybox_shell_awk_and_byte_readers_obey_the_same_unicode_contract(self):
         busybox = shutil.which('busybox')
         for name, code in sources().items():
-            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
-                for applet in ('awk', 'od'):
-                    Path(directory, applet).symlink_to(busybox)
-                data = event('你好😀，"引号"。') + 'data: [DONE]\n\n'
-                run = subprocess.run([busybox, 'sh', '-c', code + '\nllm_sse_content "$STATUS"'],
-                                     input=data, text=True, capture_output=True, timeout=5,
-                                     env={'PATH': directory, 'STATUS': directory + '/status'})
-                self.assertEqual((run.returncode, run.stdout, run.stderr), (0, '你好😀，"引号"。\n', ''))
-                self.assertEqual(Path(directory, 'status').read_text().strip(), 'complete')
-                run = subprocess.run([busybox, 'sh', '-c', code + '\njson_escape'],
-                                     input='你好\n\t"\\\n', text=True, capture_output=True, timeout=5,
-                                     env={'PATH': directory})
-                self.assertEqual(run.returncode, 0, run.stderr)
-                self.assertEqual(json.loads('"' + run.stdout + '"'), '你好\n\t"\\\n')
+            for reader in ('od', 'hexdump'):
+                with self.subTest(name=name, reader=reader), tempfile.TemporaryDirectory() as directory:
+                    for applet in ('awk', reader):
+                        Path(directory, applet).symlink_to(busybox)
+                    data = event('你好😀，"引号"。') + 'data: [DONE]\n\n'
+                    run = subprocess.run([busybox, 'sh', '-c', code + '\nllm_sse_content "$STATUS"'],
+                                         input=data, text=True, capture_output=True, timeout=5,
+                                         env={'PATH': directory, 'STATUS': directory + '/status'})
+                    self.assertEqual((run.returncode, run.stdout, run.stderr), (0, '你好😀，"引号"。\n', ''))
+                    self.assertEqual(Path(directory, 'status').read_text().strip(), 'complete')
+                    text = '\0' * 64 + '你好\n\t"\\\n'
+                    run = subprocess.run([busybox, 'sh', '-c', code + '\njson_escape'],
+                                         input=text, text=True, capture_output=True, timeout=5,
+                                         env={'PATH': directory})
+                    self.assertEqual(run.returncode, 0, run.stderr)
+                    self.assertEqual(json.loads('"' + run.stdout + '"'), text)
 
 
 class NativeProtocolEmbedTest(unittest.TestCase):

@@ -1,0 +1,326 @@
+#!/bin/sh
+# Generated, version-bound maintenance transaction. No cloud service is used.
+set -eu
+@CONSTANTS@
+ARMED=0
+GUARD_REQUIRED=0
+LOCKED=0
+
+die() { echo "UPGRADE_BLOCKED: $*" >&2; return 1; }
+hash() { sha256sum "$1" | awk '{print $1}'; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+directory() { [ -d "$1" ] && [ ! -L "$1" ]; }
+matches() { regular "$1" && [ "$(hash "$1")" = "$2" ]; }
+verify_list() {
+    local base="$1" list="$2" expected="$3" value name
+    matches "$list" "$expected" || return 1
+    while read -r value name; do regular "$base/$name" || return 1; done < "$list"
+    (cd "$base" && sha256sum -c "$list" >/dev/null) || return 1
+}
+state() {
+    printf '%s\n' "$1" > "$TXN/.state.new" && mv "$TXN/.state.new" "$TXN/state" && sync
+}
+atomic_copy() {
+    local source="$1" target="$2" mode="$3" next expected
+    expected=${4:-$(hash "$source")}
+    matches "$source" "$expected" || return 1
+    next="$target.upgrade-$ID"
+    [ ! -L "$target" ] && { [ ! -e "$target" ] || [ -f "$target" ]; } || return 1
+    [ ! -L "$next" ] && { [ ! -e "$next" ] || [ -f "$next" ]; } || return 1
+    if [ "$mode" = preserve ]; then cp -p "$source" "$next" || return 1
+    else cp "$source" "$next" && chmod "$mode" "$next" || return 1; fi
+    matches "$next" "$expected" || return 1
+    mv "$next" "$target"
+}
+acquire() {
+    mkdir "$LOCK" || { die 'another maintenance lock exists'; return 1; }
+    LOCKED=1
+    printf '%s\n' "$ID" > "$LOCK/owner"
+}
+release_lock() {
+    if [ "$LOCKED" = 1 ]; then
+        [ "$(cat "$LOCK/owner" 2>/dev/null)" != "$ID" ] || {
+            rm -f "$LOCK/owner"
+            rmdir "$LOCK" || :
+        }
+    fi
+}
+idle() {
+    local file
+    for file in "$TMP/native_first_busy" "$TMP/xiaomi_native_route/armed" "$TMP/xiaomi_native_wake_probe/timer.armed"; do
+        [ ! -e "$file" ] && [ ! -L "$file" ] || return 1
+    done
+}
+firmware() {
+    [ "$(uname -m)" = aarch64 ] || return 1
+    [ "$(awk '$2=="/" {print $1;exit}' "$PROC/mounts")" = /dev/mtdblock5 ] || return 1
+@FIRMWARE_CHECKS@
+}
+check_space() {
+    local data_free tmp_free memory_free
+    data_free=$(df -Pk "$DATA" | awk 'NR==2 {print $4}')
+    tmp_free=$(df -Pk "$TMP" | awk 'NR==2 {print $4}')
+    memory_free=$(awk '/^MemAvailable:/ {print $2;exit}' "$PROC/meminfo")
+    case "$data_free:$tmp_free:$memory_free" in *[!0-9:]*|:*|*::*|*:) return 1;; esac
+    [ "$data_free" -ge "$DATA_REQUIRED_KIB" ] && [ "$tmp_free" -ge "$TMP_REQUIRED_KIB" ] &&
+        [ "$memory_free" -ge "$MEMORY_REQUIRED_KIB" ] || return 1
+}
+preflight() {
+    directory "$DATA" && directory "$TMP" && directory "$STAGE" && directory "$DATA/native_endpoint" || return 1
+    directory "$STAGE/package" && directory "$STAGE/extras" || return 1
+    [ ! -e "$TXN" ] && [ ! -L "$TXN" ] || { die 'transaction already exists'; return 1; }
+    [ ! -e "$DATA/speaker_doctor.sh" ] && [ ! -L "$DATA/speaker_doctor.sh" ] || return 1
+    [ ! -e "$DATA/native_endpoint/release.json" ] && [ ! -L "$DATA/native_endpoint/release.json" ] || return 1
+    verify_list "$STAGE" "$STAGE/stage.sha256" "$STAGE_MANIFEST_HASH" || return 1
+    verify_list "$DATA" "$STAGE/before.sha256" "$BEFORE_HASH" || return 1
+    firmware && idle && check_space || return 1
+    sh "$DATA/native_asr.sh" status >/dev/null && sh "$DATA/native_endpoint/manager.sh" status >/dev/null || return 1
+    echo "UPGRADE_PREFLIGHT_OK data_required_kib=$DATA_REQUIRED_KIB tmp_required_kib=$TMP_REQUIRED_KIB"
+}
+load_helpers() {
+    matches "$TXN/client-functions.sh" "$CLIENT_FUNCTIONS_HASH" &&
+        matches "$TXN/native_route_restore.sh" "$RESTORE_HELPER_HASH" || return 1
+    UPGRADE_HOME="$TXN"
+    export UPGRADE_HOME
+    . "$TXN/client-functions.sh"
+}
+matching_client_pids() {
+    local entry pid command status
+    for entry in "$PROC"/[0-9]*/cmdline; do
+        pid=${entry%/cmdline}; pid=${pid##*/}
+        case "$pid" in ''|0|1|*[!0-9]*) continue;; esac
+        # /proc entries can vanish during normal exit, especially after TERM.
+        # A still-existing but unreadable process must not be assumed stopped.
+        if ! regular "$entry"; then
+            [ ! -e "$PROC/$pid" ] && [ ! -L "$PROC/$pid" ] && continue
+            return 1
+        fi
+        if ! command=$(tr '\000' ' ' < "$entry" 2>/dev/null); then
+            [ ! -e "$PROC/$pid" ] && [ ! -L "$PROC/$pid" ] && continue
+            return 1
+        fi
+        case "$command" in
+            "sh $DATA/native_first_client.sh "|"/bin/sh $DATA/native_first_client.sh ")
+                if ! regular "$PROC/$pid/status"; then
+                    [ ! -e "$PROC/$pid" ] && [ ! -L "$PROC/$pid" ] && continue
+                    return 1
+                fi
+                if ! status=$(awk '/^State:/ {print $2;exit}' "$PROC/$pid/status" 2>/dev/null); then
+                    [ ! -e "$PROC/$pid" ] && [ ! -L "$PROC/$pid" ] && continue
+                    return 1
+                fi
+                case "$status" in
+                    Z|X|x) continue;;
+                    R|S|D|T|t|I|W|K|P) printf '%s\n' "$pid";;
+                    *) [ ! -e "$PROC/$pid" ] && [ ! -L "$PROC/$pid" ] && continue; return 1;;
+                esac;;
+        esac
+    done
+    return 0
+}
+client_start_id() {
+    local pid="$1" command started
+    case "$pid" in ''|0|1|*[!0-9]*) return 1;; esac
+    regular "$PROC/$pid/cmdline" && regular "$PROC/$pid/stat" || return 1
+    command=$(tr '\000' ' ' < "$PROC/$pid/cmdline") || return 1
+    case "$command" in
+        "sh $DATA/native_first_client.sh "|"/bin/sh $DATA/native_first_client.sh ") ;;
+        *) return 1;;
+    esac
+    # stat's comm may contain spaces or ')'; starttime is field 20 after it.
+    started=$(awk '{sub(/^.*\) /, ""); print $20}' "$PROC/$pid/stat") || return 1
+    case "$started" in ''|*[!0-9]*) return 1;; esac
+    printf '%s\n' "$started"
+}
+stop_owned_clients() {
+    local parent parent_start before tracked found=0 count=0 remaining only_parent killed=0
+    before=$(matching_client_pids) || return 1
+    [ -n "$before" ] || return 0
+    regular "$TMP/native_first_client.pid" || return 1
+    parent=$(cat "$TMP/native_first_client.pid")
+    case "$parent" in ''|0|1|*[!0-9]*) return 1;; esac
+    for tracked in $before; do [ "$tracked" != "$parent" ] || found=1; done
+    [ "$found" = 1 ] || { die 'orphan client/watchdog exists without its identified parent'; return 1; }
+    parent_start=$(client_start_id "$parent") || return 1
+    kill -TERM "$parent" || return 1
+    while [ "$count" -lt 60 ]; do
+        remaining=$(matching_client_pids) || return 1
+        [ -n "$remaining" ] || return 0
+        only_parent=1
+        for tracked in $remaining; do [ "$tracked" = "$parent" ] || only_parent=0; done
+        # The pinned legacy client's TERM trap returns to its FIFO read loop.
+        # Finish that parent only after its cleanup removed both owned paths and
+        # every same-command child has exited; never interrupt watchdog cleanup.
+        if [ "$only_parent" = 1 ] && [ "$killed" = 0 ] &&
+            [ ! -e "$TMP/native_first_client.pid" ] && [ ! -L "$TMP/native_first_client.pid" ] &&
+            [ ! -e "$TMP/native_first_event.fifo" ] && [ ! -L "$TMP/native_first_event.fifo" ]; then
+            [ "$(client_start_id "$parent")" = "$parent_start" ] || return 1
+            kill -KILL "$parent" || return 1
+            killed=1
+        fi
+        count=$((count+1)); sleep 0.5
+    done
+    die 'client cleanup or same-command watchdog did not exit within 30 seconds'
+}
+stop_services() {
+    local exe
+    # Old client cleanup stops endpoint before its hook watchdog. Drain first.
+    for exe in "$TMP/xiaomi_native_wake_probe/native_resident_session" "$TMP/xiaomi_native_wake_probe/native_wake_pool"; do
+        [ ! -L "$exe" ] || return 1
+        if [ -x "$exe" ]; then "$exe" stop || return 1; fi
+    done
+    stop_owned_clients || return 1
+    route_stop_native || return 1
+}
+archive_logs() {
+    local archive file
+    archive=$(mktemp -d "$TMP/endpoint-upgrade-log.XXXXXX") || return 1
+    route_archive_log "$ROUTE_INSTRUCTION_LOG" "$archive" || return 1
+    file="$TMP/native_first_client.log"
+    if [ -e "$file" ] || [ -L "$file" ]; then
+        regular "$file" && mv "$file" "$archive/client.log" || return 1
+    fi
+}
+start_services() {
+    # After a cold boot the managed bind overlays no longer exist. Reinstall
+    # them through the pinned manager before launching the restored client.
+    sh "$DATA/native_asr.sh" start >/dev/null || return 1
+    launch_client "$DATA/native_first_client.sh" "$TMP/native_first_client.log" || return 1
+    sh "$DATA/native_asr.sh" status >/dev/null && sh "$DATA/native_endpoint/manager.sh" status >/dev/null
+}
+prepare_recovery() {
+    local name value
+    umask 077
+    mkdir "$TXN" "$TXN/old" "$TXN/old/native_endpoint" || return 1
+    for name in before.sha256 old-small.sha256 after.sha256 committed.sha256 rollback-current.sha256 client-functions.sh native_route_restore.sh guard.sh; do
+        cp "$STAGE/$name" "$TXN/$name" || return 1
+    done
+    cp "$STAGE/transaction.sh" "$TXN/restore.sh" || return 1
+    cp "$STAGE/extras/init.sh" "$TXN/new-init.sh" || return 1
+    while read -r value name; do cp -p "$DATA/$name" "$TXN/old/$name" || return 1; done < "$TXN/old-small.sha256"
+    chmod 700 "$TXN/restore.sh" "$TXN/guard.sh" || return 1
+    verify_list "$TXN/old" "$TXN/old-small.sha256" "$OLD_SMALL_HASH" || return 1
+    matches "$TXN/guard.sh" "$GUARD_HASH" && matches "$TXN/new-init.sh" "$NEW_INIT_HASH" || return 1
+    # The persistent backup deliberately omits the 10 MiB archive. A verified
+    # private Mac copy exists; the /tmp copy covers recoverable in-session faults.
+    [ ! -e "$OLD_RUNTIME" ] && [ ! -L "$OLD_RUNTIME" ] || return 1
+    cp "$DATA/native_endpoint/runtime.tar.gz" "$OLD_RUNTIME" || return 1
+    matches "$OLD_RUNTIME" "$OLD_RUNTIME_HASH" || return 1
+    state PREPARED || return 1
+}
+restore_transaction() {
+    local runtime="$1" value name current
+    ARMED=0
+    directory "$DATA" && directory "$TMP" && directory "$DATA/native_endpoint" &&
+        directory "$TXN" && directory "$TXN/old" && directory "$TXN/old/native_endpoint" || return 1
+    verify_list "$TXN/old" "$TXN/old-small.sha256" "$OLD_SMALL_HASH" || return 1
+    matches "$runtime" "$OLD_RUNTIME_HASH" || return 1
+    { matches "$DATA/native_first.env" "$ENV_HASH" || matches "$DATA/native_first.env" "$AFTER_ENV_HASH"; } &&
+        matches "$DATA/ettsc" "$ETTSC_HASH" || return 1
+    matches "$TXN/guard.sh" "$GUARD_HASH" || return 1
+    firmware && idle || return 1
+    current=$(cat "$TXN/state")
+    case "$current" in
+        COMMITTED)
+            verify_list "$DATA" "$TXN/rollback-current.sha256" "$ROLLBACK_CURRENT_HASH" || return 1
+            matches "$DATA/init.sh" "$NEW_INIT_HASH" || matches "$DATA/init.sh" "$GUARD_HASH" || return 1;;
+        PREPARED|APPLYING|RECOVERY_REQUIRED|ROLLED_BACK) ;;
+        *) return 1;;
+    esac
+    if [ -e "$DATA/speaker_doctor.sh" ] || [ -L "$DATA/speaker_doctor.sh" ]; then
+        matches "$DATA/speaker_doctor.sh" "$DOCTOR_HASH" || return 1
+    fi
+    load_helpers || return 1
+    GUARD_REQUIRED=1
+    atomic_copy "$TXN/guard.sh" "$DATA/init.sh" 700 "$GUARD_HASH" && state APPLYING || return 1
+    stop_services && archive_logs || return 1
+    # Boot guard and both backup proofs precede the only non-atomic file write.
+    regular "$DATA/native_endpoint/runtime.tar.gz" || return 1
+    cp "$runtime" "$DATA/native_endpoint/runtime.tar.gz" &&
+        matches "$DATA/native_endpoint/runtime.tar.gz" "$OLD_RUNTIME_HASH" || return 1
+    while read -r value name; do
+        [ "$name" != init.sh ] || continue
+        atomic_copy "$TXN/old/$name" "$DATA/$name" preserve || return 1
+    done < "$TXN/old-small.sha256"
+    rm -f "$DATA/speaker_doctor.sh" || return 1
+    # init remains guarded until all restored payloads are checked and started.
+    matches "$TXN/old/init.sh" "$OLD_INIT_HASH" || return 1
+    (cd "$DATA/native_endpoint" && sha256sum -c package.sha256 >/dev/null) || return 1
+    sync && start_services || return 1
+    atomic_copy "$TXN/old/init.sh" "$DATA/init.sh" preserve || return 1
+    verify_list "$DATA" "$TXN/before.sha256" "$BEFORE_HASH" || return 1
+    state ROLLED_BACK || return 1
+    GUARD_REQUIRED=0
+    echo "UPGRADE_ROLLED_BACK transaction=$ID"
+}
+apply_transaction() {
+    local name value
+    preflight
+    prepare_recovery
+    load_helpers
+    idle
+    ARMED=1
+    GUARD_REQUIRED=1
+    atomic_copy "$TXN/guard.sh" "$DATA/init.sh" 700 "$GUARD_HASH"
+    state APPLYING
+    stop_services
+    archive_logs
+    regular "$DATA/native_endpoint/runtime.tar.gz"
+    cp "$STAGE/package/runtime.tar.gz" "$DATA/native_endpoint/runtime.tar.gz"
+    matches "$DATA/native_endpoint/runtime.tar.gz" "$NEW_RUNTIME_HASH"
+    for name in lifecycle manager.sh native_asr.so native_first_client.sh; do
+        atomic_copy "$STAGE/package/$name" "$DATA/native_endpoint/$name" 700
+    done
+    atomic_copy "$STAGE/package/native_asr.so" "$DATA/native_asr.so" 755
+    atomic_copy "$STAGE/package/native_first_client.sh" "$DATA/native_first_client.sh" 755
+    atomic_copy "$STAGE/extras/native_asr_ctl" "$DATA/native_asr_ctl" 755
+    atomic_copy "$STAGE/extras/speaker_doctor.sh" "$DATA/speaker_doctor.sh" 755
+    if [ "$ENABLE_FOLLOWUP_CONTROLS" = 1 ]; then
+        atomic_copy "$STAGE/extras/native_first.env" "$DATA/native_first.env" 600 "$AFTER_ENV_HASH"
+    fi
+    atomic_copy "$STAGE/package/package.sha256" "$DATA/native_endpoint/package.sha256" 600
+    verify_list "$DATA" "$TXN/committed.sha256" "$COMMITTED_HASH"
+    sync
+    start_services
+    state COMMITTED
+    atomic_copy "$TXN/new-init.sh" "$DATA/init.sh" 755 "$NEW_INIT_HASH"
+    verify_list "$DATA" "$TXN/after.sha256" "$AFTER_HASH"
+    sync
+    ARMED=0
+    GUARD_REQUIRED=0
+    echo "UPGRADE_COMMITTED transaction=$ID backup=$TXN"
+}
+on_exit() {
+    local result=$? rollback_requested="$ARMED"
+    trap - EXIT HUP INT TERM
+    if [ "$result" -ne 0 ] && { [ "$ARMED" = 1 ] || [ "$GUARD_REQUIRED" = 1 ]; }; then
+        # A failure can happen after publishing the normal init. Re-establish
+        # the durable guard before attempting a rollback that may itself fail.
+        if ! atomic_copy "$TXN/guard.sh" "$DATA/init.sh" 700 "$GUARD_HASH" || ! sync; then
+            echo "UPGRADE_BOOT_GUARD_UNCONFIRMED: manual recovery required" >&2
+        elif [ "$rollback_requested" = 1 ] && restore_transaction "$OLD_RUNTIME"; then :
+        else
+            # Manual rollback and a failed automatic rollback can publish the
+            # old init before their final verification fails. Guard them too,
+            # without recursively attempting another rollback.
+            if atomic_copy "$TXN/guard.sh" "$DATA/init.sh" 700 "$GUARD_HASH" && sync; then
+                state RECOVERY_REQUIRED || :
+                echo "UPGRADE_RECOVERY_REQUIRED: boot guard retained; restore the verified old runtime from the Mac backup" >&2
+            else
+                echo "UPGRADE_BOOT_GUARD_UNCONFIRMED: manual recovery required" >&2
+            fi
+        fi
+    fi
+    release_lock
+    exit "$result"
+}
+case "${1:-}" in
+    preflight) preflight;;
+    apply) trap on_exit EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; acquire; apply_transaction;;
+    restore)
+        [ "$#" -eq 2 ] || { echo 'usage: restore.sh restore /absolute/path/to/verified-old-runtime.tar.gz' >&2; exit 64; }
+        case "$2" in /*) ;; *) exit 64;; esac
+        trap on_exit EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+        acquire; restore_transaction "$2";;
+    *) echo 'usage: transaction.sh preflight|apply|restore /absolute/old-runtime.tar.gz' >&2; exit 64;;
+esac
