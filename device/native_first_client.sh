@@ -65,6 +65,7 @@ FOLLOWUP_MAX_SECONDS="${FOLLOWUP_MAX_SECONDS:-15}"
 FOLLOWUP_ENABLED="${FOLLOWUP_ENABLED:-1}"
 # 仅在已经进入追问后识别独立结束语；默认保持原有模型处理行为。
 FOLLOWUP_EXIT_ENABLED="${FOLLOWUP_EXIT_ENABLED:-0}"
+FOLLOWUP_RESET_ENABLED="${FOLLOWUP_RESET_ENABLED:-0}"
 FOLLOWUP_MODE="${FOLLOWUP_MODE:-local_record}"
 FOLLOWUP_THRESHOLD="${FOLLOWUP_THRESHOLD:-180}"
 FOLLOWUP_START_HITS="${FOLLOWUP_START_HITS:-1}"
@@ -147,6 +148,8 @@ LLM_REASONING_EFFORT="${LLM_REASONING_EFFORT:-low}" # GLM-5.3-Flash 始终思考
 LLM_DIRECT_TIMEOUT="${LLM_DIRECT_TIMEOUT:-40}"
 LLM_HISTORY_TURNS="${LLM_HISTORY_TURNS:-6}"
 LLM_HISTORY_DIR="${LLM_HISTORY_DIR:-/tmp/native_first_llm_hist}"
+LLM_HISTORY_MAX_SESSIONS="${LLM_HISTORY_MAX_SESSIONS:-16}"
+LLM_HISTORY_MAX_BYTES="${LLM_HISTORY_MAX_BYTES:-65536}"
 LLM_SYSTEM_PROMPT="${LLM_SYSTEM_PROMPT:-你是一个语音助手，请用纯文本口语直接回答，不要复述问题，不要使用任何 Markdown 格式或列表，说完整的句子。}"
 # TTS 引擎选择：
 #   server（默认）= Mac TTS 微服务（EdgeTTS，端点切句流式）→ aplay；
@@ -968,12 +971,33 @@ extract_first_value() {
     grep -o "${key}\\\\[^,}]*: [^,}]*" | head -1 | awk -F'\\\\\\"' '{print $3}' | sed 's/\\*$//'
 }
 
+# BEGIN GENERATED NATIVE PROTOCOL
+# Pure stdin/stdout protocol functions. No configuration, device or network I/O.
+# This source is embedded into native_first_client.sh; do not source it on-device.
+
 json_escape() {
-    sed 's/\\/\\\\/g; s/"/\\"/g'
+    # od preserves record separators and trailing newlines, unlike line-based sed.
+    # Both utilities are already supplied by the speaker's BusyBox.
+    LC_ALL=C od -An -v -t u1 | LC_ALL=C awk '
+        { for (i = 1; i <= NF; i++) {
+            n = $i + 0;
+            if (n == 34) printf "\\\"";
+            else if (n == 92) printf "\\\\";
+            else if (n == 8) printf "\\b";
+            else if (n == 9) printf "\\t";
+            else if (n == 10) printf "\\n";
+            else if (n == 12) printf "\\f";
+            else if (n == 13) printf "\\r";
+            else if (n < 32) printf "\\u%04x", n;
+            else printf "%c", n;
+        } fflush(); }
+    '
 }
 
 json_unicode_decode() {
-    awk '
+    # One escaped JSON string per line. Speech text normalizes CR/LF/tab to
+    # spaces and omits the other control characters, keeping one output record.
+    LC_ALL=C awk '
 function hv(c) { return index("0123456789abcdef", tolower(c)) - 1 }
 function hex4(h,    j, v, n) {
     if (length(h) != 4) return -1;
@@ -986,7 +1010,9 @@ function hex4(h,    j, v, n) {
     return n;
 }
 function emit(n) {
-    if (n < 128) printf "%c", n;
+    if (n == 9 || n == 10 || n == 13) printf " ";
+    else if (n < 32) return;
+    else if (n < 128) printf "%c", n;
     else if (n < 2048) printf "%c%c", 192 + int(n / 64), 128 + (n % 64);
     else if (n < 65536) printf "%c%c%c", 224 + int(n / 4096), 128 + (int(n / 64) % 64), 128 + (n % 64);
     else printf "%c%c%c%c", 240 + int(n / 262144), 128 + (int(n / 4096) % 64), 128 + (int(n / 64) % 64), 128 + (n % 64);
@@ -1016,6 +1042,7 @@ function emit(n) {
         printf "%s", c;
     }
     printf "\n";
+    fflush();
 }'
 }
 
@@ -1023,16 +1050,211 @@ json_text_unescape() {
     json_unicode_decode
 }
 
-# 日志里的 text 是 JSON 字符串；转义引号不能被当作字符串结束。
+# Xiaomi logs may have a timestamp before JSON. Return the first text string
+# without treating escaped quotes as the end; the caller decodes its contents.
 json_text_field() {
-    awk '
+    LC_ALL=C awk '
         match($0, /"text"[ \t]*:[ \t]*"([^"\\]|\\.)*"/) {
             s = substr($0, RSTART, RLENGTH);
             sub(/^"text"[ \t]*:[ \t]*"/, "", s);
             print substr(s, 1, length(s) - 1);
+            fflush();
         }
     '
 }
+
+# OpenAI-compatible SSE -> speech text. Validate a complete JSON event before
+# publishing its content; memory is bounded per event, never by the whole reply.
+# Existing callers read complete/incomplete from $1 after the pipe closes.
+llm_sse_content() {
+    LC_ALL=C awk -v status_file="${1:-}" '
+function bad() { parse_error = 2; return 0 }
+function need() { parse_error = 1; return 0 }
+function ws() { while (pos <= size && substr(src, pos, 1) ~ /[ \t\r\n]/) pos++ }
+function hex4(h,    i,n,v) {
+    if (length(h) != 4) return -1;
+    n = 0;
+    for (i = 1; i <= 4; i++) {
+        v = index("0123456789abcdef", tolower(substr(h, i, 1))) - 1;
+        if (v < 0) return -1;
+        n = n * 16 + v;
+    }
+    return n;
+}
+function string_value(    begin,c,e,n,low) {
+    if (substr(src, pos, 1) != "\"") return bad();
+    begin = ++pos;
+    while (pos <= size) {
+        c = substr(src, pos++, 1);
+        if (c == "\"") { raw = substr(src, begin, pos - begin - 1); return 1 }
+        if (c in controls) return bad();
+        if (c != "\\") continue;
+        if (pos > size) return need();
+        e = substr(src, pos++, 1);
+        if (e == "u") {
+            if (pos + 3 > size) return need();
+            n = hex4(substr(src, pos, 4)); pos += 4;
+            if (n < 0) return bad();
+            if (n >= 55296 && n <= 56319) {
+                if (pos + 5 > size) return need();
+                if (substr(src, pos, 2) != "\\u") return bad();
+                low = hex4(substr(src, pos + 2, 4)); pos += 6;
+                if (low < 56320 || low > 57343) return bad();
+            } else if (n >= 56320 && n <= 57343) return bad();
+        } else if (e !~ /^["\\\/bfnrt]$/) return bad();
+    }
+    return need();
+}
+function key_name(s,    i,c,n,out) {
+    out = "";
+    for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1);
+        if (c == "\\") {
+            c = substr(s, ++i, 1);
+            if (c == "u") {
+                n = hex4(substr(s, i + 1, 4)); i += 4;
+                c = (n < 128 ? sprintf("%c", n) : "?");
+            }
+        }
+        out = out c;
+    }
+    return out;
+}
+function field_role(role,key) {
+    if (role == "root" && key == "choices") return "choices";
+    if (role == "root" && key == "error") return "error";
+    if (role == "choice" && key == "delta") return "delta";
+    if (role == "choice" && key == "index") return "index";
+    if (role == "choice" && key == "finish_reason") return "finish";
+    if (role == "delta" && key == "content") return "content";
+    return "ignore";
+}
+function value(role,depth,    c,key,child,count,token,r) {
+    if (depth > 32) return bad();
+    ws(); if (pos > size) return need();
+    c = substr(src, pos, 1);
+    if (role == "root" && c != "{") return bad();
+    if (role == "choices" && c != "[") return bad();
+    if (role == "choice" && c != "{") return bad();
+    if (role == "index" && c !~ /^[0-9]$/) return bad();
+    if (role == "delta" && c != "{" && substr(src,pos,4) != "null") return bad();
+    if ((role == "content" || role == "finish") && c != "\"" && substr(src,pos,4) != "null") return bad();
+    if (role == "error" && substr(src,pos,4) != "null") event_error = 1;
+    if (c == "{") {
+        pos++; ws(); if (pos > size) return need();
+        if (substr(src,pos,1) == "}") { pos++; return 1 }
+        while (1) {
+            if (!string_value()) return 0;
+            key = key_name(raw); ws();
+            if (pos > size) return need();
+            if (substr(src,pos++,1) != ":") return bad();
+            child = field_role(role,key);
+            if (!value(child,depth+1)) return 0;
+            ws(); if (pos > size) return need();
+            c = substr(src,pos++,1);
+            if (c == "}") return 1;
+            if (c != ",") return bad();
+            ws(); if (pos > size) return need();
+        }
+    }
+    if (c == "[") {
+        pos++; ws(); count = 0; if (pos > size) return need();
+        if (substr(src,pos,1) == "]") { pos++; return 1 }
+        while (1) {
+            if (role == "choices") {
+                choice_text = ""; choice_finish = ""; choice_index = count;
+                choice_content_seen = choice_finish_seen = choice_index_seen = 0;
+            }
+            if (!value(role == "choices" ? "choice" : "ignore",depth+1)) return 0;
+            if (role == "choices" && choice_index == 0) {
+                if (event_choice_seen++) return bad();
+                event_text = choice_text;
+                if (choice_finish == "stop") event_complete = 1;
+                else if (choice_finish != "") event_error = 1;
+            }
+            count++; ws(); if (pos > size) return need();
+            c = substr(src,pos++,1);
+            if (c == "]") return 1;
+            if (c != ",") return bad();
+        }
+    }
+    if (c == "\"") {
+        if (!string_value()) return 0;
+        if (role == "content") {
+            if (choice_content_seen++) return bad();
+            choice_text = raw;
+        } else if (role == "finish") {
+            if (choice_finish_seen++) return bad();
+            choice_finish = key_name(raw);
+            if (choice_finish == "") event_error = 1;
+        } else if (role == "index") return bad();
+        return 1;
+    }
+    r = substr(src,pos);
+    if (r ~ /^(null|true|false)/) {
+        match(r,/^(null|true|false)/); token = substr(r,1,RLENGTH); pos += RLENGTH;
+        if (role == "index" || ((role == "content" || role == "finish") && token != "null")) return bad();
+        return 1;
+    }
+    if (match(r,/^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?/)) {
+        token = substr(r,1,RLENGTH); pos += RLENGTH;
+        if (role == "index") {
+            if (choice_index_seen++ || token !~ /^(0|[1-9][0-9]*)$/) return bad();
+            choice_index = token + 0;
+        }
+        return 1;
+    }
+    return bad();
+}
+function consume(    ok) {
+    src = buffer; size = length(src); pos = 1; parse_error = 0;
+    event_error = event_complete = event_choice_seen = 0; event_text = "";
+    ok = value("root",0); ws();
+    if (!ok) return parse_error;
+    if (pos <= size) return 2;
+    if (event_error || (finished && event_text != "")) { failed = 1; return 0 }
+    if (event_text != "") { print event_text; fflush() }
+    if (event_complete) { complete = 1; finished = 1 }
+    return 0;
+}
+BEGIN { for (i=0; i<32; i++) controls[sprintf("%c",i)] = 1 }
+{
+    sub(/\r$/, "");
+    if ($0 == "") {
+        if (buffer != "") failed = 1;
+        buffer = ""; event_type = ""; next;
+    }
+    if ($0 ~ /^:/) next;
+    if ($0 ~ /^event:/) {
+        event_type = $0; sub(/^event:[ \t]*/, "", event_type);
+        if (event_type == "error") failed = 1;
+        next;
+    }
+    if ($0 !~ /^data:/) next;
+    if (failed) next;
+    data = $0; sub(/^data: ?/, "", data);
+    if (data ~ /^[ \t]*\[DONE\][ \t]*$/) {
+        if (buffer != "") failed = 1;
+        else complete = done = 1;
+        next;
+    }
+    if (done) { failed = 1; next }
+    buffer = (buffer == "" ? data : buffer "\n" data);
+    if (length(buffer) > 262144) { failed = 1; buffer = ""; next }
+    result = consume();
+    if (result == 2) failed = 1;
+    if (result != 1) buffer = "";
+}
+END {
+    if (buffer != "") failed = 1;
+    if (status_file != "") {
+        print (complete && !failed ? "complete" : "incomplete") > status_file;
+        close(status_file);
+    }
+}
+    ' | json_unicode_decode
+}
+# END GENERATED NATIVE PROTOCOL
 
 reset_native_result() {
     RESULT_SOURCE=""
@@ -1325,7 +1547,8 @@ extract_aivs_latest_final_text_after() {
 
     text=$(printf '%s\n' "$raw_text" | json_text_unescape)
     [ -n "$text" ] || return 1
-    if [ "$text" = "$ignore_text" ] && ! is_followup_exit_command "$text"; then
+    if [ "$text" = "$ignore_text" ] && ! is_followup_exit_command "$text" &&
+        ! is_followup_reset_command "$text"; then
         return 1
     fi
 
@@ -1758,9 +1981,15 @@ record_llm_query() {
 }
 
 is_recent_duplicate_llm_query() {
-    local text="$1"
+    local text="$1" session_id="${2:-}"
     local last_text last_ts now age
 
+    # A confirmed topic reset owns exactly its next query. Keep the shared wake
+    # cache intact and resume the normal duplicate policy after that query.
+    if [ -n "$session_id" ] && [ "$session_id" = "${FOLLOWUP_RESET_QUERY_SESSION:-}" ]; then
+        FOLLOWUP_RESET_QUERY_SESSION=""
+        return 1
+    fi
     [ "$SUPPRESS_DUP_SECONDS" -gt 0 ] 2>/dev/null || return 1
     [ -f "$LAST_LLM_QUERY_FILE" ] || return 1
     [ -f "$LAST_LLM_TS_FILE" ] || return 1
@@ -2062,13 +2291,160 @@ tts_play_text() {
 }
 
 # 构造 messages JSON（system + 最近历史 + 当前 user），输出不含外层方括号
+llm_history_limits() {
+    LLM_HISTORY_KEEP="${LLM_HISTORY_TURNS:-6}"
+    LLM_HISTORY_CAP="${LLM_HISTORY_MAX_SESSIONS:-16}"
+    LLM_HISTORY_BYTES="${LLM_HISTORY_MAX_BYTES:-65536}"
+    case "$LLM_HISTORY_KEEP:$LLM_HISTORY_CAP:$LLM_HISTORY_BYTES" in
+        *[!0-9:]*|:*|*::*|*:) return 1;;
+    esac
+    [ "${#LLM_HISTORY_KEEP}" -le 3 ] && [ "$LLM_HISTORY_KEEP" -le 100 ] &&
+        [ "${#LLM_HISTORY_CAP}" -le 2 ] && [ "$LLM_HISTORY_CAP" -ge 1 ] && [ "$LLM_HISTORY_CAP" -le 64 ] &&
+        [ "${#LLM_HISTORY_BYTES}" -le 7 ] && [ "$LLM_HISTORY_BYTES" -ge 1024 ] &&
+        [ "$LLM_HISTORY_BYTES" -le 1048576 ]
+}
+
+llm_history_safe_dir() {
+    local remaining="$1" part path=""
+    case "$remaining" in /) return 1;; /*) remaining=${remaining#/};; *) return 1;; esac
+    while [ -n "$remaining" ]; do
+        part=${remaining%%/*}
+        if [ "$remaining" = "$part" ]; then remaining=""; else remaining=${remaining#*/}; fi
+        case "$part" in ''|.|..) return 1;; esac
+        path="$path/$part"
+        [ ! -L "$path" ] || return 1
+    done
+}
+
+llm_history_prepare() {
+    local sid="$1"
+    case "$sid" in ''|*[!A-Za-z0-9_-]*) return 1;; esac
+    [ "${#sid}" -le 128 ] && llm_history_limits &&
+        llm_history_safe_dir "$LLM_HISTORY_DIR" || return 1
+    if [ ! -d "$LLM_HISTORY_DIR" ]; then
+        (umask 077; mkdir -p "$LLM_HISTORY_DIR") || return 1
+    fi
+    LLM_HISTORY_STORE="$LLM_HISTORY_DIR/.native_first_history_v1"
+    [ ! -L "$LLM_HISTORY_STORE" ] || return 1
+    if [ ! -e "$LLM_HISTORY_STORE" ]; then
+        (umask 077; mkdir "$LLM_HISTORY_STORE" &&
+            printf 'NATIVE_FIRST_HISTORY_V1\n' > "$LLM_HISTORY_STORE/.owner") || return 1
+    fi
+    [ -d "$LLM_HISTORY_STORE" ] && [ ! -L "$LLM_HISTORY_STORE/.owner" ] &&
+        [ -f "$LLM_HISTORY_STORE/.owner" ] || return 1
+    [ "$(wc -c < "$LLM_HISTORY_STORE/.owner")" -eq 24 ] &&
+        [ "$(LC_ALL=C tr -d '\000' < "$LLM_HISTORY_STORE/.owner" | wc -c)" -eq 24 ] || return 1
+    awk 'NR==1 && $0=="NATIVE_FIRST_HISTORY_V1"{ok=1} END{exit !(ok && NR==1)}' \
+        "$LLM_HISTORY_STORE/.owner" || return 1
+    LLM_HISTORY_FILE="$LLM_HISTORY_STORE/h_$sid"
+    [ ! -L "$LLM_HISTORY_FILE" ] || return 1
+    [ ! -e "$LLM_HISTORY_FILE" ] || llm_history_owned "$LLM_HISTORY_FILE"
+}
+
+llm_history_owned() {
+    local bytes without_nul
+    [ ! -L "$1" ] && [ -f "$1" ] || return 1
+    bytes=$(wc -c < "$1") || return 1
+    [ "$bytes" -ge 5 ] && [ "$bytes" -le 1048576 ] || return 1
+    # Some target awk/shell implementations truncate raw NUL silently. Check
+    # bytes before parsing or command substitution, for reads and GC alike.
+    without_nul=$(LC_ALL=C tr -d '\000' < "$1" | wc -c) || return 1
+    [ "$without_nul" -eq "$bytes" ] || return 1
+    llm_history_filter 0 < "$1" >/dev/null
+}
+
+# Validate whole pairs before emitting anything. Never truncate a JSON string or
+# retain a dangling user turn. The byte cap includes the on-disk format header.
+llm_history_filter() {
+    LC_ALL=C awk -v keep="$LLM_HISTORY_KEEP" -v cap="$LLM_HISTORY_BYTES" -v header="$1" '
+        function valid(s, i,c,e) {
+            for(i=1;i<=length(s);i++) {
+                c=substr(s,i,1);
+                if(c=="\"" || c~/[\001-\037]/) return 0;
+                if(c=="\\") {
+                    e=substr(s,++i,1);
+                    if(e=="u") {
+                        if(substr(s,i+1,4)!~/^[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]$/) return 0;
+                        i+=4;
+                    } else if(e=="" || index("\"\\/bfnrt",e)==0) return 0;
+                }
+            }
+            return 1;
+        }
+        NR==1 {if($0!="NFH1") bad=1;next}
+        {
+            at=index($0,"\t");role=substr($0,1,at-1);value=substr($0,at+1);
+            if(!at || !valid(value)) {bad=1;next}
+            if(!pending && role=="user") {pending=$0;next}
+            if(pending && role=="assistant") {pairs[++n]=pending "\n" $0 "\n";pending="";next}
+            bad=1;
+        }
+        END {
+            if(bad || pending) exit 1;
+            if(header && keep && n && length(pairs[n])+5>cap) exit 1;
+            start=n-keep+1;if(start<1)start=1;
+            bytes=5;for(i=start;i<=n;i++)bytes+=length(pairs[i]);
+            while(bytes>cap && start<=n)bytes-=length(pairs[start++]);
+            if(header)printf "NFH1\n";
+            for(i=start;i<=n;i++)printf "%s",pairs[i];
+        }'
+}
+
+llm_history_load() {
+    llm_history_prepare "$1" || return 1
+    [ "$LLM_HISTORY_KEEP" -ne 0 ] || return 0
+    [ -f "$LLM_HISTORY_FILE" ] || return 0
+    # prepare validates the whole bounded file before any text reaches the shell.
+    llm_history_filter 0 < "$LLM_HISTORY_FILE"
+}
+
+llm_history_gc() {
+    local active="$1" file name kept=1 listing
+    llm_history_prepare "$active" || return 1
+    listing=$(ls -1t "$LLM_HISTORY_STORE"/h_* 2>/dev/null) || return 0
+    while IFS= read -r file; do
+        [ "${file%/*}" = "$LLM_HISTORY_STORE" ] || continue
+        name=${file##*/};name=${name#h_}
+        case "$name" in ''|*[!A-Za-z0-9_-]*) continue;; esac
+        [ "${#name}" -le 128 ] && llm_history_owned "$file" || continue
+        [ "$name" != "$active" ] || continue
+        if [ "$kept" -lt "$LLM_HISTORY_CAP" ]; then kept=$((kept+1))
+        else rm -f "$file" || return 1; fi
+    done <<EOF
+$listing
+EOF
+}
+
+llm_history_commit() {
+    local sid="$1" user="$2" answer="$3" previous encoded_user encoded_answer staging
+    llm_history_prepare "$sid" || return 1
+    [ "$LLM_HISTORY_KEEP" -ne 0 ] || return 0
+    previous=$(llm_history_load "$sid") || return 1
+    encoded_user=$(printf '%s' "$user" | json_escape) || return 1
+    encoded_answer=$(printf '%s' "$answer" | json_escape) || return 1
+    staging=$(umask 077; mktemp "$LLM_HISTORY_STORE/.next.XXXXXX") || return 1
+    if ! {
+        printf 'NFH1\n'
+        [ -z "$previous" ] || printf '%s\n' "$previous"
+        printf 'user\t%s\nassistant\t%s\n' "$encoded_user" "$encoded_answer"
+    } | llm_history_filter 1 > "$staging"; then
+        rm -f "$staging"; return 1
+    fi
+    # Rename publishes the pair together. Refuse a replaced/foreign destination.
+    if ! llm_history_prepare "$sid" || ! mv -f "$staging" "$LLM_HISTORY_FILE"; then
+        rm -f "$staging"; return 1
+    fi
+    llm_history_gc "$sid"
+}
+
 llm_build_messages() {
     local sid="$1"
     local user="$2"
-    local histfile="$LLM_HISTORY_DIR/$sid"
+    local history
+    history=$(llm_history_load "$sid") || return 1
     printf '{"role":"system","content":"%s"}' "$(printf '%s' "$LLM_SYSTEM_PROMPT" | json_escape)"
-    if [ -f "$histfile" ]; then
-        tail -n $((LLM_HISTORY_TURNS * 2)) "$histfile" | while IFS="$(printf '\t')" read -r role etext; do
+    if [ -n "$history" ]; then
+        printf '%s\n' "$history" | while IFS="$(printf '\t')" read -r role etext; do
             [ -n "$role" ] || continue
             printf ',{"role":"%s","content":"%s"}' "$role" "$etext"
         done
@@ -2087,38 +2463,6 @@ llm_build_request() {
     esac
 }
 
-# 提取 SSE 的 content 字符串，保留转义引号；换行转为空格以便逐句播报。
-llm_sse_content() {
-    awk -v status_file="${1:-}" '
-        /^data:/ {
-            if ($0 ~ /^data:[ \t]*\[DONE\][ \t\r]*$/ || $0 ~ /"finish_reason"[ \t]*:[ \t]*"stop"/) complete = 1;
-            if ($0 ~ /"error"[ \t]*:/ || ($0 ~ /"finish_reason"[ \t]*:[ \t]*"[^"]+"/ && $0 !~ /"finish_reason"[ \t]*:[ \t]*"stop"/)) failed = 1;
-            if (!match($0, /"content"[ \t]*:[ \t]*"([^"\\]|\\.)*"/)) next
-            s = substr($0, RSTART, RLENGTH)
-            sub(/^"content"[ \t]*:[ \t]*"/, "", s)
-            s = substr(s, 1, length(s) - 1)
-            out = ""
-            for (i = 1; i <= length(s); i++) {
-                c = substr(s, i, 1)
-                if (c == "\\" && i < length(s)) {
-                    c = substr(s, ++i, 1)
-                    if (c == "n" || c == "r" || c == "t") c = " "
-                    else if (c == "b" || c == "f") c = ""
-                    else if (c != "\\" && c != "\"" && c != "/") c = "\\" c
-                }
-                out = out c
-            }
-            if (length(out)) { print out; fflush() }
-        }
-        END {
-            if (status_file != "") {
-                print (complete && !failed ? "complete" : "incomplete") > status_file;
-                close(status_file);
-            }
-        }
-    '
-}
-
 # 直连 LLM 流式取回答全文（只取 content）。结果存 LLM_DIRECT_ANSWER。
 llm_direct_answer() {
     local sid="$1"
@@ -2129,8 +2473,10 @@ llm_direct_answer() {
         log "[LLM-NATIVE] 缺少 LLM_API_KEY（在 /data/native_first.env 配对应后端的 API key）"
         return 1
     fi
-    mkdir -p "$LLM_HISTORY_DIR"
-    messages=$(llm_build_messages "$sid" "$user")
+    messages=$(llm_build_messages "$sid" "$user") || {
+        log "[HISTORY] 配置、路径或历史格式不可用，未提交模型请求"
+        return 1
+    }
     req=$(llm_build_request "$messages")
 
     # 流式读取：记录首个 content 到达时刻（TTFT）+ 逐片累积答案。
@@ -2306,11 +2652,14 @@ llm_stream_answer_and_play() {
         return 1
     fi
     rm -rf "$wd" 2>/dev/null
-    mkdir -p "$wd" "$LLM_HISTORY_DIR"
+    mkdir -p "$wd"
     : > "$wd/segs"
     : > "$wd/native_segs"
 
-    messages=$(llm_build_messages "$sid" "$user")
+    messages=$(llm_build_messages "$sid" "$user") || {
+        log "[HISTORY] 配置、路径或历史格式不可用，未提交模型请求"
+        return 1
+    }
     req=$(llm_build_request "$messages")
     t_req=$(monotonic_ms)
 
@@ -2383,10 +2732,10 @@ llm_stream_answer_and_play() {
 
     # 每句均已由消费者按顺序播完（含原生兜底）；不再重复播报整段。
 
-    {
-        printf 'user\t%s\n' "$(printf '%s' "$user" | json_escape)"
-        printf 'assistant\t%s\n' "$(printf '%s' "$LLM_DIRECT_ANSWER" | json_escape)"
-    } >> "$LLM_HISTORY_DIR/$sid"
+    llm_history_commit "$sid" "$user" "$LLM_DIRECT_ANSWER" || {
+        log "[HISTORY] 完整回答未能安全保存，结束本轮"
+        return 1
+    }
     return 0
 }
 
@@ -2401,7 +2750,7 @@ send_text_native() {
         log "[LLM-NATIVE] 无 query，跳过"
         return 1
     fi
-    if is_recent_duplicate_llm_query "$text"; then
+    if is_recent_duplicate_llm_query "$text" "$session_id"; then
         log "[DUP] suppress duplicate fallback ${SUPPRESS_DUP_SECONDS}s 内重复: $text"
         resume_native_player 1
         return 0
@@ -2464,10 +2813,12 @@ send_text_native() {
         finish_llm_playback
         return 1
     fi
-    {
-        printf 'user\t%s\n' "$(printf '%s' "$text" | json_escape)"
-        printf 'assistant\t%s\n' "$(printf '%s' "$LLM_DIRECT_ANSWER" | json_escape)"
-    } >> "$LLM_HISTORY_DIR/$session_id"
+    if ! llm_history_commit "$session_id" "$text" "$LLM_DIRECT_ANSWER"; then
+        log "[HISTORY] 完整回答未能安全保存，结束本轮"
+        cancel_followup_vad_prearm
+        finish_llm_playback
+        return 1
+    fi
     t2=$(elapsed_s "$t0")
     if [ "$cleanup_mode" = "defer" ]; then
         arm_followup_vad
@@ -2502,7 +2853,7 @@ send_text_and_play() {
         return 1
     fi
 
-    if is_recent_duplicate_llm_query "$text"; then
+    if is_recent_duplicate_llm_query "$text" "$session_id"; then
         log "[DUP] suppress duplicate fallback ${SUPPRESS_DUP_SECONDS}s 内重复: $text"
         resume_native_player 1
         return 0
@@ -2650,7 +3001,8 @@ transcribe_followup_voice_native() {
         return 1
     fi
     # 结束语只在追问 ASR 中使用，短词也不能触发另一次 Mac ASR 回退。
-    if ! is_followup_exit_command "$FOLLOWUP_TEXT" && [ "$FOLLOWUP_NATIVE_MIN_QUERY_BYTES" -gt 0 ] 2>/dev/null; then
+    if ! is_followup_exit_command "$FOLLOWUP_TEXT" && ! is_followup_reset_command "$FOLLOWUP_TEXT" &&
+        [ "$FOLLOWUP_NATIVE_MIN_QUERY_BYTES" -gt 0 ] 2>/dev/null; then
         query_bytes=$(printf '%s' "$FOLLOWUP_TEXT" | wc -c 2>/dev/null)
         query_bytes="${query_bytes:-0}"
         if [ "$query_bytes" -lt "$FOLLOWUP_NATIVE_MIN_QUERY_BYTES" ] 2>/dev/null; then
@@ -2707,6 +3059,43 @@ is_followup_exit_command() {
         结束对话|退出对话|停止对话|不聊了|退下) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+is_followup_reset_command() {
+    [ "${FOLLOWUP_RESET_ENABLED:-0}" = 1 ] || return 1
+    local text
+    text=$(printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    while :; do
+        case "$text" in
+            *。) text=${text%。} ;;
+            *！) text=${text%！} ;;
+            *？) text=${text%？} ;;
+            *.) text=${text%.} ;;
+            *!) text=${text%!} ;;
+            *\?) text=${text%?} ;;
+            *) break ;;
+        esac
+    done
+    case "$text" in 换个话题|重新开始) return 0;; *) return 1;; esac
+}
+
+new_llm_session_id() {
+    local backend
+    case "$BACKEND" in deepseek|minimax|glm|kimi) backend="$BACKEND";; *) backend=custom;; esac
+    LLM_SESSION_SERIAL=$((${LLM_SESSION_SERIAL:-0}+1))
+    NEW_LLM_SESSION_ID="native_first_${backend}_$(date +%s)_$$_$LLM_SESSION_SERIAL"
+}
+
+reset_followup_session() {
+    cancel_followup_vad_prearm
+    new_llm_session_id
+    CURRENT_SESSION_ID="$NEW_LLM_SESSION_ID"
+    log "[SESSION] 已切换新会话；旧记录按缓存策略保留，不再发送为上下文"
+    if ! play_native_dialog_prompt "好，我们换个话题。你想聊什么？"; then
+        log "[SESSION] 换话题确认未播完，回到待机，不开启新监听"
+        return 1
+    fi
+    FOLLOWUP_RESET_QUERY_SESSION="$CURRENT_SESSION_ID"
 }
 
 native_dialog_compact() {
@@ -2775,11 +3164,17 @@ collect_native_dialog_text() {
     local limit="${NATIVE_DIALOG_INPUT_MAX_REPROMPTS:-2}"
     case "$limit" in 1|2|3) ;; *) limit=2 ;; esac
     NATIVE_DIALOG_TEXT="$current"
+    NATIVE_DIALOG_ACTION=chat
     while :; do
         if [ "$is_followup" = 1 ] && is_followup_exit_command "$current"; then
             log "[FOLLOWUP] explicit exit; no LLM submission"
             NATIVE_DIALOG_TEXT=""
             return 126
+        fi
+        if [ "$is_followup" = 1 ] && is_followup_reset_command "$current"; then
+            NATIVE_DIALOG_ACTION=reset
+            NATIVE_DIALOG_TEXT=""
+            return 0
         fi
         [ "${NATIVE_DIALOG_INPUT_GUARD:-1}" = "1" ] || return 0
         classify_native_dialog_text "$current"
@@ -2858,6 +3253,14 @@ handle_llm_dialog() {
                 log "[FOLLOWUP] explicit exit; no LLM submission"
                 break
             fi
+            if is_followup_reset_command "$FOLLOWUP_TEXT"; then
+                reset_followup_session || break
+                session_id="$CURRENT_SESSION_ID"
+                first_text="";turn=1
+                last_dialog=$(get_aivs_lab_latest_dialog_id)
+                native_followup_mark_multirounds
+                continue
+            fi
             led_feedback_followup_asr_ok
             log "[TURN $turn] 原生追问转 LLM: $FOLLOWUP_TEXT"
             native_followup_mark_multirounds
@@ -2877,12 +3280,18 @@ handle_llm_dialog() {
         local next_text="$first_text" saved_dup="$SUPPRESS_DUP_SECONDS" is_followup=0
         while true; do
             collect_native_dialog_text "$next_text" "$is_followup" || break
-            next_text="$NATIVE_DIALOG_TEXT"
-            if [ "$turn" -gt 1 ]; then
-                led_feedback_followup_asr_ok
-                log "[TURN $turn] native followup -> LLM: $next_text"
+            if [ "$NATIVE_DIALOG_ACTION" = reset ]; then
+                reset_followup_session || break
+                session_id="$CURRENT_SESSION_ID"
+                turn=0
+            else
+                next_text="$NATIVE_DIALOG_TEXT"
+                if [ "$turn" -gt 1 ]; then
+                    led_feedback_followup_asr_ok
+                    log "[TURN $turn] native followup -> LLM: $next_text"
+                fi
+                send_text_and_play "$session_id" "$next_text" defer || break
             fi
-            send_text_and_play "$session_id" "$next_text" defer || break
             if ! wait_native_live_asr; then
                 break
             fi
@@ -2935,6 +3344,12 @@ handle_llm_dialog() {
             log "[FOLLOWUP] explicit exit; no LLM submission"
             break
         fi
+        if is_followup_reset_command "$FOLLOWUP_TEXT"; then
+            reset_followup_session || break
+            session_id="$CURRENT_SESSION_ID"
+            turn=1
+            continue
+        fi
         led_feedback_followup_asr_ok
         log "[TURN $turn] 发送追问到 LLM: $FOLLOWUP_TEXT"
         send_text_and_play "$session_id" "$FOLLOWUP_TEXT" defer || break
@@ -2951,7 +3366,8 @@ handle_llm_dialog() {
 
 handle_wakeup() {
     local wake_ts="$1"
-    local session_id="native_first_${BACKEND}_$(date +%s)"
+    new_llm_session_id
+    local session_id="$NEW_LLM_SESSION_ID"
     local waited_ticks=0
     local max_ticks
     local wait_seconds

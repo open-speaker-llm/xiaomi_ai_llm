@@ -5,21 +5,27 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from tests.native_protocol_helpers import PROTOCOL_FUNCTIONS, embedded_protocol
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / 'device/native_first_client.sh').read_text()
 
 
 def functions(*names):
-    return '\n'.join(m.group() for name in names
-                     if (m := re.search(r'^' + name + r'\(\) \{.*?^\}', SOURCE, re.M | re.S)))
+    if 'llm_stream_answer_and_play' in names:
+        names += ('llm_history_limits', 'llm_history_safe_dir', 'llm_history_prepare',
+                  'llm_history_owned', 'llm_history_filter', 'llm_history_load',
+                  'llm_history_commit', 'llm_history_gc')
+    protocol = embedded_protocol(SOURCE) if PROTOCOL_FUNCTIONS.intersection(names) else ''
+    return protocol + '\n' + '\n'.join(m.group() for name in names if name not in PROTOCOL_FUNCTIONS
+                                       if (m := re.search(r'^' + name + r'\(\) \{.*?^\}', SOURCE, re.M | re.S)))
 
 
 class TtsSentenceRecoveryTest(unittest.TestCase):
     def run_stream(self, mode, fallback='1'):
         with tempfile.TemporaryDirectory() as temp:
             code = functions('llm_aplay', 'stream_synthesize_sentence', 'stream_play_worker',
-                             'llm_stream_answer_and_play', 'llm_sse_content').replace('/tmp/native_first_stream', temp + '/stream')
+                             'llm_stream_answer_and_play', 'llm_sse_content', 'json_unicode_decode').replace('/tmp/native_first_stream', temp + '/stream')
             code += r'''
 export TRACE="$TEST_DIR/trace"
 DIRAC_PLAYBACK_LOG="$TEST_DIR/aplay.log"
@@ -71,11 +77,11 @@ rc=$?
 echo "RESULT=$rc"
 '''
             result = subprocess.run(['sh', '-c', code], text=True, capture_output=True, timeout=20,
-                                    env={**os.environ, 'LC_ALL': 'C', 'TEST_DIR': temp, 'MODE': mode,
+                                    env={**os.environ, 'LC_ALL': 'C', 'TEST_DIR': str(Path(temp).resolve()), 'MODE': mode,
                                          'TTS_FALLBACK_NATIVE': fallback})
             self.assertEqual(result.returncode, 0, result.stderr)
             trace = Path(temp, 'trace')
-            history = Path(temp, 'history/session')
+            history = Path(temp, 'history/.native_first_history_v1/h_session')
             count = Path(temp, 'count-第二句。')
             return (result.stdout, trace.read_text().splitlines() if trace.exists() else [],
                     history.read_text() if history.exists() else '',

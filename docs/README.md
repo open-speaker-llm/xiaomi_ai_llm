@@ -47,7 +47,9 @@
 | 修改代码后如何验证 | [测试方法](../TESTING.md) / [真实音箱用例](../tests/manual_native_first_cases.md) |
 | 每一轮升级后，我具体怎么测试 | [逐轮实际测试说明](testing/README.md) |
 | 某项能力究竟验收到了哪一步 | [当前状态与证据](status.md) |
-| 接下来优先优化什么、怎样执行与验收 | [功能审查与优化执行方案](plans/2026-10-30-functional-review.md) |
+| 接下来值得增加哪些功能、架构怎样演进 | [产品能力与架构路线](plans/2026-10-30-product-architecture-roadmap.md) / [前两轮审查与执行方案](plans/2026-10-30-functional-review.md) |
+| 协议源码和单文件部署怎样保持一致 | [协议模块维护](reference/native-protocol.md) |
+| 候选包是否完整、能否直接升级 | [发布记录与离线预检](../device/native_endpoint/RELEASE.md) |
 
 ## 文档约定
 

@@ -54,7 +54,7 @@ python3 device/native_endpoint/build_package.py \
 
 构建目标为 ARM32/glibc 2.25 接口。`neural_pool` 单独链接 `neural_clock.c`，在旧内核上直接走已验证的取时 ABI，避免新版 glibc 探测不支持的系统调用造成寄存器日志。它不修改系统 libc、内核日志级别或原生进程的时钟实现。
 
-输出 `runtime.tar.gz`、组合版 `native_asr.so`、`native_first_client.sh`、`manager.sh`、`lifecycle` 和 `package.sha256`。`runtime/`、`build/` 是本机中间目录，不是需要逐项上传的安装入口。底层代码及独立测试入口见[实现目录](../endpoint_probe/README.md)。
+输出 `runtime.tar.gz`、组合版 `native_asr.so`、`native_first_client.sh`、`manager.sh`、`lifecycle` 和 `package.sha256`，以及本机旁置的 `release.json` 发布记录；五项 payload 清单契约不变。构建拒绝非空或符号链接输出目录，候选通过本机校验后才发布。版本记录、无网络预检、退出码与实际测试步骤见[候选整包发布与离线预检](RELEASE.md)。`runtime/`、`build/` 是本机中间目录，不是需要逐项上传的安装入口。底层代码及独立测试入口见[实现目录](../endpoint_probe/README.md)。
 
 ## 安装
 

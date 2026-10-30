@@ -14,14 +14,21 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from tests.native_protocol_helpers import PROTOCOL_FUNCTIONS, embedded_protocol
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def functions(*names):
+    if 'send_text_native' in names:
+        names += ('llm_history_limits', 'llm_history_safe_dir', 'llm_history_prepare',
+                  'llm_history_owned', 'llm_history_filter', 'llm_history_load',
+                  'llm_history_commit', 'llm_history_gc')
     source = (ROOT / 'device/native_first_client.sh').read_text()
-    return '\n'.join(re.search(r'^' + name + r'\(\) \{.*?^\}', source, re.M | re.S).group()
-                     for name in names)
+    protocol = embedded_protocol(source) if PROTOCOL_FUNCTIONS.intersection(names) else ''
+    return protocol + '\n' + '\n'.join(
+        re.search(r'^' + name + r'\(\) \{.*?^\}', source, re.M | re.S).group()
+        for name in names if name not in PROTOCOL_FUNCTIONS)
 
 
 def shell(code, env, timeout=6):
@@ -165,8 +172,12 @@ class LlmCompletionTest(unittest.TestCase):
                 data += 'data: [DONE]\n'
             elif ending in ('stop', 'length'):
                 data += 'data: ' + json.dumps({'choices': [{'delta': {}, 'finish_reason': ending}]}) + '\n'
+            elif ending == 'malformed':
+                data = 'data: ' + json.dumps(content, ensure_ascii=False)[:-1] + '\n\ndata: [DONE]\n'
+            elif ending == 'invalid_unicode':
+                data = 'data: {"choices":[{"delta":{"content":"\\ud800"}}]}\n\ndata: [DONE]\n'
             Path(temp, 'response').write_text(data)
-            code = functions('llm_direct_answer', 'llm_sse_content', 'send_text_native',
+            code = functions('llm_direct_answer', 'llm_sse_content', 'json_unicode_decode', 'send_text_native',
                              'cancel_followup_vad_prearm').replace('/tmp/native_first_llm_', temp + '/llm_') + r'''
 LLM_API_KEY=test; LLM_API_BASE=http://unused; LLM_DIRECT_TIMEOUT=1
 TTS_ENGINE=server; DEVICE_TTS_STREAM=0; FOLLOWUP_VAD_PID=; SUPPRESS_DUP_SECONDS=0
@@ -180,11 +191,11 @@ tts_play_text() { echo "PLAY:$1"; return "$TTS_RC"; }
 send_text_native session question normal
 echo "RESULT=$?"
 '''
-            rc, out, err = shell(code, {'TEST_DIR': temp, 'LLM_HISTORY_DIR': temp + '/history',
+            rc, out, err = shell(code, {'TEST_DIR': temp, 'LLM_HISTORY_DIR': str(Path(temp).resolve() / 'history'),
                                        'FOLLOWUP_ARM_FILE': temp + '/arm',
                                        'TRANSPORT_RC': str(transport_rc), 'TTS_RC': str(tts_rc)})
             self.assertEqual(rc, 0, err)
-            hist = Path(temp, 'history/session')
+            hist = Path(temp, 'history/.native_first_history_v1/h_session')
             return out, hist.read_text() if hist.exists() else ''
 
     def test_done_and_finish_reason_stop_are_supported(self):
@@ -195,7 +206,8 @@ echo "RESULT=$?"
                 self.assertIn('assistant\t完整回答。', history)
 
     def test_missing_or_truncated_completion_never_plays_or_commits(self):
-        for ending, rc in (('missing', 0), ('length', 0), ('done', 28)):
+        for ending, rc in (('missing', 0), ('length', 0), ('done', 28),
+                           ('malformed', 0), ('invalid_unicode', 0)):
             with self.subTest(ending=ending, rc=rc):
                 out, history = self.run_answer(ending, rc)
                 self.assertIn('RESULT=1', out)

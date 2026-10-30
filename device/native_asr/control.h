@@ -10,6 +10,7 @@
 #include <time.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include "process.h"
 #ifndef CONTROL_DIR
 #define CONTROL_DIR "/tmp/native_followup"
 #endif
@@ -29,7 +30,7 @@ static inline uint32_t now_ms(void) {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint32_t)((uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
 }
-static inline int alive(uint32_t pid) { return pid > 1 && kill((pid_t)pid, 0) == 0; }
+static inline int alive(uint32_t pid) { return native_process_alive(pid); }
 static inline int active(const struct control *s) {
     return s->phase >= REQUEST && s->phase <= RESULT && alive(s->owner) &&
            (int32_t)(s->deadline - now_ms()) > 0;

@@ -22,7 +22,7 @@
 ./scripts/run_tests.sh
 ```
 
-脚本优先使用项目 `.venv/bin/python`，也可通过 `PYTHON=/path/to/python sh scripts/run_tests.sh` 指定环境。部分测试调用本机 C 编译器；Linux CPU 限额信号测试在 macOS 跳过，必须单列，不能记作通过。
+脚本优先使用项目 `.venv/bin/python`，也可通过 `PYTHON=/path/to/python sh scripts/run_tests.sh` 指定环境。先检查纯协议源码与客户端内嵌产物一致，再运行回归与 Shell 语法检查。部分测试调用本机 C 编译器；Linux CPU 限额信号测试在 macOS 跳过，必须单列，不能记作通过。
 
 | 领域 | 主要覆盖 |
 |---|---|
@@ -34,6 +34,8 @@
 | 配置和脚本 | Shell 语法、模板可 source、关键推荐参数与默认值一致；自启动按 native/device、native/server、server 选择首问依赖 |
 | 只读诊断 | 离线快照、配置不执行与脱敏、可选组件、进程/状态身份、清单路径和摘要；检查前后内容与权限不变 |
 | 安装与恢复 | 易失运行目录缺失后启动、非法目录拒绝、旧备份恢复准备、基础追问安装拒绝覆盖判停组合包 |
+| 会话与协议 | 精确换题与新 session、确认失败清理、受管缓存预算和完整问答对；共享 JSON/SSE 入口、合法编码与流式完成、模块嵌入一致性 |
+| 进程与发布 | 未回收退出进程不占用会话、未知所有权保护；候选包摘要/归档/元数据边界、非空输出保护、证据不足不允许部署 |
 
 ## 2. 匹配固件的独立验证
 
@@ -65,6 +67,7 @@
 | 首轮判停、路由记录或常驻管理 | 自动化 + EP1–EP7；模型/ABI 改动另需 ARM 独立测试及真实模型回放 |
 | 追问相关 | 自动化 + F1/F2；boot1 另跑 F-NATIVE 和设备 ABI/提示音隔离；旧 PCM 路线跑 F-PCM |
 | 结束语、自启动或只读诊断 | 自动化 + [第二轮人工步骤](docs/testing/2026-10-30-operations-and-conversation.md)中对应项目；结束语另跑 F-EXIT |
+| 会话换题、缓存、协议模块或发布预检 | 自动化 + [第三轮实际步骤](docs/testing/2026-10-30-session-and-maintenance.md)；涉及原生恢复另做 ARM 编译及匹配设备独立验证 |
 | 仅文档 | 相对链接与标题锚点、Mermaid 渲染、命令运行位置、`git diff --check` |
 
 ## 5. 提交验证结果

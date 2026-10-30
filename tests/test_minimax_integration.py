@@ -7,6 +7,7 @@ import shlex
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from tests.native_protocol_helpers import PROTOCOL_FUNCTIONS, embedded_protocol
 
 from server.llm.minimax_client import MiniMaxClient
 
@@ -38,6 +39,8 @@ class NativeMiniMaxTest(unittest.TestCase):
 
     def function(self, name):
         source = (ROOT / 'device/native_first_client.sh').read_text()
+        if name in PROTOCOL_FUNCTIONS:
+            return embedded_protocol(source)
         return re.search(r'^' + name + r'\(\) \{.*?^\}', source, re.M | re.S).group()
 
     def test_provider_requests(self):

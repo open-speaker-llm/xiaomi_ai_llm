@@ -10,6 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def functions(*names):
+    if 'is_followup_reset_command' not in names:
+        names += ('is_followup_reset_command',)
     source = (ROOT / 'device/native_first_client.sh').read_text()
     return '\n'.join(m.group() for n in names
                      if (m := re.search(r'^' + n + r'\(\) \{.*?^\}', source, re.M | re.S)))

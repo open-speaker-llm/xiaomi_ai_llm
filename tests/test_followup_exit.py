@@ -12,6 +12,8 @@ COMMANDS = ('结束对话', '退出对话', '停止对话', '不聊了', '退下
 
 
 def functions(*names):
+    if 'is_followup_reset_command' not in names:
+        names += ('is_followup_reset_command',)
     source = (ROOT / 'device/native_first_client.sh').read_text()
     return '\n'.join(re.search(r'^' + name + r'\(\) \{.*?(?=^[a-zA-Z_]\w*\(\) \{|\Z)',
                               source, re.M | re.S).group()
