@@ -52,19 +52,32 @@ miplayer --file /tmp/out.mp3 2>/dev/null
 
 ## 维护：版本过期（403）怎么办
 
-EdgeTTS 的 `Sec-MS-GEC-Version` 跟着 Chromium 版本走，微软会不定期抬高最低版本，旧值会 `403 Forbidden`。
-**这与 Mac 端 edge-tts 是同一个问题**——Mac 端靠 `pip install -U edge-tts` 白嫖维护者的更新。
+当前实现支持 `Sec-MS-GEC` v2，输出 `16 位 CS64-64 位 SHA256` 十六进制组合，并按上游握手方式发送随机 MUID Cookie。算法与 [edge-tts 固定提交](https://github.com/rany2/edge-tts/tree/bd44c1d1aaebdc1db7f47456ee12431b42ec7cac) 核对；默认男声仍为 `zh-CN-YunjianNeural`，音频格式、MP3 解码与 PCM 增益行为保持。
 
-本客户端把相关值做成**环境变量，过期时只改配置、无需重编**：
+旧版只生成 v1 SHA256 摘要。v1 → v2 必须重新构建并替换 `ettsc`，同时确认配置选择 v2；仅修改旧二进制收到的版本字符串不能升级算法。以后的 Chromium 版本字段变化仍可通过环境变量更新：
 
 | env | 默认 | 说明 |
 |---|---|---|
-| `ETTSC_GEC_VERSION` | `1-143.0.3650.75` | 对照最新 edge-tts `constants.py` 的 `SEC_MS_GEC_VERSION` |
+| `ETTSC_GEC_VERSION` | `2-143.0.3650.75` | `2-` 选择 v2；`1-` 保留旧算法兼容。其他前缀明确报错 |
 | `ETTSC_UA` | Chrome/143 UA | 同上的 `BASE_HEADERS["User-Agent"]` |
 | `ETTSC_ORIGIN` | `chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold` | 同上的 `WSS_HEADERS["Origin"]` |
 
 `native_first_client.sh` 通过 `DEVICE_TTS_GEC_VERSION` / `DEVICE_TTS_UA` / `DEVICE_TTS_ORIGIN`
-把这些喂给 ettsc，所以**线上过期 = 改 `/data/native_first.env` 一行**。
+把这些喂给 ettsc。旧客户端可能仍显式传入 v1，因此替换二进制后还应在实际 `/data/native_first.env` 中确认 `DEVICE_TTS_GEC_VERSION=2-143.0.3650.75`。配置和二进制应一起备份、一起恢复。
+
+`probe` 与实际合成都会打印 `Sec-MS-GEC v2 version=2-143.0.3650.75`；成功握手随后打印 `handshake OK, HTTP 101`。这些日志不输出完整鉴权 token。合成出非空音频及实际听到原男声仍需分别验证；403 也可能涉及时钟或服务端策略，算法测试不能代替实时握手结果。
+
+离线回归与构建：
+
+```sh
+python3 tests/generate_gec_v2_vectors.py --check
+cargo test --locked
+./build.sh
+```
+
+向量由上游 Python 原始算法独立生成，Rust 测试读取固定结果，覆盖 17 个时间点和 12 组摘要边界。测试和构建不会调用微软 TTS；`probe`、文本合成才会联网。
+
+`src/gec_v2.rs` 使用 LGPLv3，相关许可、原始源码和静态二进制分发所需材料说明见 [NOTICE.edge-tts.md](NOTICE.edge-tts.md)。其余文件的既有许可保持不变。
 
 拿最新值：
 ```sh

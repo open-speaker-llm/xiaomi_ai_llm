@@ -2,6 +2,7 @@
 name = "ettsc"
 version = "0.1.0"
 edition = "2021"
+license = "MIT AND LGPL-3.0-only"
 
 [[bin]]
 name = "ettsc"

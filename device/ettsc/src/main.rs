@@ -9,11 +9,12 @@ use sha2::{Digest, Sha256};
 use std::net::TcpStream;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tungstenite::Message;
+mod gec_v2;
 
 const TRUSTED: &str = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
 const HOST: &str = "speech.platform.bing.com";
-// 微软会不定期抬高最低 Chromium 版本导致旧值 403。可用环境变量覆盖，过期时只改配置、无需重编。
-const DEFAULT_GEC_VERSION: &str = "1-143.0.3650.75";
+// 版本前缀选择鉴权算法，Chromium 部分可通过环境变量覆盖。
+const DEFAULT_GEC_VERSION: &str = "2-143.0.3650.75";
 const DEFAULT_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0";
 const DEFAULT_ORIGIN: &str = "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold";
 // 输出格式：默认 MP3（兼容老用法）；句级流式连播用 raw PCM（headerless，可直接灌 aplay）。
@@ -27,15 +28,20 @@ fn env_or(key: &str, default: &str) -> String {
     }
 }
 
-fn sec_ms_gec() -> String {
-    let unix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
-    let mut ticks = unix + 11_644_473_600;
+fn sec_ms_gec_at(version: &str, unix: u64) -> Result<String, &'static str> {
+    if version.starts_with("2-") {
+        return Ok(gec_v2::generate(unix, TRUSTED));
+    }
+    if !version.starts_with("1-") {
+        return Err("unsupported ETTSC_GEC_VERSION: expected 2-<Chromium version> or legacy 1-<version>");
+    }
+    let mut ticks = u128::from(unix) + 11_644_473_600;
     ticks -= ticks % 300;
-    let ticks100ns: i128 = (ticks as i128) * 10_000_000;
+    let ticks100ns = ticks * 10_000_000;
     let s = format!("{}{}", ticks100ns, TRUSTED);
     let mut h = Sha256::new();
     h.update(s.as_bytes());
-    h.finalize().iter().map(|b| format!("{:02X}", b)).collect()
+    Ok(h.finalize().iter().map(|b| format!("{:02X}", b)).collect())
 }
 
 fn hexid() -> String {
@@ -45,10 +51,17 @@ fn hexid() -> String {
 }
 
 fn build_request() -> tungstenite::handshake::client::Request {
+    let version = env_or("ETTSC_GEC_VERSION", DEFAULT_GEC_VERSION);
+    let unix = SystemTime::now().duration_since(UNIX_EPOCH).expect("system clock before Unix epoch").as_secs();
+    let token = sec_ms_gec_at(&version, unix).unwrap_or_else(|error| {
+        eprintln!("[!] {error}");
+        std::process::exit(2);
+    });
+    eprintln!("[*] Sec-MS-GEC v{} version={version}", version.split('-').next().unwrap());
     let url = format!(
         "wss://{HOST}/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken={TRUSTED}&Sec-MS-GEC={}&Sec-MS-GEC-Version={}&ConnectionId={}",
-        sec_ms_gec(),
-        env_or("ETTSC_GEC_VERSION", DEFAULT_GEC_VERSION),
+        token,
+        version,
         hexid()
     );
     let mut key = [0u8; 16];
@@ -69,8 +82,26 @@ fn build_request() -> tungstenite::handshake::client::Request {
         .header("Accept-Encoding", "gzip, deflate, br, zstd")
         .header("Accept-Language", "en-US,en;q=0.9")
         .header("User-Agent", env_or("ETTSC_UA", DEFAULT_UA))
+        .header("Cookie", format!("muid={};", hexid().to_uppercase()))
         .body(())
         .unwrap()
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+
+    #[test]
+    fn default_algorithm_is_v2_and_legacy_override_keeps_matching_v1_token() {
+        assert_eq!(DEFAULT_GEC_VERSION, "2-143.0.3650.75");
+        let v2 = sec_ms_gec_at(DEFAULT_GEC_VERSION, 1793318400).unwrap();
+        let v1 = sec_ms_gec_at("1-143.0.3650.75", 1793318400).unwrap();
+        assert_eq!(v2.len(), 81);
+        assert_eq!(v1.len(), 64);
+        assert!(!v1.contains('-'));
+        assert_ne!(v2.split_once('-').unwrap().1, v1);
+        assert!(sec_ms_gec_at("3-143.0.3650.75", 1793318400).is_err());
+    }
 }
 
 // 阻塞建链：TCP（带超时）→ rustls TLS → WebSocket 升级握手。

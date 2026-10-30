@@ -253,7 +253,7 @@ ls -l /data/ettsc
 /data/ettsc probe
 ```
 
-如果日志里看到 `403`，通常是微软提高了 EdgeTTS 的 Chromium / `Sec-MS-GEC-Version` 要求。按 [device/ettsc/README.md](../../device/ettsc/README.md) 更新 `DEVICE_TTS_GEC_VERSION` / `DEVICE_TTS_UA` / `DEVICE_TTS_ORIGIN`，无需重编。
+如果日志里看到握手 `403`，先核对设备时间、客户端鉴权算法和协议版本。2026 年 10 月的 v2 迁移需要更新 `ettsc` 的算法，并设置 `DEVICE_TTS_GEC_VERSION=2-143.0.3650.75`；仅修改版本号不能修复旧二进制。按 [ettsc 维护说明](../../device/ettsc/README.md) 备份、构建、验证后部署。合成失败时可能触发小米原生 TTS 兜底，听到不同音色不等于音色配置被修改。
 
 ### 9.3 原生 mibrain 兜底
 
