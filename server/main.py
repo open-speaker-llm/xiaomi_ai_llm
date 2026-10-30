@@ -6,6 +6,10 @@ import os
 import asyncio
 import json
 import base64
+import re
+import stat
+import tempfile
+from pathlib import Path
 from typing import Optional
 from contextlib import asynccontextmanager
 
@@ -23,6 +27,7 @@ from .tts.chattts_client import ChatTTSClient
 from .tts.edge_tts_client import EdgeTTSClient
 from fastapi.responses import Response
 from starlette.responses import StreamingResponse
+from starlette.background import BackgroundTask
 from .streaming_pipeline import StreamingPipeline
 from .audio.processor import AudioProcessor
 
@@ -63,6 +68,26 @@ audio_processor = AudioProcessor()
 
 # 对话历史 (简单内存存储，生产环境应使用 Redis 等)
 conversation_histories: dict[str, list[dict]] = {}
+
+# Debug transfers use a private, process-scoped directory, never shared /tmp names.
+_upload_directory = tempfile.TemporaryDirectory(prefix="xiaomi-ai-uploads-")
+
+
+def debug_upload_path(filename: str) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", filename or ""):
+        raise HTTPException(status_code=400, detail="Invalid upload filename")
+    return Path(_upload_directory.name) / filename
+
+
+def save_debug_upload(filename: str, data: bytes) -> dict:
+    path = debug_upload_path(filename)
+    try:
+        # Exclusive creation rejects existing files and symlinks atomically.
+        with path.open("xb") as output:
+            output.write(data)
+    except FileExistsError:
+        raise HTTPException(status_code=409, detail="Upload filename already exists")
+    return {"status": "ok", "size": len(data), "path": str(path)}
 
 
 def is_low_confidence_asr(info: dict, *, min_logprob: float = -1.0) -> tuple[bool, str]:
@@ -802,6 +827,32 @@ async def stream_tts(
         return Response(content=b"", media_type="audio/wav")
 
     pipeline = StreamingPipeline(None, tts_client, sample_rate=32000, speed=speed, volume=volume)
+    t0 = _time.time()
+
+    async def audio_chunks():
+        for sentence in pipeline._split_sync(message):
+            has_audio = False
+            async for chunk in pipeline._tts_stream(sentence):
+                if chunk["type"] == "error":
+                    raise RuntimeError("TTS sentence synthesis failed")
+                if chunk["type"] == "audio":
+                    pcm = chunk["data"]
+                    if not pcm or len(pcm) % 2:
+                        raise RuntimeError("TTS returned invalid PCM")
+                    has_audio = True
+                    yield pcm
+            if not has_audio:
+                raise RuntimeError("TTS returned no audible PCM")
+
+    audio = audio_chunks()
+    try:
+        # Only the first PCM chunk is prefetched; later sentences stay streamed.
+        # Do not commit HTTP 200 or a WAV header until synthesis actually works.
+        first_audio = await audio.__anext__()
+    except Exception as error:
+        await audio.aclose()
+        print(f"[TTS-stream] synthesis failed before audio: {error}", flush=True)
+        raise HTTPException(status_code=502, detail="TTS synthesis failed") from error
 
     async def generate():
         max_data = 180 * 32000 * 2
@@ -811,19 +862,18 @@ async def stream_tts(
             16, 1, 1, 32000, 64000, 2, 16,
             b'data', max_data,
         )
-        yield header
-
-        t0 = _time.time()
-        sentences = pipeline._split_sync(message)
-        for s in sentences:
-            async for chunk in pipeline._tts_stream(s):
-                if chunk["type"] == "audio":
-                    yield chunk["data"]
-                # TTS error on a single sentence: skip it, keep streaming the rest
-        print(
-            f"[{_time.strftime('%H:%M:%S')}] 🔊 TTS-stream({_time.time()-t0:.1f}s, {len(sentences)}句): {message[:40]}",
-            flush=True,
-        )
+        try:
+            yield header
+            yield first_audio
+            async for pcm in audio:
+                yield pcm
+            print(
+                f"[{_time.strftime('%H:%M:%S')}] 🔊 TTS-stream({_time.time()-t0:.1f}s): {message[:40]}",
+                flush=True,
+            )
+        finally:
+            # After headers an error must abort the response, not become clean EOF.
+            await audio.aclose()
 
     return StreamingResponse(
         generate(),
@@ -950,29 +1000,48 @@ async def stream_chat(file: UploadFile = File(...), session_id: str = "shell", b
 
 @app.put("/api/v1/upload/{filename}")
 async def upload_file(filename: str, request: Request):
-    """临时端点：接收原始二进制体，存到 /tmp/"""
+    """临时端点：接收原始二进制体，写入本进程专属临时目录。"""
+    debug_upload_path(filename)
     data = await request.body()
-    path = f"/tmp/{filename}"
-    with open(path, "wb") as f:
-        f.write(data)
-    return {"status": "ok", "size": len(data), "path": path}
+    return save_debug_upload(filename, data)
 
 
 @app.post("/api/v1/upload_file")
 async def upload_file_post(file: UploadFile = File(...)):
     """临时端点：接收 multipart 文件上传"""
-    path = f"/tmp/{file.filename}"
+    debug_upload_path(file.filename)
     data = await file.read()
-    with open(path, "wb") as f:
-        f.write(data)
-    return {"status": "ok", "size": len(data), "path": path}
+    return save_debug_upload(file.filename, data)
 
 
 @app.get("/api/v1/download/{filename}")
 async def download_file(filename: str):
-    """临时端点：下载文件"""
-    from fastapi.responses import FileResponse
-    return FileResponse(f"/tmp/{filename}")
+    """临时端点：只下载本进程专属目录中的普通文件。"""
+    path = debug_upload_path(filename)
+    try:
+        # Do not follow symlinks or block on FIFOs; stream the inspected descriptor.
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        raise HTTPException(status_code=404, detail="Upload not found")
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        os.close(fd)
+        raise HTTPException(status_code=404, detail="Upload not found")
+    source = os.fdopen(fd, "rb")
+
+    def chunks():
+        try:
+            while data := source.read(64 * 1024):
+                yield data
+        finally:
+            source.close()
+
+    return StreamingResponse(
+        chunks(),
+        media_type="application/octet-stream",
+        headers={"Content-Length": str(info.st_size)},
+        background=BackgroundTask(source.close),
+    )
 
 
 @app.websocket("/ws/voice")

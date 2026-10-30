@@ -40,7 +40,15 @@ stop_route_client() {
 }
 launch_client() {
     path=$1 log=$2
-    (trap '' HUP; LOG_FILE="$log" sh "$path") > "$D/launch.log" 2>&1 </dev/null &
+    # Installation and rollback can run after /tmp was cleared. Prepare the
+    # log directory before starting a background child.
+    [ ! -L "$D" ] || { echo "Refusing symlink launch directory: $D" >&2; return 1; }
+    if [ ! -e "$D" ]; then
+        (umask 077; mkdir "$D") || return 1
+    fi
+    [ -d "$D" ] || { echo "Launch path is not a directory: $D" >&2; return 1; }
+    chmod 700 "$D" || return 1
+    (trap '' HUP; LOG_FILE="$log" exec sh "$path") > "$D/launch.log" 2>&1 </dev/null &
     child=$!
     count=0
     while [ "$count" -lt 25 ]; do

@@ -40,7 +40,7 @@ class AudioOptimizationTest(unittest.TestCase):
             Path(temp, 'instruction').write_text('\n'.join(json.dumps(row, ensure_ascii=False,
                                                         separators=(',', ':')) for row in rows))
             Path(temp, 'last').write_text(last)
-            code = functions('reset_native_result', 'get_native_result_aivs_lab', 'endpoint_denial_allows', 'is_unsupported_result')
+            code = functions('reset_native_result', 'get_native_result_aivs_lab', 'endpoint_denial_allows', 'is_unsupported_result', 'json_text_field')
             code += '\nDIR=' + shlex.quote(temp) + r'''
 AIVS_LAB_INSTRUCTION_LOG=$DIR/instruction; AIVS_LAB_LAST_DIALOG_FILE=$DIR/last
 AIVS_FAILURE_DIALOG=$DIR/failure; AIVS_LAB_LOOKBACK_LINES=40

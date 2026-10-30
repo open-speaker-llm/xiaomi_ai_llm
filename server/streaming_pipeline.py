@@ -3,6 +3,7 @@
 LLM 流式输出 → 实时句子检测 → 逐句 TTS → 边生成边下发音频
 """
 import re
+import struct
 from typing import AsyncIterator, Optional
 
 
@@ -152,6 +153,10 @@ class StreamingPipeline:
                     speed=self.speed,
                     volume=self.volume,
                 )
+                raw_pcm = self._wav_pcm(wav)
+                pcm = self._trim_pcm_tail(raw_pcm)
+                if not pcm:
+                    raise ValueError("TTS returned no audible PCM")
                 break
             except Exception as e:
                 last_error = e
@@ -162,16 +167,74 @@ class StreamingPipeline:
                     yield {"type": "error", "content": f"TTS: {last_error}"}
                     return
         _t1 = _t.time()
-        pcm = self._trim_pcm_tail(wav[44:])
-        before_sec = max(0.0, (len(wav) - 44) / max(self.sample_rate * 2, 1))
+        before_sec = len(raw_pcm) / max(self.sample_rate * 2, 1)
         after_sec = len(pcm) / max(self.sample_rate * 2, 1)
         trim_note = f", audio={before_sec:.1f}->{after_sec:.1f}s" if before_sec - after_sec > 0.15 else ""
         print(f"    🔊 TTS({_t1-_t0:.1f}s{trim_note}): {sentence[:60]}{'...' if len(sentence)>60 else ''}", flush=True)
 
-        # 跳过 WAV 头 (44 字节)，逐块输出纯 PCM
+        # 只输出 data chunk 的 PCM，不能把 LIST/INFO 等元数据当作声音。
         chunk_size = 1024
         for offset in range(0, len(pcm), chunk_size):
             yield {"type": "audio", "data": pcm[offset:offset + chunk_size]}
+
+    def _wav_pcm(self, wav: bytes) -> bytes:
+        """Extract verified mono S16_LE PCM, including ffmpeg pipe WAVs.
+
+        Pipe outputs may use 0xffffffff for RIFF/data sizes. In that case EOF
+        bounds the container/data; ordinary declared sizes must be complete.
+        """
+        if len(wav) < 12 or wav[:4] != b"RIFF" or wav[8:12] != b"WAVE":
+            raise ValueError("TTS returned invalid RIFF/WAVE")
+        riff_size = struct.unpack_from("<I", wav, 4)[0]
+        limit = len(wav) if riff_size == 0xffffffff else riff_size + 8
+        if limit != len(wav) or limit < 12:
+            raise ValueError("TTS returned an incomplete RIFF container")
+
+        offset = 12
+        have_format = False
+        pcm = None
+        while offset < limit:
+            if offset + 8 > limit:
+                raise ValueError("TTS returned a truncated WAV chunk header")
+            kind, size = struct.unpack_from("<4sI", wav, offset)
+            start = offset + 8
+            if size == 0xffffffff:
+                if kind != b"data":
+                    raise ValueError("TTS returned an unbounded metadata chunk")
+                end = limit
+                next_offset = limit
+            else:
+                end = start + size
+                next_offset = end + size % 2
+                if next_offset > limit:
+                    raise ValueError("TTS returned a truncated WAV chunk")
+
+            if kind == b"fmt ":
+                if have_format or end - start < 16:
+                    raise ValueError("TTS returned an invalid WAV format chunk")
+                codec, channels, rate, byte_rate, align, bits = struct.unpack_from("<HHIIHH", wav, start)
+                if codec == 0xfffe:
+                    # WAVE_FORMAT_EXTENSIBLE with the PCM subformat GUID.
+                    pcm_guid = bytes.fromhex("0100000000001000800000aa00389b71")
+                    if (end - start < 40 or struct.unpack_from("<H", wav, start + 16)[0] < 22
+                            or struct.unpack_from("<H", wav, start + 18)[0] != 16
+                            or wav[start + 24:start + 40] != pcm_guid):
+                        raise ValueError("TTS returned unsupported extensible WAV")
+                elif codec != 1:
+                    raise ValueError("TTS returned non-PCM WAV")
+                if (channels != 1 or bits != 16 or rate != self.sample_rate
+                        or align != 2 or byte_rate != self.sample_rate * 2):
+                    raise ValueError("TTS WAV must match mono 16-bit playback sample rate")
+                have_format = True
+            elif kind == b"data":
+                if not have_format or pcm is not None or (end - start) % 2:
+                    raise ValueError("TTS returned invalid PCM data")
+                pcm = wav[start:end]
+            offset = next_offset
+
+        if pcm is None:
+            raise ValueError("TTS WAV has no PCM data chunk")
+        return pcm
 
     def _trim_pcm_tail(self, pcm: bytes, threshold: int = 96, pad_ms: int = 120) -> bytes:
         """Trim trailing near-silence from 16-bit mono PCM while keeping a small pad."""

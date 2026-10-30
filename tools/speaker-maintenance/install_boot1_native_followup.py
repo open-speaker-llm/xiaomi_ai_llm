@@ -34,8 +34,13 @@ def main():
     for path in files.values():
         if not path.is_file():
             raise SystemExit(f'Missing input: {path}')
+    endpoint_guard = '''if [ -e /data/native_endpoint ] || [ -L /data/native_endpoint ]; then
+    echo 'Existing native_endpoint package: use the complete package maintenance path; refusing to overwrite shared ASR components' >&2
+    exit 1
+fi
+'''
     stage = f'/tmp/native-asr-install-{int(time.time())}'
-    remote('set -e; [ "$(awk \'$2=="/" {print $1;exit}\' /proc/mounts)" = /dev/mtdblock5 ]; '
+    remote('set -e\n' + endpoint_guard + '[ "$(awk \'$2=="/" {print $1;exit}\' /proc/mounts)" = /dev/mtdblock5 ]; '
            '[ ! -e /tmp/native_first_busy ]; umask 077; mkdir ' + shlex.quote(stage))
     hashes = []
     for name, path in files.items():
@@ -45,6 +50,7 @@ def main():
         hashes.append(f'[ "$(sha256sum {shlex.quote(target)} | awk \'{{print $1}}\')" = {hashlib.sha256(data).hexdigest()} ]')
     script = r'''set -eu
 STAGE=__STAGE__
+__ENDPOINT_GUARD__
 __HASHES__
 [ ! -e /tmp/native_first_busy ]
 [ "$(awk '$2=="/" {print $1;exit}' /proc/mounts)" = /dev/mtdblock5 ]
@@ -110,7 +116,7 @@ grep -q '\[IDLE\]' /tmp/native_first_client.log
 trap - 0
 echo "BACKUP=$BACKUP"
 sha256sum /data/native_first_client.sh /data/native_asr.sh /data/native_asr.so /data/native_asr_ctl
-'''.replace('__STAGE__', shlex.quote(stage)).replace('__HASHES__', '\n'.join(hashes))
+'''.replace('__STAGE__', shlex.quote(stage)).replace('__ENDPOINT_GUARD__', endpoint_guard).replace('__HASHES__', '\n'.join(hashes))
     print(remote('sh -s', script.encode(), timeout=110))
 
 

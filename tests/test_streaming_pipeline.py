@@ -1,6 +1,7 @@
 import unittest
 
 from server.streaming_pipeline import StreamingPipeline
+from tests.wav_fixtures import pcm_wav
 
 
 class FakeLLM:
@@ -14,8 +15,8 @@ class FakeLLM:
 
 class FakeTTS:
     async def synthesize_pcm(self, sentence, sample_rate=32000, speed=1.0, volume=1.0):
-        # 44-byte WAV header + small non-silent 16-bit PCM payload.
-        return b"0" * 44 + (1000).to_bytes(2, "little", signed=True) * 20
+        return pcm_wav((1000).to_bytes(2, "little", signed=True) * 20,
+                       sample_rate=sample_rate)
 
 
 class StreamingPipelineTest(unittest.IsolatedAsyncioTestCase):

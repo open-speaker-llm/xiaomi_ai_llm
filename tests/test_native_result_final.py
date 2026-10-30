@@ -28,7 +28,7 @@ class NativeResultFinalTest(unittest.TestCase):
                                        re.M | re.S).group()
                               for name in ('reset_native_result', 'get_native_result_aivs_lab',
                                            'endpoint_denial_allows', 'is_unsupported_result', 'json_unicode_decode',
-                                           'json_text_unescape'))
+                                           'json_text_unescape', 'json_text_field'))
         with tempfile.TemporaryDirectory() as temp:
             for i, rows in enumerate(snapshots):
                 Path(temp, str(i)).write_text('\n'.join(json.dumps(row, separators=(',', ':'))
@@ -95,6 +95,20 @@ printf '%s|%s|%s|%s\n' "$rc" "$RESULT_QUERY" "$RESULT_SOURCE" "$(cat "$DIR/last"
         self.assertEqual(self.replay([[partial], [partial, complete], [partial, complete]]),
                          ['1|||', '0|问问DEEPSEEK为什么会发生海湾战争|aivs_lab_instruction|current',
                           '1|||current'])
+
+    def test_escaped_final_text_is_preserved_and_submitted_once(self):
+        for text in ('问问DEEPSEEK解释"边缘计算"和云计算',
+                     '问问DEEPSEEK解释 C:\\new\\test 和字面量\\u4e2d',
+                     '问问DEEPSEEK解释\n下一行\t以及😀'):
+            with self.subTest(text=text):
+                normalized = text.replace('\n', ' ').replace('\t', ' ')
+                rows = [result(text, True)]
+                self.assertEqual(self.replay([rows, rows]),
+                                 ['0|' + normalized + '|aivs_lab_instruction|current', '1|||current'])
+
+    def test_escaped_speak_keeps_failure_after_quoted_prefix(self):
+        self.assertEqual(self.replay([[result('普通问题', True), speak('"这个"问题回答不上')]]),
+                         ['0|普通问题|aivs_lab_instruction|current'])
 
     def test_failure_speak_does_not_make_partial_final(self):
         self.assertEqual(self.replay([[result('请解释'), speak('这个问题回答不上')]]), ['1|||'])

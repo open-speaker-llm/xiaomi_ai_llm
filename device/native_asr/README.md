@@ -23,7 +23,7 @@ boot1 的 `native_live` LLM 对话另有输入补全（`NATIVE_DIALOG_INPUT_GUAR
 
 ## 构建与安装
 
-已安装本地判停包时，`/data/native_asr.so` 是包含首轮判停与原生追问的组合库。不要运行下面的基础追问安装器直接覆盖它；应按[判停包说明](../native_endpoint/README.md)整包维护，或先执行该包对应的完整回滚。以下步骤用于尚未安装判停包的基础追问部署。
+已安装本地判停包时，`/data/native_asr.so` 是包含首轮判停与原生追问的组合库。下面的基础追问安装器会在上传前拒绝任何已存在的 `/data/native_endpoint` 路径，避免覆盖共享组件；完整回滚后保留的包目录也受此保护。应按[判停包说明](../native_endpoint/README.md)规划整包维护与恢复，不能删除目录绕过保护。以下步骤用于尚未安装判停包的基础追问部署。
 
 在仓库根目录执行，需 Zig 和设备 SSH 权限：
 

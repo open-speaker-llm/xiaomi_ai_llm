@@ -19,7 +19,7 @@ class TtsSentenceRecoveryTest(unittest.TestCase):
     def run_stream(self, mode, fallback='1'):
         with tempfile.TemporaryDirectory() as temp:
             code = functions('llm_aplay', 'stream_synthesize_sentence', 'stream_play_worker',
-                             'llm_stream_answer_and_play').replace('/tmp/native_first_stream', temp + '/stream')
+                             'llm_stream_answer_and_play', 'llm_sse_content').replace('/tmp/native_first_stream', temp + '/stream')
             code += r'''
 export TRACE="$TEST_DIR/trace"
 DIRAC_PLAYBACK_LOG="$TEST_DIR/aplay.log"
@@ -33,7 +33,12 @@ DEVICE_TTS_GEC_VERSION=test; DEVICE_TTS_UA=; DEVICE_TTS_ORIGIN=; DEVICE_TTS_VOIC
 log() { echo "$*"; }
 monotonic_ms() { echo 1000; }; elapsed_s() { echo 0; }
 json_escape() { cat; }; llm_build_messages() { echo messages; }; llm_build_request() { echo request; }
-curl() { printf '第一句。第二句。第三句。\n'; }; llm_sse_content() { cat; }
+curl() {
+    printf 'data: {"choices":[{"delta":{"content":"第一句。第二句。第三句。"}}]}\n'
+    [ "$MODE" != transportfail ] || return 28
+    [ "$MODE" != missingend ] || return 0
+    printf 'data: [DONE]\n'
+}
 timeout() { shift 2; "$@"; }
 fake_tts() {
     countfile="$TEST_DIR/count-$1"
@@ -82,6 +87,13 @@ echo "RESULT=$rc"
         self.assertEqual(trace, ['pcm:第一句。', 'pcm:第二句。', 'pcm:第三句。', 'drained'])
         self.assertEqual(count, 1)
         self.assertIn('assistant\t第一句。第二句。第三句。', history)
+
+    def test_interrupted_llm_never_commits_partial_answer(self):
+        for mode in ('transportfail', 'missingend'):
+            with self.subTest(mode=mode):
+                out, _, history, _ = self.run_stream(mode)
+                self.assertIn('RESULT=1', out)
+                self.assertEqual(history, '')
 
     def test_transient_middle_sentence_is_retried_once_without_duplicate(self):
         out, trace, _, count = self.run_stream('flaky')

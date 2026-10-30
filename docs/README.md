@@ -44,7 +44,9 @@
 | 系统切换后 SSH 失联、需要维护固件或控制 OTA | [双系统维护](runbooks/owner-maintenance.md) |
 | 构建失败提示 guard / 原生追问 / 首轮判停 / 端侧 TTS | [guard](../device/aivs_guard/README.md) / [native_asr](../device/native_asr/README.md) / [native_endpoint](../device/native_endpoint/README.md) / [ettsc](../device/ettsc/README.md) |
 | 修改代码后如何验证 | [测试方法](../TESTING.md) / [真实音箱用例](../tests/manual_native_first_cases.md) |
+| 每一轮升级后，我具体怎么测试 | [逐轮实际测试说明](testing/README.md) |
 | 某项能力究竟验收到了哪一步 | [当前状态与证据](status.md) |
+| 接下来优先优化什么、怎样执行与验收 | [功能审查与优化执行方案](plans/2026-10-30-functional-review.md) |
 
 ## 文档约定
 

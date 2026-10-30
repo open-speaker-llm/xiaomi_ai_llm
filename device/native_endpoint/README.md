@@ -85,6 +85,7 @@ python3 tools/speaker-maintenance/install_native_endpoint.py \
 - `--reuse-installed-package` 仅用于已完整回滚到旧基线、仍有有效暂存目录、且磁盘中整包清单完全相同的重新启用，不支持替换不同版本。
 - 不同版本升级需准备专门核验、备份和替换流程，不能通过删包目录或跳过哈希校验冒充首次安装。
 - 不要仅覆盖客户端、单独重装旧 native_asr，或同时加载实验 `run_*.sh`。生产 SO 包含首轮判停和原有追问，两者共用管理入口。
+- 基础追问安装器检测到任何 `/data/native_endpoint` 路径时，会在暂存或上传前拒绝操作；完整回滚后保留的安装包也会触发此保护。需要改换组件版本时先设计整包维护与恢复步骤，不能删除目录来绕过保护。
 
 ## 启动、恢复与验收
 
@@ -102,5 +103,36 @@ sh /data/native_asr.sh status
 服务以最长一天的有限运行段循环，临近期限只在空闲时排空并重新加载；未就绪的新轮保留原生收音。原生进程身份变化触发重新关联，旧拒绝证据保留。三次相邻故障后停止重试，间隔一分钟以上的运行故障重新计数；此时 status 报不可用，不能将原生回退描述为判停已恢复。专属管理日志约 1 MiB 后轮换。
 
 停用、重新启用与日常日志按[运维手册](../../docs/runbooks/operations.md#boot1-首轮本地判停)。完整回滚须在空闲时执行**本次安装实际输出**的 `BACKUP/restore.sh`，恢复原客户端、配置、SO，归档指令日志再重启，以免重复回答旧问题；安装包会保留，配置恢复为安装前状态。
+
+### 旧备份的启动目录准备
+
+早期备份中的 `client-functions.sh` 不会自行建立 `/tmp/xiaomi_native_route`。重启或临时目录清理后，旧 `restore.sh` 可能已恢复文件，却无法启动客户端。新安装流程会复制已修正的启动函数；更新仓库不会改变设备上已经保存的旧备份。
+
+恢复旧备份时，先登录音箱，将 `BACKUP` 替换为**本设备本次安装实际输出**的备份路径，再完整执行以下命令。它先验证备份及空闲状态，再准备权限为 `0700` 的启动目录，最后调用原恢复脚本；不更改备份内容或跳过原校验。校验失败、路径为符号链接或非目录时立即停止，先查明原因。
+
+```sh
+BACKUP=/data/endpoint-backup-实际时间
+(
+    set -eu
+    [ -d "$BACKUP" ] && [ ! -L "$BACKUP" ] || exit 1
+    for name in before.sha256 restore.sh client-functions.sh native_route_restore.sh \
+                native_first_client.sh native_first.env native_asr.so; do
+        [ -f "$BACKUP/$name" ] && [ ! -L "$BACKUP/$name" ] || exit 1
+    done
+    (cd "$BACKUP" && sha256sum -c before.sha256 >/dev/null)
+    [ ! -e /tmp/native_first_busy ] || { echo '请等待音箱空闲后再恢复' >&2; exit 1; }
+    RUN_DIR=/tmp/xiaomi_native_route
+    [ ! -L "$RUN_DIR" ] || exit 1
+    if [ -e "$RUN_DIR" ]; then
+        [ -d "$RUN_DIR" ] || exit 1
+    else
+        (umask 077; mkdir "$RUN_DIR")
+    fi
+    chmod 700 "$RUN_DIR"
+    sh "$BACKUP/restore.sh"
+)
+```
+
+看到 `ENDPOINT_ROLLED_BACK` 后，按运维手册检查客户端与原生 ASR，并实际验证报时和一轮问答；文件恢复或进程启动成功不能替代语音验收。
 
 验收采用[EP1–EP7](../../tests/manual_native_first_cases.md#ep-首轮本地判停)。截至 2026-09-20 已完成静默、超长拒绝与恢复、停顿轻声续说、连续轮、再次唤醒、免唤醒交接及实际回滚/启用；模型现场 RSS 约 27.7 MiB。2026-09-20 已完成整机重启及重启后的静默/停顿续说验收，自动恢复为单模型实例；随后用户实际断电，冷启动后的首问/上下文追问和单实例恢复也通过日志核验。全天稳定性仍未验收；200 轮耐久属于较早常驻包的文件输入，不能冒充最终包全部现场测试。版本哈希、反例和最终结果见[日常验收记录](../../docs/history/first-turn-endpoint/native-daily-20260919.md)。

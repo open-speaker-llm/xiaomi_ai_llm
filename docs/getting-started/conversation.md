@@ -19,7 +19,7 @@ python3 tools/speaker-maintenance/install_boot1_native_followup.py \
   --host 192.168.8.152 --build-dir /tmp/native-asr-build
 ```
 
-安装器校验固件、备份客户端和私有配置，并重启相关服务。记录实际输出的备份路径；安装后无需再手动启动第二个客户端。已有判停包时，`native_asr.so` 是组合库，不能用这个基础安装器覆盖，应整包维护或完整回滚后再处理。
+安装器校验固件、备份客户端和私有配置，并重启相关服务。记录实际输出的备份路径；安装后无需再手动启动第二个客户端。已有判停包时，`native_asr.so` 是组合库，基础安装器会在上传前拒绝覆盖。完整回滚后保留的包目录也受此保护；应按[整包维护说明](../../device/native_endpoint/README.md)安排版本适配与恢复，不能删除目录绕过检查。
 
 在音箱上检查：
 

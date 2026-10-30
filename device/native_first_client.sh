@@ -973,36 +973,63 @@ json_escape() {
 json_unicode_decode() {
     awk '
 function hv(c) { return index("0123456789abcdef", tolower(c)) - 1 }
+function hex4(h,    j, v, n) {
+    if (length(h) != 4) return -1;
+    n = 0;
+    for (j = 1; j <= 4; j++) {
+        v = hv(substr(h, j, 1));
+        if (v < 0) return -1;
+        n = n * 16 + v;
+    }
+    return n;
+}
 function emit(n) {
     if (n < 128) printf "%c", n;
     else if (n < 2048) printf "%c%c", 192 + int(n / 64), 128 + (n % 64);
-    else printf "%c%c%c", 224 + int(n / 4096), 128 + (int(n / 64) % 64), 128 + (n % 64);
+    else if (n < 65536) printf "%c%c%c", 224 + int(n / 4096), 128 + (int(n / 64) % 64), 128 + (n % 64);
+    else printf "%c%c%c%c", 240 + int(n / 262144), 128 + (int(n / 4096) % 64), 128 + (int(n / 64) % 64), 128 + (n % 64);
 }
 {
     for (i = 1; i <= length($0); i++) {
-        if (substr($0, i, 2) == "\\u" && i + 5 <= length($0)) {
-            h = substr($0, i + 2, 4);
-            n = 0;
-            ok = 1;
-            for (j = 1; j <= 4; j++) {
-                v = hv(substr(h, j, 1));
-                if (v < 0) ok = 0;
-                n = n * 16 + v;
-            }
-            if (ok) {
+        c = substr($0, i, 1);
+        if (c == "\\" && i < length($0)) {
+            c = substr($0, ++i, 1);
+            if (c == "u" && (n = hex4(substr($0, i + 1, 4))) >= 0) {
+                i += 4;
+                if (n >= 55296 && n <= 56319 && substr($0, i + 1, 2) == "\\u") {
+                    low = hex4(substr($0, i + 3, 4));
+                    if (low >= 56320 && low <= 57343) {
+                        n = 65536 + (n - 55296) * 1024 + low - 56320;
+                        i += 6;
+                    }
+                }
+                if (n >= 55296 && n <= 57343) n = 65533;
                 emit(n);
-                i += 5;
                 continue;
             }
+            if (c == "n" || c == "r" || c == "t") c = " ";
+            else if (c == "b" || c == "f") c = "";
+            else if (c != "\\" && c != "\"" && c != "/") c = "\\" c;
         }
-        printf "%s", substr($0, i, 1);
+        printf "%s", c;
     }
     printf "\n";
 }'
 }
 
 json_text_unescape() {
-    json_unicode_decode | sed 's/\\"/"/g; s/\\\\/\\/g'
+    json_unicode_decode
+}
+
+# 日志里的 text 是 JSON 字符串；转义引号不能被当作字符串结束。
+json_text_field() {
+    awk '
+        match($0, /"text"[ \t]*:[ \t]*"([^"\\]|\\.)*"/) {
+            s = substr($0, RSTART, RLENGTH);
+            sub(/^"text"[ \t]*:[ \t]*"/, "", s);
+            print substr(s, 1, length(s) - 1);
+        }
+    '
 }
 
 reset_native_result() {
@@ -1171,14 +1198,16 @@ EOF
     [ -n "$dialog_lines" ] || return 1
 
     raw_query=$(printf '%s\n' "$dialog_lines" \
-        | sed -n 's/.*"name":"RecognizeResult".*"is_final":true.*"text":"\([^"]*\)".*/\1/p' \
+        | awk '/"name"[ \t]*:[ \t]*"RecognizeResult"/ && /"is_final"[ \t]*:[ \t]*true/' \
+        | json_text_field \
         | tail -1)
     # Partial text may change while the user is still speaking. Neither a
     # routing keyword nor a failure Speak makes it final. Leave the dialog
     # unclaimed so a later poll can submit its complete, nonempty final once.
     [ -n "$raw_query" ] || return 1
     raw_speak=$(printf '%s\n' "$dialog_lines" \
-        | sed -n 's/.*"name":"Speak".*"text":"\([^"]*\)".*/\1/p' \
+        | awk '/"name"[ \t]*:[ \t]*"Speak"/' \
+        | json_text_field \
         | tail -1)
 
     [ -n "$raw_query$raw_speak" ] || return 1
@@ -1808,9 +1837,18 @@ start_followup_vad_prearm() {
         WINDOW_MIN_PEAK="$FOLLOWUP_WINDOW_MIN_PEAK" \
         WINDOW_MIN_RMS_THRESHOLD="$FOLLOWUP_WINDOW_MIN_RMS_THRESHOLD" \
         WINDOW_MIN_ACTIVE_PERMILLE="$FOLLOWUP_WINDOW_MIN_ACTIVE_PERMILLE" \
-        sh "$VAD_SCRIPT" "$FOLLOWUP_RECORD_MODE" "$timeout"
+        exec sh "$VAD_SCRIPT" "$FOLLOWUP_RECORD_MODE" "$timeout"
     ) &
     FOLLOWUP_VAD_PID=$!
+}
+
+cancel_followup_vad_prearm() {
+    if [ -n "$FOLLOWUP_VAD_PID" ]; then
+        kill "$FOLLOWUP_VAD_PID" 2>/dev/null
+        wait "$FOLLOWUP_VAD_PID" 2>/dev/null
+        FOLLOWUP_VAD_PID=""
+    fi
+    rm -f "$FOLLOWUP_ARM_FILE"
 }
 
 arm_followup_vad() {
@@ -1893,6 +1931,7 @@ tts_service_online() {
 # 端侧 EdgeTTS：ettsc 直连微软拿整段 MP3 → miplayer。成功返回 0，失败返回 1（交由上层兜底）。
 device_tts_play_text() {
     local text="$1"
+    local rc
     [ -n "$text" ] || return 1
     [ -x "$DEVICE_TTS_BIN" ] || { log "[TTS] 端侧 ettsc 不存在: $DEVICE_TTS_BIN"; return 1; }
 
@@ -1902,53 +1941,119 @@ device_tts_play_text() {
     ETTSC_ORIGIN="$DEVICE_TTS_ORIGIN" \
         timeout -t "$DEVICE_TTS_TIMEOUT" "$DEVICE_TTS_BIN" "$text" "$DEVICE_TTS_OUT" "$DEVICE_TTS_VOICE" \
         >/dev/null 2>&1
+    rc=$?
 
-    if [ -s "$DEVICE_TTS_OUT" ]; then
+    if [ "$rc" = 0 ] && [ -s "$DEVICE_TTS_OUT" ]; then
         log "[TTS] 端侧 EdgeTTS 出声: $(wc -c < "$DEVICE_TTS_OUT" 2>/dev/null) bytes, voice=$DEVICE_TTS_VOICE"
         DEVICE_TTS_PLAY_START_MS=$(monotonic_ms)   # 开播瞬间，供上层算首声延迟
-        miplayer --file "$DEVICE_TTS_OUT" >/dev/null 2>&1
-        return 0
+        miplayer --file "$DEVICE_TTS_OUT" >/dev/null 2>&1 && return 0
+        # 已开始播放，失败时不能安全地整段重播。
+        return 2
     fi
     log "[TTS] 端侧 EdgeTTS 失败（可能版本过期 403，见 DEVICE_TTS_GEC_VERSION）"
+    return 1
+}
+
+# 下载进程和播放器各自先打开 FIFO；即使 HTTP 首包前失败也会产生 EOF。
+# size_download 只用于保守判断是否可能播过 PCM，不代表声学播放量。
+http_stream_play() {
+    local wd="${HTTP_STREAM_DIR:-/tmp/native_first_http}" helper="${DIRAC_APLAY:-/data/dirac_aplay.sh}"
+    local deadline rc play_rc download_timeout="${STREAM_TIMEOUT:-180}"
+    local drain_timeout="${TTS_NATIVE_STATUS_MAX_SECONDS:-120}"
+    HTTP_STREAM_BYTES=unknown
+    case "$download_timeout" in ''|*[!0-9]*|0) download_timeout=180;; esac
+    case "$drain_timeout" in ''|*[!0-9]*|0) drain_timeout=120;; esac
+    mkdir -p "$wd" || return 1
+    rm -f "$wd/fifo" "$wd/bytes"
+    mkfifo "$wd/fifo" 2>/dev/null || mknod "$wd/fifo" p 2>/dev/null || return 1
+    # FD 9 在请求之前与读端握手，首包前失败也能关闭最后一个写端。
+    # 后台直接执行 curl，清理这个 PID 不会遗留另一个下载子进程。
+    curl -fsS --no-buffer --max-time "$download_timeout" -o "$wd/fifo" \
+        --write-out '%{size_download}' "$@" >"$wd/bytes" 9>"$wd/fifo" 2>/dev/null &
+    CURL_PID=$!
+    (
+        # 打开读端后再启动播放器；exec 让清理 PID 始终对应实际播放器。
+        exec 0<"$wd/fifo"
+        if [ -x "$helper" ]; then
+            export LLM_DIRAC_ENABLED="${LLM_DIRAC_ENABLED:-1}"
+            exec "$helper"
+        fi
+        exec aplay
+    ) 2>"${DIRAC_PLAYBACK_LOG:-/tmp/native_first_dirac.log}" &
+    APLAY_PID=$!
+    deadline=$(( $(date +%s) + download_timeout + 1 ))
+    while kill -0 "$CURL_PID" 2>/dev/null; do
+        if ! kill -0 "$APLAY_PID" 2>/dev/null || [ "$(date +%s)" -ge "$deadline" ]; then
+            kill -9 "$CURL_PID" 2>/dev/null
+            break
+        fi
+        sleep 0.05
+    done
+    wait "$CURL_PID" 2>/dev/null
+    rc=$?
+    CURL_PID=""
+    HTTP_STREAM_BYTES=$(cat "$wd/bytes" 2>/dev/null)
+    case "$HTTP_STREAM_BYTES" in ''|*[!0-9]*) HTTP_STREAM_BYTES=unknown;; esac
+    deadline=$(( $(date +%s) + drain_timeout ))
+    while kill -0 "$APLAY_PID" 2>/dev/null; do
+        if [ "$rc" != 0 ] || [ "$(date +%s)" -ge "$deadline" ]; then
+            kill -9 "$APLAY_PID" 2>/dev/null
+            break
+        fi
+        sleep 0.05
+    done
+    wait "$APLAY_PID" 2>/dev/null
+    play_rc=$?
+    APLAY_PID=""
+    rm -f "$wd/fifo" "$wd/bytes"
+    if [ "$rc" = 0 ] && [ "$play_rc" = 0 ] && [ "$HTTP_STREAM_BYTES" != unknown ] && [ "$HTTP_STREAM_BYTES" -gt 44 ]; then
+        return 0
+    fi
+    log "[TTS] HTTP 播放失败 transport=${rc:-unknown} player=$play_rc bytes=$HTTP_STREAM_BYTES"
     return 1
 }
 
 # 整段文本 → TTS。按 TTS_ENGINE 选择端侧 ettsc 或 Mac 微服务；失败统一降级原生 mibrain。
 tts_play_text() {
     local text="$1"
+    local rc
     [ -n "$text" ] || return 1
 
     if [ "$TTS_ENGINE" = "device" ]; then
-        device_tts_play_text "$text" && return 0
+        device_tts_play_text "$text"
+        rc=$?
+        [ "$rc" != 0 ] || return 0
+        [ "$rc" != 2 ] || return 1
         if [ "$TTS_FALLBACK_NATIVE" = "1" ]; then
             log "[TTS] 端侧 EdgeTTS 失败，降级原生 mibrain"
             resume_native_player 1
-            native_tts_speak "$text"
-            wait_native_tts_playback "$text"
+            native_tts_speak "$text" && wait_native_tts_playback "$text"
+            return $?
         fi
-        return 0
+        return 1
     fi
 
     if [ "$TTS_FALLBACK_NATIVE" = "1" ] && ! tts_service_online; then
         log "[TTS] 微服务不可用，降级原生 mibrain"
         resume_native_player 1
-        native_tts_speak "$text"
-        wait_native_tts_playback "$text"
-        return 0
+        native_tts_speak "$text" && wait_native_tts_playback "$text"
+        return $?
     fi
 
-    rm -f /tmp/stream_fifo
-    mkfifo /tmp/stream_fifo 2>/dev/null || mknod /tmp/stream_fifo p 2>/dev/null
-    curl -s --no-buffer -o /tmp/stream_fifo --max-time "$STREAM_TIMEOUT" \
+    if http_stream_play \
         -F "message=${text}" \
         -F "volume=${LLM_VOLUME}" \
-        "${TTS_SERVER}/api/v1/tts/stream" &
-    CURL_PID=$!
-    llm_aplay /tmp/stream_fifo &
-    APLAY_PID=$!
-    wait $CURL_PID 2>/dev/null
-    wait $APLAY_PID 2>/dev/null
-    rm -f /tmp/stream_fifo
+        "${TTS_SERVER}/api/v1/tts/stream"; then
+        return 0
+    fi
+    if [ "$TTS_FALLBACK_NATIVE" = 1 ] && [ "$HTTP_STREAM_BYTES" != unknown ] && [ "$HTTP_STREAM_BYTES" -le 44 ]; then
+        log "[TTS] HTTP 未交付 PCM，降级原生 mibrain"
+        resume_native_player 1
+        native_tts_speak "$text" && wait_native_tts_playback "$text"
+        return $?
+    fi
+    # 已可能播过部分回答时不重播整段，防止用户听到重复内容。
+    return 1
 }
 
 # 构造 messages JSON（system + 最近历史 + 当前 user），输出不含外层方括号
@@ -1979,8 +2084,10 @@ llm_build_request() {
 
 # 提取 SSE 的 content 字符串，保留转义引号；换行转为空格以便逐句播报。
 llm_sse_content() {
-    awk '
+    awk -v status_file="${1:-}" '
         /^data:/ {
+            if ($0 ~ /^data:[ \t]*\[DONE\][ \t\r]*$/ || $0 ~ /"finish_reason"[ \t]*:[ \t]*"stop"/) complete = 1;
+            if ($0 ~ /"error"[ \t]*:/ || ($0 ~ /"finish_reason"[ \t]*:[ \t]*"[^"]+"/ && $0 !~ /"finish_reason"[ \t]*:[ \t]*"stop"/)) failed = 1;
             if (!match($0, /"content"[ \t]*:[ \t]*"([^"\\]|\\.)*"/)) next
             s = substr($0, RSTART, RLENGTH)
             sub(/^"content"[ \t]*:[ \t]*"/, "", s)
@@ -1997,6 +2104,12 @@ llm_sse_content() {
                 out = out c
             }
             if (length(out)) { print out; fflush() }
+        }
+        END {
+            if (status_file != "") {
+                print (complete && !failed ? "complete" : "incomplete") > status_file;
+                close(status_file);
+            }
         }
     '
 }
@@ -2017,23 +2130,33 @@ llm_direct_answer() {
 
     # 流式读取：记录首个 content 到达时刻（TTFT）+ 逐片累积答案。
     # 这样能把"卡在首字之前"和"逐字生成慢"区分开（埋点用，不改播放行为：仍整段收完再播）。
-    local t_req ttft_file ans_file
+    local t_req ttft_file ans_file transport_file status_file transport_rc stream_status
+    LLM_DIRECT_ANSWER=""
     t_req=$(monotonic_ms)
     ttft_file="/tmp/native_first_llm_ttft"
     ans_file="/tmp/native_first_llm_ans"
-    rm -f "$ttft_file" "$ans_file"
+    transport_file="/tmp/native_first_llm_transport"
+    status_file="/tmp/native_first_llm_status"
+    rm -f "$ttft_file" "$ans_file" "$transport_file" "$status_file"
 
-    curl -sS -N -m "$LLM_DIRECT_TIMEOUT" "$LLM_API_BASE/chat/completions" \
+    { curl -fsS -N -m "$LLM_DIRECT_TIMEOUT" "$LLM_API_BASE/chat/completions" \
         -H "Authorization: Bearer $LLM_API_KEY" \
         -H "Content-Type: application/json" \
-        -d "$req" 2>/dev/null \
-        | llm_sse_content \
+        -d "$req" 2>/dev/null; printf '%s\n' "$?" > "$transport_file"; } \
+        | llm_sse_content "$status_file" \
         | while IFS= read -r piece; do
             [ -n "$piece" ] || continue
             [ -f "$ttft_file" ] || monotonic_ms > "$ttft_file"
             printf '%s' "$piece" >> "$ans_file"
         done
 
+    transport_rc=$(cat "$transport_file" 2>/dev/null)
+    stream_status=$(cat "$status_file" 2>/dev/null)
+    if [ "$transport_rc" != 0 ] || [ "$stream_status" != complete ]; then
+        log "[LLM-NATIVE] 回答流未完整结束 transport=${transport_rc:-unknown} status=${stream_status:-unknown}"
+        rm -f "$ttft_file" "$ans_file" "$transport_file" "$status_file"
+        return 1
+    fi
     answer=$(cat "$ans_file" 2>/dev/null)
     LLM_DIRECT_ANSWER="$answer"
     LLM_DIRECT_GEN_S=$(elapsed_s "$t_req")
@@ -2042,14 +2165,9 @@ llm_direct_answer() {
     else
         LLM_DIRECT_TTFT=""
     fi
-    rm -f "$ttft_file" "$ans_file"
+    rm -f "$ttft_file" "$ans_file" "$transport_file" "$status_file"
     [ -n "$answer" ] || return 1
-
-    # 追加到会话历史（存已转义文本，构造请求时直接复用）
-    {
-        printf 'user\t%s\n' "$(printf '%s' "$user" | json_escape)"
-        printf 'assistant\t%s\n' "$(printf '%s' "$answer" | json_escape)"
-    } >> "$LLM_HISTORY_DIR/$sid"
+    # 调用者在实际播报成功之后提交历史。
     return 0
 }
 
@@ -2168,14 +2286,15 @@ stream_play_worker() {
 
 # 句级流式（仿 Mac Server StreamingPipeline）：LLM 边流式输出边按 。！？ 切句。
 # 生产者切句并生成 PCM 或原生补播任务，再置 NNNN.rdy；后台消费者顺序播放，
-# 于是"合成下一句"与"播放当前句"重叠，句间无空档。整段答案存 LLM_DIRECT_ANSWER 供历史/去重。
+# 使"合成下一句"与"播放当前句"重叠；下句未就绪时仍可能停顿。
 # 产出：LLM_DIRECT_TTFT(首字s)/LLM_DIRECT_GEN_S(LLM流时长s)/LLM_STREAM_FIRST_SOUND(首声s)/LLM_STREAM_SEGS(成功句数)
 llm_stream_answer_and_play() {
     local sid="$1"
     local user="$2"
     local t0="$3"
-    local messages req t_req seq n play_pid play_rc native_segs
+    local messages req t_req seq n play_pid play_rc native_segs transport_rc stream_status
     local wd="/tmp/native_first_stream"
+    LLM_DIRECT_ANSWER=""
 
     if [ -z "$LLM_API_KEY" ]; then
         log "[LLM-NATIVE] 缺少 LLM_API_KEY（在 /data/native_first.env 配对应后端的 API key）"
@@ -2196,18 +2315,19 @@ llm_stream_answer_and_play() {
     # 生产者管道：LLM 流 → 抽 content → tee 原始(供历史) → awk 即时切句 → 逐句 ettsc 合成。
     # awk 首片写 ttft，END 写 genend(=LLM 流结束时刻)；切句规则与服务端一致(。！？，含标点)。
     seq=0
-    curl -sS -N -m "$LLM_DIRECT_TIMEOUT" "$LLM_API_BASE/chat/completions" \
+    { curl -fsS -N -m "$LLM_DIRECT_TIMEOUT" "$LLM_API_BASE/chat/completions" \
         -H "Authorization: Bearer $LLM_API_KEY" \
         -H "Content-Type: application/json" \
-        -d "$req" 2>/dev/null \
-        | llm_sse_content \
+        -d "$req" 2>/dev/null; printf '%s\n' "$?" > "$wd/transport"; } \
+        | llm_sse_content "$wd/status" \
         | tee "$wd/raw" \
         | awk -v wd="$wd" '
             NR == 1 { getline up < "/proc/uptime"; close("/proc/uptime"); split(up, a, " "); print a[1] > (wd "/ttft"); close(wd "/ttft") }
             { buf = buf $0
               do { p = nb(buf); if (p > 0) { s = substr(buf, 1, p); buf = substr(buf, p + 1); gsub(/^[ \t]+|[ \t]+$/, "", s); if (length(s) > 3) { print s; fflush() } } } while (p > 0) }
             END { getline ue < "/proc/uptime"; close("/proc/uptime"); split(ue, e, " "); print e[1] > (wd "/genend"); close(wd "/genend");
-                  gsub(/^[ \t]+|[ \t]+$/, "", buf); if (length(buf) > 0) { print buf; fflush() } }
+                  getline status < (wd "/status"); close(wd "/status");
+                  gsub(/^[ \t]+|[ \t]+$/, "", buf); if (status == "complete" && length(buf) > 0) { print buf; fflush() } }
             function nb(t,   x, y, z, m) { x = index(t, "。"); y = index(t, "！"); z = index(t, "？"); m = 0; if (x > 0) m = x; if (y > 0 && (m == 0 || y < m)) m = y; if (z > 0 && (m == 0 || z < m)) m = z; if (m == 0) return 0; return m + 2 }
         ' \
         | while IFS= read -r sentence; do
@@ -2221,6 +2341,12 @@ llm_stream_answer_and_play() {
     : > "$wd/done"
     wait "$play_pid"
     play_rc=$?
+    transport_rc=$(cat "$wd/transport" 2>/dev/null)
+    stream_status=$(cat "$wd/status" 2>/dev/null)
+    if [ "$transport_rc" != 0 ] || [ "$stream_status" != complete ]; then
+        log "[LLM-NATIVE] 回答流未完整结束 transport=${transport_rc:-unknown} status=${stream_status:-unknown}，不写入完整历史"
+        return 1
+    fi
     if [ "$play_rc" != "0" ]; then
         log "[TTS] 本轮播报不完整 rc=$play_rc，不写入完整回答历史"
         return 1
@@ -2293,6 +2419,7 @@ send_text_native() {
         fi
         if ! llm_stream_answer_and_play "$session_id" "$text" "$t0"; then
             log "[LLM-NATIVE] 流式回答或播报失败，结束"
+            cancel_followup_vad_prearm
             led_feedback_error
             sleep 1
             finish_llm_playback
@@ -2325,7 +2452,17 @@ send_text_native() {
     if [ "$cleanup_mode" = "defer" ]; then
         start_followup_vad_prearm
     fi
-    tts_play_text "$LLM_DIRECT_ANSWER"
+    if ! tts_play_text "$LLM_DIRECT_ANSWER"; then
+        log "[LLM-NATIVE] 播报失败，结束且不提交完整历史"
+        cancel_followup_vad_prearm
+        led_feedback_error
+        finish_llm_playback
+        return 1
+    fi
+    {
+        printf 'user\t%s\n' "$(printf '%s' "$text" | json_escape)"
+        printf 'assistant\t%s\n' "$(printf '%s' "$LLM_DIRECT_ANSWER" | json_escape)"
+    } >> "$LLM_HISTORY_DIR/$session_id"
     t2=$(elapsed_s "$t0")
     if [ "$cleanup_mode" = "defer" ]; then
         arm_followup_vad
@@ -2375,21 +2512,7 @@ send_text_and_play() {
     log "[NATIVE] stop native player during fallback (${STOP_NATIVE_SECONDS}s)"
     t0=$(date +%s)
 
-    rm -f /tmp/stream_fifo
-    mkfifo /tmp/stream_fifo 2>/dev/null || mknod /tmp/stream_fifo p 2>/dev/null
-
-    curl -s --no-buffer -o /tmp/stream_fifo --max-time "$STREAM_TIMEOUT" \
-        -F "message=${text}" \
-        -F "session_id=${session_id}" \
-        -F "backend=${BACKEND}" \
-        -F "speed=1.0" \
-        -F "volume=${LLM_VOLUME}" \
-        "${SERVER}/api/v1/stream/text_chat" &
-    CURL_PID=$!
-
     led_feedback_llm_playing
-    llm_aplay /tmp/stream_fifo &
-    APLAY_PID=$!
     if [ "$cleanup_mode" = "defer" ]; then
         start_followup_vad_prearm
     fi
@@ -2397,14 +2520,20 @@ send_text_and_play() {
         native_followup_tts_start
     fi
 
-    wait $CURL_PID 2>/dev/null
-    t1=$(date +%s)
-    log "[LLM] stream download done in $((t1 - t0))s"
-    wait $APLAY_PID 2>/dev/null
+    local stream_rc=0
+    http_stream_play \
+        -F "message=${text}" -F "session_id=${session_id}" -F "backend=${BACKEND}" \
+        -F "speed=1.0" -F "volume=${LLM_VOLUME}" \
+        "${SERVER}/api/v1/stream/text_chat" || stream_rc=1
     t2=$(date +%s)
-    log "[LLM] aplay done in $((t2 - t0))s (drain=$((t2 - t1))s)"
+    log "[LLM] HTTP playback done in $((t2 - t0))s rc=$stream_rc"
     if [ "$cleanup_mode" = "native_defer" ]; then
         native_followup_tts_end
+    fi
+    if [ "$stream_rc" != 0 ]; then
+        cancel_followup_vad_prearm
+        finish_llm_playback
+        return 1
     fi
     if [ "$cleanup_mode" = "defer" ]; then
         arm_followup_vad
@@ -2415,7 +2544,7 @@ send_text_and_play() {
     else
         finish_llm_playback
     fi
-    rm -f /tmp/stream_fifo
+    return 0
 }
 
 send_voice_and_play() {
@@ -2434,22 +2563,12 @@ send_voice_and_play() {
     apply_llm_master_volume
     freeze_native_player
 
-    rm -f /tmp/stream_fifo
-    mkfifo /tmp/stream_fifo 2>/dev/null || mknod /tmp/stream_fifo p 2>/dev/null
-
-    curl -s --no-buffer -o /tmp/stream_fifo --max-time "$STREAM_TIMEOUT" \
-        -F "file=@${voice_file}" \
-        "${SERVER}/api/v1/stream/chat?session_id=${session_id}&backend=${BACKEND}&speed=1.0&volume=${LLM_VOLUME}" &
-    CURL_PID=$!
-
     led_feedback_llm_playing
-    llm_aplay /tmp/stream_fifo &
-    APLAY_PID=$!
-
-    wait $CURL_PID 2>/dev/null
-    wait $APLAY_PID 2>/dev/null
+    local stream_rc=0
+    http_stream_play -F "file=@${voice_file}" \
+        "${SERVER}/api/v1/stream/chat?session_id=${session_id}&backend=${BACKEND}&speed=1.0&volume=${LLM_VOLUME}" || stream_rc=1
     finish_llm_playback
-    rm -f /tmp/stream_fifo
+    return "$stream_rc"
 }
 
 extract_ai_service_asr_query() {
@@ -2687,9 +2806,10 @@ handle_llm_dialog() {
         log "[FOLLOWUP] mode=native_multirounds，不启动本地录音"
         last_dialog=$(get_aivs_lab_latest_dialog_id)
         native_followup_mark_multirounds
-        send_text_and_play "$session_id" "$first_text" native_defer
+        ret=0
+        send_text_and_play "$session_id" "$first_text" native_defer || ret=$?
 
-        while true; do
+        while [ "$ret" -eq 0 ]; do
             turn=$((turn + 1))
             set_state "FOLLOWUP_LISTENING"
             led_feedback_llm_followup_listening
@@ -2703,7 +2823,7 @@ handle_llm_dialog() {
             led_feedback_followup_asr_ok
             log "[TURN $turn] 原生追问转 LLM: $FOLLOWUP_TEXT"
             native_followup_mark_multirounds
-            send_text_and_play "$session_id" "$FOLLOWUP_TEXT" native_defer
+            send_text_and_play "$session_id" "$FOLLOWUP_TEXT" native_defer || break
             log "[TURN $turn] 播放完成"
         done
 
@@ -2744,9 +2864,10 @@ handle_llm_dialog() {
         return 0
     fi
 
-    send_text_and_play "$session_id" "$first_text" defer
+    ret=0
+    send_text_and_play "$session_id" "$first_text" defer || ret=$?
 
-    while true; do
+    while [ "$ret" -eq 0 ]; do
         turn=$((turn + 1))
         wait_or_run_followup_vad
         ret=$?
@@ -2773,10 +2894,11 @@ handle_llm_dialog() {
 
         led_feedback_followup_asr_ok
         log "[TURN $turn] 发送追问到 LLM: $FOLLOWUP_TEXT"
-        send_text_and_play "$session_id" "$FOLLOWUP_TEXT" defer
+        send_text_and_play "$session_id" "$FOLLOWUP_TEXT" defer || break
         log "[TURN $turn] 播放完成"
     done
 
+    cancel_followup_vad_prearm
     finish_llm_playback
     led_off
     resume_native_asr
@@ -2891,11 +3013,7 @@ cleanup() {
         kill "$HOOK_WATCHDOG_PID" 2>/dev/null
         HOOK_WATCHDOG_PID=""
     fi
-    if [ -n "$FOLLOWUP_VAD_PID" ]; then
-        kill "$FOLLOWUP_VAD_PID" 2>/dev/null
-        FOLLOWUP_VAD_PID=""
-    fi
-    rm -f "$FOLLOWUP_ARM_FILE"
+    cancel_followup_vad_prearm
     rm -f "$NATIVE_REPLAY_CANCEL_MARKER"
     clear_busy
     resume_native_player
