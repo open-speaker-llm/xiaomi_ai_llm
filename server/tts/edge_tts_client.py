@@ -2,10 +2,9 @@
 Edge TTS 免费语音合成（微软）
 """
 import io
-import struct
+import shutil
 import subprocess
 import tempfile
-import numpy as np
 import edge_tts
 
 
@@ -22,6 +21,9 @@ DEFAULT_VOICE = "zh-CN-YunjianNeural"
 class EdgeTTSClient:
     def __init__(self, voice: str = DEFAULT_VOICE):
         self.voice = voice
+        self.ffmpeg = shutil.which("ffmpeg")
+        if not self.ffmpeg:
+            raise RuntimeError("EdgeTTS requires ffmpeg on PATH; install ffmpeg and verify `ffmpeg -version` before starting the server")
 
     async def _generate_mp3(self, text: str, speed: float = 1.0) -> bytes:
         rate_percent = int((speed - 1.0) * 100)
@@ -65,7 +67,7 @@ class EdgeTTSClient:
                 filters.append(f'volume={volume}')
             filters.append('alimiter=limit=0.95')
 
-            cmd = ['ffmpeg', '-y', '-i', mp3_path, '-filter:a', ','.join(filters)]
+            cmd = [self.ffmpeg, '-y', '-i', mp3_path, '-filter:a', ','.join(filters)]
             cmd.extend([
                 '-f', 'wav',
                 '-acodec', 'pcm_s16le',
@@ -73,7 +75,7 @@ class EdgeTTSClient:
                 '-ac', '1',
                 wav_path,
             ])
-            subprocess.run(cmd, capture_output=True, timeout=10)
+            subprocess.run(cmd, capture_output=True, timeout=10, check=True)
             with open(wav_path, 'rb') as f:
                 return f.read()
         finally:

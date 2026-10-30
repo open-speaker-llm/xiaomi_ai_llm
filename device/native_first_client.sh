@@ -63,6 +63,8 @@ FOLLOWUP_TIMEOUT="${FOLLOWUP_TIMEOUT:-8}"
 # stream 模式下：FOLLOWUP_TIMEOUT=等你开口的超时；FOLLOWUP_MAX_SECONDS=单次追问最长语音(说完即停)。
 FOLLOWUP_MAX_SECONDS="${FOLLOWUP_MAX_SECONDS:-15}"
 FOLLOWUP_ENABLED="${FOLLOWUP_ENABLED:-1}"
+# 仅在已经进入追问后识别独立结束语；默认保持原有模型处理行为。
+FOLLOWUP_EXIT_ENABLED="${FOLLOWUP_EXIT_ENABLED:-0}"
 FOLLOWUP_MODE="${FOLLOWUP_MODE:-local_record}"
 FOLLOWUP_THRESHOLD="${FOLLOWUP_THRESHOLD:-180}"
 FOLLOWUP_START_HITS="${FOLLOWUP_START_HITS:-1}"
@@ -1316,13 +1318,16 @@ extract_aivs_latest_final_text_after() {
     [ -n "$dialog_lines" ] || return 1
 
     raw_text=$(printf '%s\n' "$dialog_lines" \
-        | sed -n 's/.*"name":"RecognizeResult".*"is_final":true.*"text":"\([^"]*\)".*/\1/p' \
+        | awk '/"name"[ \t]*:[ \t]*"RecognizeResult"/ && /"is_final"[ \t]*:[ \t]*true/' \
+        | json_text_field \
         | tail -1)
     [ -n "$raw_text" ] || return 1
 
     text=$(printf '%s\n' "$raw_text" | json_text_unescape)
     [ -n "$text" ] || return 1
-    [ "$text" = "$ignore_text" ] && return 1
+    if [ "$text" = "$ignore_text" ] && ! is_followup_exit_command "$text"; then
+        return 1
+    fi
 
     FOLLOWUP_TEXT="$text"
     echo "$dialog_id" > "$AIVS_LAB_LAST_DIALOG_FILE"
@@ -2644,7 +2649,8 @@ transcribe_followup_voice_native() {
         FOLLOWUP_REASON="native_asr_empty"
         return 1
     fi
-    if [ "$FOLLOWUP_NATIVE_MIN_QUERY_BYTES" -gt 0 ] 2>/dev/null; then
+    # 结束语只在追问 ASR 中使用，短词也不能触发另一次 Mac ASR 回退。
+    if ! is_followup_exit_command "$FOLLOWUP_TEXT" && [ "$FOLLOWUP_NATIVE_MIN_QUERY_BYTES" -gt 0 ] 2>/dev/null; then
         query_bytes=$(printf '%s' "$FOLLOWUP_TEXT" | wc -c 2>/dev/null)
         query_bytes="${query_bytes:-0}"
         if [ "$query_bytes" -lt "$FOLLOWUP_NATIVE_MIN_QUERY_BYTES" ] 2>/dev/null; then
@@ -2678,6 +2684,28 @@ transcribe_followup_voice() {
             log "[FOLLOWUP] 未知 ASR 引擎: $FOLLOWUP_ASR_ENGINE"
             return 1
             ;;
+    esac
+}
+
+is_followup_exit_command() {
+    [ "${FOLLOWUP_EXIT_ENABLED:-0}" = 1 ] || return 1
+    local text
+    text=$(printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    # 只允许句尾标点；引号、否定、称呼和其它内容均保留，不做子串匹配。
+    while :; do
+        case "$text" in
+            *。) text=${text%。} ;;
+            *！) text=${text%！} ;;
+            *？) text=${text%？} ;;
+            *.) text=${text%.} ;;
+            *!) text=${text%!} ;;
+            *\?) text=${text%?} ;;
+            *) break ;;
+        esac
+    done
+    case "$text" in
+        结束对话|退出对话|停止对话|不聊了|退下) return 0 ;;
+        *) return 1 ;;
     esac
 }
 
@@ -2743,11 +2771,17 @@ play_native_dialog_prompt() {
 
 collect_native_dialog_text() {
     local current="$1" pending="" prompt attempts=0
+    local is_followup="${2:-0}"
     local limit="${NATIVE_DIALOG_INPUT_MAX_REPROMPTS:-2}"
     case "$limit" in 1|2|3) ;; *) limit=2 ;; esac
     NATIVE_DIALOG_TEXT="$current"
-    [ "${NATIVE_DIALOG_INPUT_GUARD:-1}" = "1" ] || return 0
     while :; do
+        if [ "$is_followup" = 1 ] && is_followup_exit_command "$current"; then
+            log "[FOLLOWUP] explicit exit; no LLM submission"
+            NATIVE_DIALOG_TEXT=""
+            return 126
+        fi
+        [ "${NATIVE_DIALOG_INPUT_GUARD:-1}" = "1" ] || return 0
         classify_native_dialog_text "$current"
         if [ "$NATIVE_DIALOG_TEXT_KIND" = "complete" ]; then
             if [ -n "$pending" ]; then
@@ -2820,6 +2854,10 @@ handle_llm_dialog() {
                 break
             fi
             last_dialog=$(get_aivs_lab_latest_dialog_id)
+            if is_followup_exit_command "$FOLLOWUP_TEXT"; then
+                log "[FOLLOWUP] explicit exit; no LLM submission"
+                break
+            fi
             led_feedback_followup_asr_ok
             log "[TURN $turn] 原生追问转 LLM: $FOLLOWUP_TEXT"
             native_followup_mark_multirounds
@@ -2836,9 +2874,9 @@ handle_llm_dialog() {
     fi
 
     if [ "$FOLLOWUP_RECORD_MODE" = "native_live" ] && is_system1_root; then
-        local next_text="$first_text" saved_dup="$SUPPRESS_DUP_SECONDS"
+        local next_text="$first_text" saved_dup="$SUPPRESS_DUP_SECONDS" is_followup=0
         while true; do
-            collect_native_dialog_text "$next_text" || break
+            collect_native_dialog_text "$next_text" "$is_followup" || break
             next_text="$NATIVE_DIALOG_TEXT"
             if [ "$turn" -gt 1 ]; then
                 led_feedback_followup_asr_ok
@@ -2850,6 +2888,7 @@ handle_llm_dialog() {
             fi
             turn=$((turn + 1))
             next_text="$FOLLOWUP_TEXT"
+            is_followup=1
             # A deliberate repeated followup is a new turn, not a duplicate wake.
             SUPPRESS_DUP_SECONDS=0
         done
@@ -2892,6 +2931,10 @@ handle_llm_dialog() {
             break
         fi
 
+        if is_followup_exit_command "$FOLLOWUP_TEXT"; then
+            log "[FOLLOWUP] explicit exit; no LLM submission"
+            break
+        fi
         led_feedback_followup_asr_ok
         log "[TURN $turn] 发送追问到 LLM: $FOLLOWUP_TEXT"
         send_text_and_play "$session_id" "$FOLLOWUP_TEXT" defer || break

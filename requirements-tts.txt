@@ -1,0 +1,7 @@
+# 轻量 EdgeTTS 服务；系统另需可执行的 ffmpeg。
+fastapi>=0.109.0
+uvicorn>=0.27.0
+python-multipart>=0.0.9
+edge-tts>=7.0.0
+pyyaml>=6.0.1
+python-dotenv>=1.0.0

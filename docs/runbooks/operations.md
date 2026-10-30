@@ -8,6 +8,8 @@
 
 ## 先确认现在运行的是什么
 
+想先检查配置、组件和包一致性，可使用[只读诊断](../reference/diagnostics.md)。它不执行配置或状态管理器，不停止服务；状态输出仅是快照迹象，不能代替下面的组件检查和真人问答。
+
 在开发机登录音箱：
 
 ```sh
@@ -66,7 +68,7 @@ tail -n 50 /tmp/native_first_client.log
 
 预期管理器为 `healthy`，客户端记录 `native ASR-only ready; no external recognizer`。每次追问有新 dialog 和 `ASR-only ... disabled=NLP,TTS`，最终文本进入同一 LLM session；静默结束返回 124 并回到 IDLE。
 
-日常使用：唤醒并让 LLM 回答，绿灯续听时直接追问，保持安静退出。没有播放中打断，“退下”等结束语交给 LLM 正常处理。
+日常使用：唤醒并让 LLM 回答，绿灯续听时直接追问，保持安静退出。没有播放中打断。默认配置把“退下”等结束语交给 LLM；需要直接退出追问时，可按[配置参考](../reference/configuration.md#用结束语退出追问)显式启用结束语开关。
 
 临时停用追问：将配置最后生效的 `SYSTEM1_FOLLOWUP_ENABLED` 设为 `0` 后重启客户端；完整卸载/回退使用安装器输出备份目录内的 `restore.sh`。boot0 保留原录音与文件 ASR；不要全局改成 `native_live`。旧 PCM + Mac 路线与原生追问管理器不同时加载。
 

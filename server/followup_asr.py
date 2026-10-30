@@ -7,19 +7,27 @@ from contextlib import asynccontextmanager
 
 
 def create_app(model: str, threads: int):
-    import torch
     from fastapi import FastAPI
     from server import main
 
     @asynccontextmanager
     async def lifespan(app):
-        torch.set_num_threads(threads)
-        main.asr_client = main.WhisperASR(model_name=model, language="zh", device="cpu")
-        # The processed-PCM path need not use the permissive gate retained for
-        # old weak/raw multichannel recordings. Reject observed nonsense turns.
-        main.asr_client.quality_min_logprob = -0.75
-        yield
         main.asr_client = None
+        try:
+            # This standalone service owns its ASR dependencies; importing the
+            # shared routes must not load Whisper for the TTS-only application.
+            import torch
+            from server.asr.whisper_client import WhisperASR
+
+            torch.set_num_threads(threads)
+            main.asr_client = WhisperASR(model_name=model, language="zh", device="cpu")
+            # The processed-PCM path need not use the permissive gate retained
+            # for old weak/raw recordings. Reject observed nonsense turns.
+            main.asr_client.quality_min_logprob = -0.75
+            yield
+        finally:
+            # Also release the model reference after startup or lifespan errors.
+            main.asr_client = None
 
     app = FastAPI(title="Speaker follow-up ASR", lifespan=lifespan)
     app.add_api_route("/api/v1/route/asr", main.route_asr, methods=["POST"])

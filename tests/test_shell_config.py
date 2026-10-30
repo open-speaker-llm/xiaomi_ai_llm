@@ -22,6 +22,7 @@ class ShellConfigTest(unittest.TestCase):
     def test_device_shell_scripts_parse(self):
         scripts = [
             "device/native_first_client.sh",
+            "device/data_init_native_first.sh",
             "device/vad_record.sh",
             "device/native_result_timing_probe.sh",
             "device/stream_client.sh",
@@ -143,6 +144,7 @@ start_followup_vad_prearm
         client_text = (ROOT / "device/native_first_client.sh").read_text()
         expected_pairs = {
             "FOLLOWUP_ARM_DELAY": "0",
+            "FOLLOWUP_EXIT_ENABLED": "0",
             "FOLLOWUP_ARM_POLL_SECONDS": "0.03",
             "FOLLOWUP_START_HITS": "1",
             "FOLLOWUP_MIN_RAW_BYTES": "16000",

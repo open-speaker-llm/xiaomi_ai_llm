@@ -40,6 +40,7 @@
 | 没响应、失败提示漏音、追问异常、音量或 TTS 问题 | [排障手册](runbooks/troubleshooting.md) |
 | 切换模型、选择 TTS、调整会话历史 | [配置参考](reference/configuration.md) |
 | 查看组件状态、停止或重启助手 | [日常操作](runbooks/operations.md) |
+| 只读检查安装和配置，不触发组件操作 | [只读诊断](reference/diagnostics.md) |
 | 打通 boot0 / boot1 SSH | [boot0 手册](runbooks/boot0-ssh.md) / [boot1 手册](runbooks/boot1-ssh.md) |
 | 系统切换后 SSH 失联、需要维护固件或控制 OTA | [双系统维护](runbooks/owner-maintenance.md) |
 | 构建失败提示 guard / 原生追问 / 首轮判停 / 端侧 TTS | [guard](../device/aivs_guard/README.md) / [native_asr](../device/native_asr/README.md) / [native_endpoint](../device/native_endpoint/README.md) / [ettsc](../device/ettsc/README.md) |
@@ -56,7 +57,7 @@
 |---|---|---|
 | 音箱 IP | `192.168.8.152` | 在路由器中确认实际地址 |
 | 可选服务端 IP | `192.168.8.150` | 仅选择相应 server 路线时使用 |
-| 服务端端口 | `8080` | 启动脚本使用此端口；自定义时同步调整客户端地址 |
+| 服务端端口 | `8080` | 配置默认值；启动器读取 `server.port`，自定义时同步调整客户端地址 |
 | Mac 串口设备 | `/dev/tty.usbserial-3120` | 用 `ls /dev/tty.*` 查实际名称 |
 
 后文使用 `ssh xiaomi`。在开发机 `~/.ssh/config` 添加以下配置，首次连接时核对音箱身份：

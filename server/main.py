@@ -13,47 +13,17 @@ from pathlib import Path
 from typing import Optional
 from contextlib import asynccontextmanager
 
-import yaml
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from .llm.claude_client import ClaudeClient, OpenAIClient
-from .llm.minimax_client import MiniMaxClient
-from .asr.whisper_client import WhisperASR
-from .tts.tts_client import ElevenLabsTTS, AzureTTS
-from .tts.minimax_tts import MiniMaxTTS
-from .tts.chattts_client import ChatTTSClient
-from .tts.edge_tts_client import EdgeTTSClient
 from fastapi.responses import Response
 from starlette.responses import StreamingResponse
 from starlette.background import BackgroundTask
 from .streaming_pipeline import StreamingPipeline
-from .audio.processor import AudioProcessor
-
-
-# 加载配置
-def load_config():
-    config_path = os.path.join(
-        os.path.dirname(os.path.dirname(__file__)),
-        "config.yaml"
-    )
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
-
-    # 替换环境变量 (递归处理所有嵌套层)
-    def _substitute(obj):
-        if isinstance(obj, dict):
-            for k, v in obj.items():
-                if isinstance(v, str) and v.startswith("${") and v.endswith("}"):
-                    obj[k] = os.environ.get(v[2:-1], "")
-                elif isinstance(v, (dict, list)):
-                    _substitute(v)
-        elif isinstance(obj, list):
-            for item in obj:
-                _substitute(item)
-    _substitute(config)
-    return config
+from .configuration import load_config
+from .mode_gate import ServiceModeMiddleware
+from .runtime import create_llm_clients, create_asr_client, create_tts_client
 
 
 config = load_config()
@@ -62,9 +32,8 @@ config = load_config()
 # 全局客户端
 llm_client: Optional = None  # 默认 LLM client
 llm_clients: dict[str, object] = {}
-asr_client: Optional[WhisperASR] = None
-tts_client: Optional[ElevenLabsTTS] = None
-audio_processor = AudioProcessor()
+asr_client: Optional[object] = None
+tts_client: Optional[object] = None
 
 # 对话历史 (简单内存存储，生产环境应使用 Redis 等)
 conversation_histories: dict[str, list[dict]] = {}
@@ -171,18 +140,9 @@ def is_likely_assistant_echo(text: str, session_id: str) -> tuple[bool, str]:
 
 
 def llm_display_name(client) -> str:
-    if isinstance(client, MiniMaxClient):
-        if client is llm_clients.get("kimi"):
-            return f"kimi ({client.model})"
-        if client is llm_clients.get("glm"):
-            return f"glm ({client.model})"
-        if client is llm_clients.get("deepseek"):
-            return f"deepseek ({client.model})"
-        return f"minimax ({client.model})"
-    if isinstance(client, ClaudeClient):
-        return f"claude ({client.model})"
-    if isinstance(client, OpenAIClient):
-        return f"openai ({client.model})"
+    for name, configured in llm_clients.items():
+        if client is configured:
+            return f"{name} ({client.model})"
     return "unknown"
 
 
@@ -231,123 +191,36 @@ async def synthesize_stream_error_audio(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """启动和关闭时的初始化"""
+    """Initialize only the components enabled by the selected service mode."""
     global llm_client, llm_clients, asr_client, tts_client
 
-    print("Initializing services...")
-
-    # 初始化 LLM 客户端
+    mode = config["server"]["mode"]
+    print(f"Initializing services (mode={mode})...")
+    llm_client = None
     llm_clients = {}
-    if config["llm"]["minimax"]["api_key"]:
-        llm_clients["minimax"] = MiniMaxClient(
-            api_key=config["llm"]["minimax"]["api_key"],
-            model=config["llm"]["minimax"]["model"],
-            base_url=config["llm"]["minimax"].get("base_url", "https://api.minimaxi.com/v1"),
-            max_tokens=config["llm"]["minimax"]["max_tokens"],
-            temperature=config["llm"]["minimax"]["temperature"],
-            timeout=config["llm"]["minimax"].get("timeout", 45.0),
-            max_retries=config["llm"]["minimax"].get("max_retries", 1),
-        )
-        print(f"MiniMax client initialized with model: {config['llm']['minimax']['model']}")
-    if config["llm"].get("deepseek", {}).get("api_key"):
-        llm_clients["deepseek"] = MiniMaxClient(
-            api_key=config["llm"]["deepseek"]["api_key"],
-            model=config["llm"]["deepseek"]["model"],
-            base_url=config["llm"]["deepseek"].get("base_url", "https://api.deepseek.com"),
-            max_tokens=config["llm"]["deepseek"]["max_tokens"],
-            temperature=config["llm"]["deepseek"]["temperature"],
-            timeout=config["llm"]["deepseek"].get("timeout", 45.0),
-            max_retries=config["llm"]["deepseek"].get("max_retries", 1),
-        )
-        print(f"DeepSeek client initialized with model: {config['llm']['deepseek']['model']}")
-    if config["llm"].get("glm", {}).get("api_key"):
-        glm_config = config["llm"]["glm"]
-        llm_clients["glm"] = MiniMaxClient(
-            api_key=glm_config["api_key"],
-            model=glm_config.get("model", "glm-5.3-flash"),
-            base_url=glm_config.get("base_url", "https://open.bigmodel.cn/api/paas/v4"),
-            max_tokens=glm_config.get("max_tokens", 4096),
-            temperature=glm_config.get("temperature", 0.7),
-            timeout=glm_config.get("timeout", 45.0),
-            max_retries=glm_config.get("max_retries", 1),
-            reasoning_effort=glm_config.get("reasoning_effort", "low"),
-        )
-        print(f"GLM client initialized with model: {llm_clients['glm'].model}")
-    if config["llm"].get("kimi", {}).get("api_key"):
-        kimi_config = config["llm"]["kimi"]
-        llm_clients["kimi"] = MiniMaxClient(
-            api_key=kimi_config["api_key"],
-            model=kimi_config.get("model", "kimi-k2.6"),
-            base_url=kimi_config.get("base_url", "https://api.moonshot.cn/v1"),
-            max_tokens=kimi_config.get("max_tokens", 1024),
-            temperature=kimi_config.get("temperature", 0.6),
-            timeout=kimi_config.get("timeout", 45.0),
-            max_retries=kimi_config.get("max_retries", 1),
-        )
-        print(f"Kimi client initialized with model: {llm_clients['kimi'].model}")
-    if config["llm"]["claude"]["api_key"]:
-        llm_clients["claude"] = ClaudeClient(
-            api_key=config["llm"]["claude"]["api_key"],
-            model=config["llm"]["claude"]["model"],
-            max_tokens=config["llm"]["claude"]["max_tokens"],
-            temperature=config["llm"]["claude"]["temperature"],
-        )
-        print(f"Claude client initialized with model: {config['llm']['claude']['model']}")
-    if config["llm"]["openai"]["api_key"]:
-        llm_clients["openai"] = OpenAIClient(
-            api_key=config["llm"]["openai"]["api_key"],
-            model=config["llm"]["openai"]["model"],
-            max_tokens=config["llm"]["openai"]["max_tokens"],
-            temperature=config["llm"]["openai"]["temperature"],
-        )
-        print(f"OpenAI client initialized with model: {config['llm']['openai']['model']}")
-
-    default_backend = config["llm"].get("default_backend", "deepseek")
-    llm_client = llm_clients.get(default_backend)
-    if llm_client is None:
-        print(f"WARNING: Default LLM backend '{default_backend}' is not configured")
-
-    # 初始化 ASR
-    asr_provider = config["asr"]["provider"]
-    if asr_provider == "whisper":
-        asr_client = WhisperASR(
-            model_name=config["asr"]["whisper"]["model"],
-            language=config["asr"]["whisper"]["language"],
-        )
-        print(f"Whisper ASR initialized with model: {config['asr']['whisper']['model']}")
-
-    # 初始化 TTS
-    tts_provider = config["tts"]["provider"]
-    if tts_provider == "edgetts":
-        edge_voice = config["tts"].get("edgetts", {}).get("voice", "zh-CN-YunjianNeural")
-        tts_client = EdgeTTSClient(voice=edge_voice)
-        print(f"EdgeTTS client initialized (free, Microsoft), voice: {edge_voice}")
-    elif tts_provider == "chattts":
-        tts_client = ChatTTSClient(
-            sample_rate=config["tts"]["chattts"].get("sample_rate", 24000),
-        )
-        print("ChatTTS client initialized (local)")
-    elif tts_provider == "minimax" and config["tts"]["minimax"]["api_key"]:
-        tts_client = MiniMaxTTS(
-            api_key=config["tts"]["minimax"]["api_key"],
-            voice_id=config["tts"]["minimax"]["voice_id"],
-            model=config["tts"]["minimax"]["model"],
-            base_url=config["tts"]["minimax"].get("base_url", "https://api.minimax.chat/v1"),
-        )
-        print(f"MiniMax TTS initialized with voice: {config['tts']['minimax']['voice_id']}")
-    elif tts_provider == "elevenlabs" and config["tts"]["elevenlabs"]["api_key"]:
-        tts_client = ElevenLabsTTS(
-            api_key=config["tts"]["elevenlabs"]["api_key"],
-            voice_id=config["tts"]["elevenlabs"]["voice_id"],
-            model=config["tts"]["elevenlabs"]["model"],
-        )
-        print(f"ElevenLabs TTS initialized with voice: {config['tts']['elevenlabs']['voice_id']}")
-
-    print("Services initialized successfully")
-
-    yield
-
-    print("Shutting down...")
+    asr_client = None
+    tts_client = None
+    try:
+        # Validate the chosen TTS dependency before loading a large ASR model.
+        tts_client = create_tts_client(config.get("tts", {}))
+        if mode == "full":
+            llm_settings = config.get("llm", {})
+            llm_clients = create_llm_clients(llm_settings, clients=llm_clients)
+            llm_client = llm_clients.get(llm_settings.get("default_backend", "deepseek"))
+            asr_client = create_asr_client(config.get("asr", {}))
+        print(f"Services initialized: tts={tts_client is not None}, asr={asr_client is not None}, llm={llm_client is not None}")
+        yield
+    finally:
+        # Startup failure and normal shutdown share cleanup. One SDK failure
+        # must not skip the remaining clients or hide the startup exception.
+        for name, client in llm_clients.items():
+            try:
+                sdk = getattr(client, "client", None)
+                if sdk is not None and hasattr(sdk, "close"):
+                    await sdk.close()
+            except Exception as error:
+                print(f"WARNING: Failed to close LLM client {name} ({type(error).__name__})", flush=True)
+        print("Shutting down...")
 
 
 app = FastAPI(
@@ -356,6 +229,7 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+app.add_middleware(ServiceModeMiddleware, mode_getter=lambda: config["server"]["mode"])
 
 # CORS
 app.add_middleware(
@@ -465,9 +339,19 @@ def stream_llm_audio_response(
 @app.get("/")
 async def root():
     """健康检查"""
+    mode = config["server"]["mode"]
+    components = {
+        "llm": {"state": "disabled" if mode == "tts-only" else "ready" if llm_client else "not_configured"},
+        "asr": {"state": "disabled" if mode == "tts-only" else "ready" if asr_client else "not_configured",
+                "provider": config.get("asr", {}).get("provider")},
+        "tts": {"state": "ready" if tts_client else "not_configured",
+                "provider": config.get("tts", {}).get("provider", "edgetts")},
+    }
     return {
-        "status": "ok",
+        "status": "degraded" if any(item["state"] == "not_configured" for item in components.values()) else "ok",
         "service": "xiaomi_ai_llm",
+        "mode": mode,
+        "components": components,
         "llm": llm_display_name(llm_client) if llm_client else "unknown",
         "llm_backends": {
             name: llm_display_name(client)
@@ -767,7 +651,7 @@ async def shell_chat(file: UploadFile = File(...), session_id: str = "shell"):
     conversation_histories[session_id] = history[-20:]
 
     try:
-        if isinstance(tts_client, MiniMaxTTS):
+        if config["tts"]["provider"] == "minimax":
             tts_audio = await tts_client.synthesize_pcm(llm_response, sample_rate=32000)
         else:
             tts_audio = await tts_client.synthesize(llm_response)

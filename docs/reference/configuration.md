@@ -61,10 +61,21 @@ DeepSeek 默认 `LLM_THINKING=disabled`，GLM 使用 `LLM_REASONING_EFFORT=low`�
 | `LLM_HISTORY_DIR` | 默认 `/tmp/native_first_llm_hist`，整机重启清空；如需持久化，应自行管理存储和隐私 |
 | `LLM_SYSTEM_PROMPT` | 控制语音回答风格；默认要求口语、完整句子，不使用 Markdown |
 | `SYSTEM1_FOLLOWUP_ENABLED` | boot1 追问开关，须先安装匹配原生组件 |
+| `FOLLOWUP_EXIT_ENABLED=0` | 默认关闭；设为 `1` 后，允许在追问窗口用独立结束语直接结束会话 |
 | `NATIVE_ENDPOINT_ENABLED` | boot1 首轮判停开关，须先完整安装判停包 |
 | `NATIVE_DIALOG_INPUT_GUARD` | 对少量明确缺对象短句提示补充，不是收音判停 |
 
 不要仅凭开关为 1 判断组件可用。安装与验证顺序见[逐步完善对话](../getting-started/conversation.md)，运行健康状态见[日常操作](../runbooks/operations.md)。
+
+### 用结束语退出追问
+
+在音箱实际使用的 `/data/native_first.env` 中将 `FOLLOWUP_EXIT_ENABLED` 的唯一有效赋值设为 `1`，再在空闲时重启客户端。不要只在启动命令前临时设置变量：配置文件中的赋值仍会覆盖它。
+
+回答结束、进入追问窗口后，独立说出以下任一短句即可结束：**结束对话、退出对话、停止对话、不聊了、退下**。允许两端空白及句尾 `。！？.!?`；命中后直接恢复待机，不发送新的 LLM 请求、不播结束确认、不写入新一轮历史，也不再开启下一轮收听。此行为覆盖原生实时追问、本地录音追问和实验性原生多轮模式。
+
+首问与首问输入补全中的这些词仍正常交给模型；已进入追问后的输入补全可以被结束语取消。`不要结束对话`、`解释结束对话的意思`、带引号的 `“结束对话”` 及含其它词的句子不匹配。开关不改变播放期间的原生唤醒和家居控制。
+
+恢复原行为时，将实际文件中的 `FOLLOWUP_EXIT_ENABLED` 改回 `0`，空闲时重启客户端。主机回归不代表真人听觉与设备状态已经验收。
 
 ## 修改后怎么生效
 

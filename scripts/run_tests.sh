@@ -18,6 +18,9 @@ echo "== Python unit tests =="
 
 echo "== Shell syntax =="
 for script in \
+    start_server.sh \
+    device/data_init_native_first.sh \
+    device/speaker_doctor.sh \
     device/native_first_client.sh \
     device/endpoint_probe/run.sh \
     device/endpoint_probe/run_protocol.sh \

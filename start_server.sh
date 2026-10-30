@@ -1,12 +1,10 @@
-#!/bin/bash
-# 启动服务器
-
+#!/bin/sh
+set -eu
+# 配置和 .env 由 Python 解析；不执行其中的 shell 文本。
 cd "$(dirname "$0")"
-
-# 加载环境变量
-if [ -f .env ]; then
-    export $(cat .env | grep -v '^#' | xargs)
+server_python="${PYTHON:-.venv/bin/python}"
+if [ ! -x "$server_python" ]; then
+    echo "Python environment missing: $server_python; create .venv and install the selected requirements first." >&2
+    exit 1
 fi
-
-# 启动服务
-.venv/bin/uvicorn server.main:app --host 0.0.0.0 --port 8080 --reload
+exec "$server_python" -m server.run "$@"

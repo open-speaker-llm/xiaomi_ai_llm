@@ -1,5 +1,7 @@
-# Web框架
-fastapi>=0.109.0
+# 公共运行依赖（包含 EdgeTTS 和 multipart 上传）
+-r requirements-tts.txt
+
+# 完整模式 Web 附加能力
 uvicorn[standard]>=0.27.0
 websockets>=12.0
 
@@ -17,11 +19,8 @@ soundfile>=0.12.1
 
 # HTTP客户端
 httpx>=0.26.0
+requests>=2.31.0
 
 # 配置管理
-pyyaml>=6.0.1
 pydantic>=2.5.0
 pydantic-settings>=2.1.0
-
-# 工具
-python-dotenv>=1.0.0

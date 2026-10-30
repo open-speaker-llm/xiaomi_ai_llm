@@ -20,7 +20,8 @@ class NativeDialogInputTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             Path(temp, 'inputs').write_text('\n'.join(followups) + '\n')
             code = functions('native_dialog_compact', 'classify_native_dialog_text',
-                             'collect_native_dialog_text', 'handle_llm_dialog', 'cancel_followup_vad_prearm') + r'''
+                             'collect_native_dialog_text', 'handle_llm_dialog', 'cancel_followup_vad_prearm',
+                             'is_followup_exit_command') + r'''
 FOLLOWUP_ENABLED=1; FOLLOWUP_MODE=local_record; FOLLOWUP_RECORD_MODE=native_live
 SUPPRESS_DUP_SECONDS=5; calls=0; NATIVE_DIALOG_INPUT_MAX_REPROMPTS=2
 is_system1_root() { [ "$BOOT1" = 1 ]; }

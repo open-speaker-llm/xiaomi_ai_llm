@@ -67,7 +67,17 @@ rootfs 修改前保持串口可用，保留至少一套可启动系统。仅开�
 chmod +x /data/init.sh
 ```
 
-已有脚本应先备份、比较内容，再决定是否调整。模板 [device/data_init_native_first.sh](../../device/data_init_native_first.sh) 会记录启动日志、等待原生环境、避免重复启动，并短暂探测可选服务端。默认 `START_WITHOUT_SERVER=1`，服务不可达也会启动客户端；设备 TTS 与原生兜底不依赖常驻 Mac。
+已有脚本应先备份、比较内容，再决定是否调整。模板 [device/data_init_native_first.sh](../../device/data_init_native_first.sh) 会记录启动日志、保留默认 20 秒启动等待，并避免重复启动。它读取与客户端相同的实际 `CONFIG_FILE`（默认 `/data/native_first.env`），按首问链路选择是否探测自建服务：
+
+| 实际配置 | 开机服务探测 |
+|---|---|
+| `LLM_PIPELINE=native`、`TTS_ENGINE=device` | 不探测 Mac 服务端，保留原生环境启动等待后启动客户端 |
+| `LLM_PIPELINE=native`、`TTS_ENGINE=server` | 探测实际 `TTS_SERVER`；未设置时使用 `SERVER` |
+| `LLM_PIPELINE=server` | 探测 `SERVER`，不受独立 TTS 选项影响 |
+
+可选的 Mac 追问 ASR 不阻塞首问启动；使用它时，追问阶段仍需该服务在线。默认 `SERVER_WAIT_SECONDS=5`、每次探测超时 2 秒、失败后间隔 3 秒；它是原有轮询预算，实际总等待还包含探测耗时。`START_WITHOUT_SERVER=1` 表示预算用完仍启动客户端，设为 `0` 则跳过依赖不可达的服务端链路。native + device 路线不受这个服务端等待开关阻挡，但仍需要小米云、LLM 和 TTS 云服务网络。
+
+配置按可信 shell 文件读取，最后生效的赋值与客户端保持一致；不会以临时 `SERVER` 或 `BACKEND` 覆盖配置文件。读取失败时记录 `configuration load failed; client not started` 并退出。自启动日志保留在 `/tmp/native_first_autostart.log`，设备配置中的客户端 `LOG_FILE` 不会把这份日志改到别处。日志只记录依赖类别，不记录服务 URL 或密钥。
 
 先在音箱空闲且客户端未运行时手动检查脚本：
 
@@ -94,7 +104,7 @@ sh /data/native_first_client.sh status
 tail -n 60 /tmp/native_first_autostart.log /tmp/native_first_client.log
 ```
 
-预期看到 `autostart begin`、`starting native-first client`、`[HOOK]` 与 `[IDLE]`。随后验证原生报时和 LLM 首问；启用追问的设备再测试上下文衔接与静默退出。
+预期看到 `autostart begin`、`startup dependency=none/tts/server`（三者之一）、`starting native-first client`、`[HOOK]` 与 `[IDLE]`。native + device 路线还应看到 `skip server probe`。随后验证原生报时和 LLM 首问；启用追问的设备再测试上下文衔接与静默退出。检查日志只证明启动流程，实际问答仍需真人验证。
 
 ### 首轮判停的启动与验证范围
 

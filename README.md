@@ -20,6 +20,8 @@
 
 连续追问需要安装并启用对应组件。boot1 还可以增加首轮停顿续说：说到一半停约 1.5 秒，再轻声补充，音箱会继续收听；它按语音活动判停，不判断句意是否完整。
 
+新版客户端还提供可选的[追问结束语](docs/reference/configuration.md#用结束语退出追问)：显式启用后，在续听窗口说“结束对话”即可退出。默认关闭；这项源码增强的实机验收仍待执行，具体步骤见[逐轮测试说明](docs/testing/README.md)。
+
 ## 工作原理
 
 项目采用 **native-first（原生优先）**：复用小米的唤醒、识别和设备控制，音箱上的客户端按规则选择原生处理或转入 LLM。LLM 回答通过语音合成播放，播放完成后再进入追问窗口。
@@ -63,6 +65,9 @@ flowchart TD
 | SSH 已可用，准备第一次部署 | [跑通第一轮对话](docs/getting-started/quickstart.md) |
 | 首轮已可用，想增加追问与停顿续说 | [逐步完善对话](docs/getting-started/conversation.md) |
 | 已部署，想维护或排障 | [日常操作](docs/runbooks/operations.md) / [排障](docs/runbooks/troubleshooting.md) |
+| 想先做一次不会重启服务的检查 | [只读诊断](docs/reference/diagnostics.md)：配置、组件、进程与包一致性 |
+| 只需要电脑提供语音合成 | [TTS 专用服务](docs/reference/server.md)：轻量安装，不加载 Whisper 或 LLM SDK |
+| 更新源码后，想知道具体怎么测 | [逐轮实际测试说明](docs/testing/README.md) |
 | 想了解探索过程 | [从串口到原生优先的故事](docs/history/journey.md) |
 
 <a id="快速启动已完成部署时"></a>

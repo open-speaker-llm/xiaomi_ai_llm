@@ -12,7 +12,7 @@ class NativeAsrShellTest(unittest.TestCase):
     def functions(self, *names):
         if 'handle_llm_dialog' in names:
             names += ('native_dialog_compact', 'classify_native_dialog_text', 'collect_native_dialog_text',
-                      'cancel_followup_vad_prearm')
+                      'cancel_followup_vad_prearm', 'is_followup_exit_command')
         source = (ROOT / 'device/native_first_client.sh').read_text()
         return '\n'.join(re.search(r'^' + name + r'\(\) \{.*?^\}', source, re.M | re.S).group()
                          for name in names)
