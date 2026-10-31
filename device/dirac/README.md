@@ -1,6 +1,6 @@
 # LLM 播放的 Dirac 初始化
 
-适用范围：已验证的 S12A boot1 固件。`dirac_aplay.sh` 核验根分区、ALSA 配置、音效库及 S12A 配置的 SHA-256。其他固件或缺少组件时保留普通 aplay，并记录 bypass。
+适用范围：已验证的 S12A boot0 与 boot1 固件/播放配置。两套系统分别核对对应的 ALSA 配置摘要，共用已核验的 ALSA/Dirac 库与 S12A 音效配置。`dirac_aplay.sh` 核验根分区、ALSA 配置、音效库及 S12A 配置的 SHA-256。其他固件或缺少组件时保留普通 aplay，并记录 bypass；bypass 不保证实际有声，若原厂 ALSA 插件依赖进程内 Dirac 初始化，仍可能无声。
 
 原生 mediaplayer 会在进程内调用 `Dirac_initialize("/data/etc/diracmobile.config")`；独立 aplay 不会，导致查找不存在的 `/usr/lib/diracmobile.config`，音效实例创建失败。此模块只补上同进程初始化，DSP 实例、音量、连续处理和释放仍由固件 ALSA 插件负责。
 
@@ -18,7 +18,7 @@ sh device/dirac/build.sh /tmp/native-first-dirac-build
 
 客户端 `llm_aplay` 为各个 LLM PCM/WAV 播放入口调用此包装器；`LD_PRELOAD` 仅传给该 aplay，不配置全局预加载，不修改 rootfs、原生播放器、麦克风、AEC 或唤醒转交逻辑。单独运行初始化程序再启动 aplay 无效，因为进程内状态不会跨 exec 保存。
 
-`LLM_DIRAC_ENABLED=0` 可选择普通播放。若初始化运行时失败，会记录非零返回码，保留原播放行为，不能将其视为音效已生效。数字增益仍为 2.0，Master 默认沿用原生实际值，旧的 +10（+5 dB）补偿改为默认关闭；显式配置仍可覆盖。校准和后续实测见[音量与失败提示记录](../../docs/history/2026-09-10-volume-failure-gate.md)。
+`LLM_DIRAC_ENABLED=0` 可选择普通播放。若初始化运行时失败，会记录非零返回码，保留原播放行为，不能将其视为音效已生效或实际可听。数字增益仍为 2.0，Master 默认沿用原生实际值，旧的 +10（+5 dB）补偿改为默认关闭；显式配置仍可覆盖。校准和后续实测见[音量与失败提示记录](../../docs/history/2026-09-10-volume-failure-gate.md)。
 
 ## 日志
 
@@ -47,3 +47,5 @@ sh device/dirac/build.sh /tmp/native-first-dirac-build
 5. 分别以较小和日常音量测试，再播放原生音乐或询问天气：音量变化合理，切换回原生功能后的音量正常。
 
 如有问题，反馈大致时间、场景及具体现象，便于对齐客户端和音效日志。
+
+2026-10-31 已修复 boot0 被包装器排除导致的 LLM 无声；实机静音处理检查及用户云健男声确认通过，见[boot0 播放修复与测试](../../docs/testing/2026-10-31-boot0-tts-playback.md)。

@@ -52,16 +52,33 @@ exit "$PLAYER_RC"
 
     def test_all_firmware_assets_and_boot_partition_are_required(self):
         for failure in ['', '/etc/asound.conf', '/usr/lib/libasound.so.2.0.0',
-                        '/usr/lib/libDiracAPI_SHARED.so', '/data/etc/diracmobile.config', 'boot0']:
+                        '/usr/lib/libDiracAPI_SHARED.so', '/data/etc/diracmobile.config', 'unknown_boot']:
             with self.subTest(failure=failure):
                 code = WRAPPER + '''
-awk() { if [ "$FAIL_ASSET" = boot0 ]; then echo /dev/mtdblock4; else echo /dev/mtdblock5; fi; }
+awk() { if [ "$FAIL_ASSET" = unknown_boot ]; then echo /dev/mtdblock9; else echo /dev/mtdblock5; fi; }
 dirac_hash_is() { [ "$1" != "$FAIL_ASSET" ]; }
 dirac_supported
 '''
                 result = subprocess.run(['sh', '-c', code], env={**os.environ, 'FAIL_ASSET': failure},
                                         capture_output=True, text=True, timeout=5)
                 self.assertEqual(result.returncode, 0 if not failure else 1)
+
+    def test_each_boot_requires_its_verified_alsa_configuration(self):
+        hashes = {
+            '/dev/mtdblock4': '1ade66b0b87cd952921c33962391c00bcdebf127696f0a56d3f017ccdcd17c85',
+            '/dev/mtdblock5': '373b3ad8876e203e782490f1b22da97cc6fd065b0ff81eebeb2ed37b8317b7c6',
+        }
+        for boot, expected in hashes.items():
+            for actual in [*hashes.values(), 'unverified']:
+                with self.subTest(boot=boot, config=actual):
+                    code = WRAPPER + '''
+awk() { printf '%s\\n' "$TEST_BOOT"; }
+dirac_hash_is() { [ "$1" != /etc/asound.conf ] || [ "$2" = "$TEST_CONFIG_HASH" ]; }
+dirac_supported
+'''
+                    result = subprocess.run(['sh', '-c', code], capture_output=True, timeout=5,
+                                            env={**os.environ, 'TEST_BOOT': boot, 'TEST_CONFIG_HASH': actual})
+                    self.assertEqual(result.returncode, 0 if actual == expected else 1)
 
     def test_hash_mismatch_and_missing_file_are_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
