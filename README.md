@@ -1,12 +1,16 @@
 # 小米 AI 音箱 LLM 助手
 
-> Bring your own LLM to a Xiaomi AI Speaker. 保留小爱的日常能力，为老音箱接上大模型。
+> 让 2019 年的小米 AI 音箱直连大模型。家电仍由小爱控制，开放问题交给大模型，还可以接着追问。
 
-一台 2019 年的小米 AI 音箱，还能继续做什么？这个项目从日常使用出发：开灯、调音量、问天气，继续交给熟悉的小爱；想聊一个开放问题时，让音箱连接自己的 LLM 服务，把回答念出来，并接着聊下去。
+“搜一下最近三天的 AI 新闻，说明日期和来源。”音箱用 DeepSeek 联网查询，开始播报。播到一半，再喊“小爱同学，开灯”，灯亮了，新闻还在播。两段对话都录自同一台 **MDZ-25-DA / S12A**。
 
-[![B 站视频演示：让 2019 年的小米音箱接上现代大模型](docs/assets/bilibili-video-preview.jpg)](https://www.bilibili.com/video/BV1Vzja69ELB/)
+[![观看实机演示：小爱音箱用 DeepSeek 搜新闻，播到一半我让它开灯](docs/assets/bilibili-news-demo.jpg)](https://www.bilibili.com/video/BV1bu4u6GEEL/)
 
-▶️ [观看完整演示](https://www.bilibili.com/video/BV1Vzja69ELB/)
+**实机演示 · 3 分 43 秒**　[看小爱搜新闻、边播边控灯](https://www.bilibili.com/video/BV1bu4u6GEEL/)
+
+**六月原理篇 · 5 分 21 秒**　[看老音箱如何保留原生能力、直连大模型](https://www.bilibili.com/video/BV1Vzja69ELB/)
+
+音箱直接调用配置好的模型服务，无需额外搭建中转服务器。视频里的 DeepSeek 联网搜索来自实机开发版，当前公开主分支提供大模型问答。想在自己的音箱上试用，可以从[设备与准备](docs/reference/hardware.md)开始。已有 SSH 的读者可直接看[跑通第一轮对话](docs/getting-started/quickstart.md)。
 
 ## 用起来是什么样
 
