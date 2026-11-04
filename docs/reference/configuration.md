@@ -47,13 +47,19 @@ DeepSeek 默认 `LLM_THINKING=disabled`，GLM 使用 `LLM_REASONING_EFFORT=low`�
 
 | 配置 | 默认值 | 含义 |
 |---|---|---|
-| `LLM_WEB_SEARCH` | `auto` | `auto` 按语义联网；`off` 关闭判断和搜索，恢复纯聊天 |
-| `LLM_WEB_PLAN_TIMEOUT` | `8` | 每轮联网判断的最长秒数，允许 1–20 |
+| `LLM_WEB_SEARCH` | `auto` | `auto` 按语义联网（`on/1/true/yes` 同义）；`off` 关闭判断和搜索，恢复纯聊天 |
+| `LLM_WEB_PLAN_TIMEOUT` | `4` | 单次联网判断的最长秒数，允许 1–20 |
 | `LLM_WEB_TIMEOUT` | `8` | 单次搜索或网页读取的最长秒数，允许 1–20 |
+| `LLM_WEB_RETRIES` | `1` | 规划和工具各自最多重试 0–2 次，只重试返回类别 10 |
+| `LLM_WEB_RETRY_BACKOFF_MS` | `500` | 网络错误或 5xx 的退避毫秒，允许 0–3000；429 默认 1 秒，整数 `Retry-After` ≤2 秒时采用它，>2 秒不重试 |
+| `LLM_WEB_TOTAL_BUDGET` | `12` | 规划、退避、重试及工具共用秒数，允许 4–30；最终回答仍由 `LLM_DIRECT_TIMEOUT` 控制 |
+| `LLM_WEB_FILLER` | `搜索中，请稍等。` | 仅流式链路在规划准备重试或调用工具前输出，每轮最多一次；空值关闭；不接受换行 |
+| `LLM_WEB_FALLBACK` | `answer` | 联网失败后附加“未联网”system 提示并正常回答；`fail` 只播固定失败提示 |
+| `LLM_WEB_TEST_FAULT` | 空 | 调试故障：`plan_timeout/plan_429/plan_401/plan_402/plan_403`、`tool_timeout/tool_429/tool_401/tool_402/tool_403/tool_503`；非空启动时醒目警告，使用后清空 |
 
 搜索使用 `DEEPSEEK_API_KEY`；只有官方 DeepSeek 聊天地址才允许回用通用 `LLM_API_KEY`，不会把其它服务商的通用密钥发送给 DeepSeek。需要系统已有的 `jsonfilter`，不需要 Python、jq 或 Mac 搜索服务。判断本身每轮增加一次模型请求；搜索最多返回三条来源，Search/Fetch 及模型调用分别计费。
 
-联网失败、结果为空或判断无效时，固定提示“暂时无法联网查询，请稍后再试。”，不继续生成未经核验的实时答案。回答用口语说明来源，原始网址保留在客户端日志的 `[WEB] source=` 行。具体行为和限制见[联网搜索参考](native-web-search.md)，操作见[联网搜索测试](../testing/2026-11-02-web-search.md)。可选 `server` 链路不包含此功能。
+配置模式非法、缺 `jsonfilter`、缺可用搜索 key 或超时配置非法时，启动只记一次 warning 并按 off 处理，普通回答继续。新增配置非法时记一次警告并用表中默认值。规划/工具的网络临时故障各自重试，预算不足则停止；200 但规划内容损坏或 `finish_reason` 不是 stop 时不重试。默认联网失败、空结果或无效判断后追加“未联网、不得声称查过、实时信息无法确认”的提示并继续回答；`LLM_WEB_FALLBACK=fail` 可恢复固定失败提示。规划 HTTP 401/403 直接提示“大模型密钥无效，请检查配置。”，402 提示“大模型账户余额不足，请充值后再试。”，不请求最终回答；工具鉴权或余额错误只降级。垫话与固定错误提示不写入历史，ttft 不把垫话当答案首片。只有本轮经过规划、最终传输失败且没有答案（或只有垫话）时，补播一次“暂时无法联网查询，请稍后再试。”。回答用口语说明来源，原始网址保留在客户端日志的 `[WEB] source=` 行。具体行为和限制见[联网搜索参考](native-web-search.md)，操作见[重试与兜底测试](../testing/2026-11-04-web-search-retry.md)。可选 `server` 链路不包含此功能。
 
 ## 再选文字怎样变成声音
 
