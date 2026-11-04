@@ -192,6 +192,10 @@ DEVICE_TTS_UA="${DEVICE_TTS_UA:-}"            # 留空用 ettsc 内置默认
 DEVICE_TTS_ORIGIN="${DEVICE_TTS_ORIGIN:-}"    # 留空用 ettsc 内置默认
 # 句级流式：1=LLM 边流式输出边按句合成播放（首句即开声，LLM 慢时收益大）；0=整段收完再合成播放。
 DEVICE_TTS_STREAM="${DEVICE_TTS_STREAM:-1}"
+# M03 脱敏分段计时；只观测 native + device 流式，不改变播放策略。
+LATENCY_TRACE_ENABLED="${LATENCY_TRACE_ENABLED:-1}"
+LATENCY_LOG_MAX_LINES="${LATENCY_LOG_MAX_LINES:-200}"
+ETTSC_TIMING="${ETTSC_TIMING:-0}"
 # 单句首次失败后额外重试次数；仍失败则按播放顺序交给原生 TTS。
 DEVICE_TTS_STREAM_RETRIES="${DEVICE_TTS_STREAM_RETRIES:-2}"
 # 流式播放采样率：ettsc(ETTSC_PCM=1) 把 mp3 解成裸 PCM，单个常驻 aplay 连续播，句间无缝。
@@ -282,6 +286,106 @@ elapsed_s() {
 
     now_ms=$(monotonic_ms)
     awk -v n="$now_ms" -v s="$start_ms" 'BEGIN { printf "%.2f", (n - s) / 1000 }'
+}
+
+# M03 只观测端侧句级流式；任何计时失败都不影响回答链路。
+latency_init() {
+    case "$LATENCY_TRACE_ENABLED" in
+        0|1) ;;
+        *) log '[LATENCY-CONFIG] LATENCY_TRACE_ENABLED 非法，使用 1'; LATENCY_TRACE_ENABLED=1 ;;
+    esac
+    case "$LATENCY_LOG_MAX_LINES" in
+        ''|*[!0-9]*) LATENCY_LOG_MAX_LINES=0 ;;
+    esac
+    if ! [ "$LATENCY_LOG_MAX_LINES" -ge 20 ] 2>/dev/null || ! [ "$LATENCY_LOG_MAX_LINES" -le 2000 ] 2>/dev/null; then
+        log '[LATENCY-CONFIG] LATENCY_LOG_MAX_LINES 非法，使用 200'
+        LATENCY_LOG_MAX_LINES=200
+    fi
+    case "$ETTSC_TIMING" in
+        0|1) ;;
+        *) log '[LATENCY-CONFIG] ETTSC_TIMING 非法，使用 0'; ETTSC_TIMING=0 ;;
+    esac
+}
+
+latency_active() {
+    [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ] && [ "$LLM_PIPELINE" = native ] &&
+        [ "$TTS_ENGINE" = device ] && [ "$DEVICE_TTS_STREAM" = 1 ]
+}
+
+latency_discard() {
+    # 只删除本功能创建的待合并目录；流式目录仍沿用原有生命周期。
+    case "${LATENCY_MARK_DIR:-}" in
+        /tmp/native_first_marks.*) rm -rf "$LATENCY_MARK_DIR" 2>/dev/null ;;
+    esac
+    LATENCY_MARK_DIR=""
+    return 0
+}
+
+latency_begin() {
+    latency_active || return 0
+    latency_discard
+    LATENCY_MARK_DIR=$(mktemp -d /tmp/native_first_marks.XXXXXX 2>/dev/null) || LATENCY_MARK_DIR=""
+    return 0
+}
+
+latency_mark() {
+    latency_active || return 0
+    local name="$1" value="${2:-}" dir="${LATENCY_MARK_DIR:-${wd:-}}"
+    [ -d "$dir" ] || return 0
+    case "$name" in *[!a-z0-9_]*) return 0 ;; esac
+    case "$name" in
+        wake|native_result|route_llm|freeze_done|llm_req|llm_first_token|fifo_commit1|llm_done|play_done|web_plan_start|web_plan_end|web_tool_start|web_tool_end|web_filler) ;;
+        sent[0-9]*_split|sent[0-9]*_tts_start|sent[0-9]*_tts_end|sent[0-9]*_pcm_bytes|sent[0-9]*_retries) ;;
+        *) return 0 ;;
+    esac
+    [ -n "$value" ] || value=$(monotonic_ms)
+    case "$value" in ''|*[!0-9]*) return 0 ;; esac
+    printf '%s %s\n' "$name" "$value" >> "$dir/marks" 2>/dev/null || :
+    return 0
+}
+
+latency_report() {
+    latency_active || return 0
+    local dir="${1:-${LATENCY_MARK_DIR:-}}" line max="${LATENCY_LOG_MAX_LINES:-200}"
+    local file=/tmp/native_first_latency.log web=off
+    [ -s "$dir/marks" ] || return 0
+    # 只读既有状态文件，不解析来源网址或模型文本。
+    [ ! -f "$dir/web_used" ] || web=unknown
+    case "$(cat "$dir/latency_web_action" 2>/dev/null)" in
+        off) web=off ;; answer) web=answer ;; search) web=search ;; fetch) web=fetch ;;
+    esac
+    line=$(LC_ALL=C awk -v web="$web" -v rate="$DEVICE_TTS_PCM_RATE" '
+        NF == 2 && $2 ~ /^[0-9]+$/ && !($1 in m) { m[$1]=$2 }
+        function delta(a,b) {
+            if (!(a in m) || !(b in m) || m[b] < m[a]) return "-"
+            return sprintf("%.3f", (m[b]-m[a])/1000)
+        }
+        function length_s(k) {
+            if (!(k in m) || rate !~ /^[0-9]+$/ || rate+0 <= 0) return "-"
+            return sprintf("%.3f", m[k]/(rate*2))
+        }
+        END {
+            segs=0; retries=0
+            for (k in m) {
+                if (k ~ /^sent[0-9]+_tts_end$/) segs++
+                if (k ~ /^sent[0-9]+_retries$/) retries+=m[k]
+            }
+            printf "[LATENCY] wake→route=%s route→req=%s ttft=%s split1=%s tts1=%s commit1=%s wake→commit1=%s pcm1=%s segs=%d retries=%d web=%s plan=%s search=%s filler=%s llm=%s play=%s", \
+                delta("wake","route_llm"), delta("route_llm","llm_req"), \
+                delta("llm_req","llm_first_token"), delta("llm_first_token","sent1_split"), \
+                delta("sent1_tts_start","sent1_tts_end"), delta("sent1_tts_end","fifo_commit1"), \
+                delta("wake","fifo_commit1"), length_s("sent1_pcm_bytes"), segs, retries, web, \
+                delta("web_plan_start","web_plan_end"), delta("web_tool_start","web_tool_end"), \
+                delta("llm_req","web_filler"), delta("llm_req","llm_done"), delta("llm_req","play_done")
+        }
+    ' "$dir/marks" 2>/dev/null) || return 0
+    log "$line"
+    # 私有 tmpfs 日志，追加和截断均为尽力而为，不改变调用者返回码。
+    (umask 077
+        printf '%s\n' "$line" >> "$file" &&
+        tail -n "$max" "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+    ) 2>/dev/null || :
+    return 0
 }
 
 set_state() {
@@ -2897,6 +3001,8 @@ llm_direct_answer() {
 # 单句合成只发布完整成功的 PCM；失败重试后发布原生补播任务。
 stream_synthesize_sentence() {
     local wd="$1" n="$2" sentence="$3"
+    local mark_n="$n"
+    while [ "${mark_n#0}" != "$mark_n" ]; do mark_n=${mark_n#0}; done
     local attempt=0 retries="${DEVICE_TTS_STREAM_RETRIES:-2}" rc
     case "$retries" in ''|*[!0-9]*) retries=2 ;; esac
     # 配置错误也不能导致无限重试。
@@ -2906,7 +3012,7 @@ stream_synthesize_sentence() {
         rm -f "$wd/$n.pcm" "$wd/$n.part"
         ETTSC_GEC_VERSION="$DEVICE_TTS_GEC_VERSION" \
         ETTSC_UA="$DEVICE_TTS_UA" ETTSC_ORIGIN="$DEVICE_TTS_ORIGIN" \
-        ETTSC_PCM=1 ETTSC_GAIN="$DEVICE_TTS_GAIN" \
+        ETTSC_PCM=1 ETTSC_GAIN="$DEVICE_TTS_GAIN" ETTSC_TIMING="${ETTSC_TIMING:-0}" \
             timeout -t "$DEVICE_TTS_TIMEOUT" "$DEVICE_TTS_BIN" "$sentence" "$wd/$n.part" "$DEVICE_TTS_VOICE" \
             >"$wd/$n.attempt-$attempt.log" 2>&1
         rc=$?
@@ -2914,6 +3020,10 @@ stream_synthesize_sentence() {
         if [ "$rc" = "0" ] && [ -s "$wd/$n.part" ] && \
             ! grep -q '\[!\]' "$wd/$n.attempt-$attempt.log"; then
             mv "$wd/$n.part" "$wd/$n.pcm"
+            if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
+                latency_mark "sent${mark_n}_pcm_bytes" "$(wc -c < "$wd/$n.pcm" | tr -d ' ')"
+                latency_mark "sent${mark_n}_retries" "$((attempt - 1))"
+            fi
             echo x >> "$wd/segs"
             log "[TTS] 端侧流式合成 $n($(wc -c < "$wd/$n.pcm")B pcm) attempt=$attempt: $sentence"
             return 0
@@ -2922,6 +3032,7 @@ stream_synthesize_sentence() {
         log "[TTS] 单句合成失败 $n attempt=$attempt rc=$rc detail=$wd/$n.attempt-$attempt.log"
         [ "$attempt" -le "$retries" ] && sleep 1
     done
+    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark "sent${mark_n}_retries" "$retries"
     if [ "$TTS_FALLBACK_NATIVE" = "1" ]; then
         printf '%s' "$sentence" > "$wd/$n.native"
         log "[TTS] 单句重试耗尽 $n，排队原生兜底: $sentence"
@@ -2957,10 +3068,10 @@ stream_play_worker() {
                 # 必须等 PCM 真正排空、释放声卡后才允许原生播放器出声。
                 if [ -n "$ap" ]; then
                     exec 8>&-
-                    wait "$ap" || return 1
+                    wait "$ap" || { [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark play_done; return 1; }
                     ap=""
                 fi
-                [ ! -f "$wd/$n.failed" ] || return 1
+                [ ! -f "$wd/$n.failed" ] || { [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark play_done; return 1; }
                 sentence=$(cat "$wd/$n.native")
                 resume_native_player 1
                 rc=0
@@ -2973,6 +3084,7 @@ stream_play_worker() {
                 freeze_native_player
                 if [ "$rc" != "0" ]; then
                     log "[TTS] 单句原生兜底失败 $n，停止本轮播报"
+                    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark play_done
                     return 1
                 fi
                 echo x >> "$wd/native_segs"
@@ -2983,14 +3095,19 @@ stream_play_worker() {
                     ap=$!
                     exec 8>"$fifo"
                 fi
-                [ -f "$wd/first" ] || monotonic_ms > "$wd/first"
+                if [ ! -f "$wd/first" ]; then
+                    monotonic_ms > "$wd/first"
+                    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark fifo_commit1 "$(cat "$wd/first")"
+                fi
                 if ! cat "$wd/$n.pcm" >&8; then
                     exec 8>&-
                     wait "$ap" 2>/dev/null
+                    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark play_done
                     return 1
                 fi
             else
                 if [ -n "$ap" ]; then exec 8>&-; wait "$ap"; fi
+                [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark play_done
                 return 1
             fi
             idx=$((idx + 1))
@@ -3002,8 +3119,11 @@ stream_play_worker() {
     if [ -n "$ap" ]; then
         exec 8>&-        # 关闭写端 → aplay 播完剩余 PCM 后 EOF 退出
         wait "$ap"
-        return $?
+        rc=$?
+        [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark play_done
+        return "$rc"
     fi
+    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark play_done
     return 0
 }
 
@@ -3015,7 +3135,7 @@ llm_stream_answer_and_play() {
     local sid="$1"
     local user="$2"
     local t0="$3"
-    local messages t_req seq n play_pid play_rc native_segs transport_rc stream_status
+    local messages t_req seq n play_pid play_rc native_segs transport_rc stream_status split_ms
     local wd="/tmp/native_first_stream"
     LLM_DIRECT_ANSWER=""
 
@@ -3025,6 +3145,11 @@ llm_stream_answer_and_play() {
     fi
     rm -rf "$wd" 2>/dev/null
     (umask 077; mkdir -p "$wd") || return 1
+    if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ] && latency_active; then
+        [ ! -s "${LATENCY_MARK_DIR:-}/marks" ] || cat "$LATENCY_MARK_DIR/marks" > "$wd/marks" 2>/dev/null
+        latency_discard
+        LATENCY_MARK_DIR="$wd"
+    fi
     export LLM_WEB_MARK_DIR="$wd" LLM_WEB_FILLER_ALLOWED=1
     : > "$wd/segs"
     : > "$wd/native_segs"
@@ -3034,6 +3159,7 @@ llm_stream_answer_and_play() {
         return 1
     }
     t_req=$(monotonic_ms)
+    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark llm_req "$t_req"
 
     stream_play_worker "$wd" &
     play_pid=$!
@@ -3041,19 +3167,28 @@ llm_stream_answer_and_play() {
     # 生产者管道：LLM 流 → 抽 content → tee 原始(供历史) → awk 即时切句 → 逐句 ettsc 合成。
     # awk 首片写 ttft，END 写 genend(=LLM 流结束时刻)；切句规则与服务端一致(。！？，含标点)。
     seq=0
-    { llm_open_stream "$messages"; printf '%s\n' "$?" > "$wd/transport"; } \
+    { llm_open_stream "$messages"; printf '%s\n' "$?" > "$wd/transport";
+      if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
+          case "${LLM_WEB_ACTION:-off}" in
+              off|answer|search|fetch) printf '%s\n' "${LLM_WEB_ACTION:-off}" > "$wd/latency_web_action" ;;
+          esac
+      fi
+    } \
         | llm_sse_content "$wd/status" \
         | tee "$wd/raw" \
-        | awk -v wd="$wd" -v filler="$LLM_WEB_FILLER" '
+        | awk -v wd="$wd" -v filler="$LLM_WEB_FILLER" -v trace="${LATENCY_TRACE_ENABLED:-0}" '
             NR == 1 && filler != "" && $0 == filler {
                 getline up < "/proc/uptime"; close("/proc/uptime"); split(up, a, " ");
                 print a[1] > (wd "/filler_t"); close(wd "/filler_t");
                 print $0; fflush(); next
             }
-            !first_answer { getline up < "/proc/uptime"; close("/proc/uptime"); split(up, a, " "); print a[1] > (wd "/ttft"); close(wd "/ttft"); first_answer=1 }
+            !first_answer { getline up < "/proc/uptime"; close("/proc/uptime"); split(up, a, " "); print a[1] > (wd "/ttft"); close(wd "/ttft");
+                if (trace == 1) { printf "llm_first_token %.0f\n", a[1]*1000 >> (wd "/marks"); close(wd "/marks") }
+                first_answer=1 }
             { buf = buf $0
               do { p = nb(buf); if (p > 0) { s = substr(buf, 1, p); buf = substr(buf, p + 1); gsub(/^[ \t]+|[ \t]+$/, "", s); if (length(s) > 3) { print s; fflush() } } } while (p > 0) }
             END { getline ue < "/proc/uptime"; close("/proc/uptime"); split(ue, e, " "); print e[1] > (wd "/genend"); close(wd "/genend");
+                  if (trace == 1) { printf "llm_done %.0f\n", e[1]*1000 >> (wd "/marks"); close(wd "/marks") }
                   getline status < (wd "/status"); close(wd "/status");
                   gsub(/^[ \t]+|[ \t]+$/, "", buf); if (status == "complete" && length(buf) > 0) { print buf; fflush() } }
             function nb(t,   x, y, z, m) { x = index(t, "。"); y = index(t, "！"); z = index(t, "？"); m = 0; if (x > 0) m = x; if (y > 0 && (m == 0 || y < m)) m = y; if (z > 0 && (m == 0 || z < m)) m = z; if (m == 0) return 0; return m + 2 }
@@ -3062,7 +3197,13 @@ llm_stream_answer_and_play() {
             [ -n "$sentence" ] || continue
             seq=$((seq + 1))
             n=$(printf "%04d" "$seq")
+            if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
+                split_ms=$(monotonic_ms)
+                latency_mark "sent${seq}_split" "$split_ms"
+                latency_mark "sent${seq}_tts_start" "$split_ms"
+            fi
             stream_synthesize_sentence "$wd" "$n" "$sentence"
+            [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark "sent${seq}_tts_end"
             : > "$wd/$n.rdy"
         done
 
@@ -3140,6 +3281,13 @@ send_text_native() {
     set_busy "llm_playing"
     apply_llm_master_volume
     freeze_native_player
+    if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ] && latency_active; then
+        if [ ! -d "${LATENCY_MARK_DIR:-}" ]; then
+            latency_begin
+            latency_mark route_llm
+        fi
+        latency_mark freeze_done
+    fi
     t0=$(monotonic_ms)
     LLM_WEB_MARK_DIR=""          # 不复用上一轮的联网失败状态。
     DEVICE_TTS_PLAY_START_MS=""   # device_tts_play_text 会在开播瞬间写入
@@ -3151,6 +3299,10 @@ send_text_native() {
             start_followup_vad_prearm
         fi
         if ! llm_stream_answer_and_play "$session_id" "$text" "$t0"; then
+            if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
+                latency_report
+                latency_discard
+            fi
             log "[LLM-NATIVE] 流式回答或播报失败，结束"
             if [ -n "${LLM_WEB_MARK_DIR:-}" ] && [ -f "$LLM_WEB_MARK_DIR/web_used" ] && [ ! -f "$LLM_WEB_MARK_DIR/failure_spoken" ]; then
                 web_transport=$(cat "$LLM_WEB_MARK_DIR/transport" 2>/dev/null)
@@ -3172,6 +3324,10 @@ send_text_native() {
             arm_followup_vad
         fi
         log "[LLM-NATIVE] streamed in ${t2}s (首声=${LLM_STREAM_FIRST_SOUND:-?}s llm_ttft=${LLM_DIRECT_TTFT:-?}s llm_gen=${LLM_DIRECT_GEN_S:-?}s segs=${LLM_STREAM_SEGS:-0})"
+        if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
+            latency_report
+            latency_discard
+        fi
         if [ "$cleanup_mode" = "defer" ]; then
             log "[LLM-NATIVE] playback done, defer cleanup for followup"
             set_state "FOLLOWUP_WINDOW"
@@ -3762,6 +3918,10 @@ handle_llm_dialog() {
 }
 
 handle_wakeup() {
+    if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
+        latency_begin
+        latency_mark wake
+    fi
     local wake_ts="$1"
     new_llm_session_id
     local session_id="$NEW_LLM_SESSION_ID"
@@ -3793,6 +3953,7 @@ handle_wakeup() {
         get_native_result "$result_source" || true
 
         if [ -n "$RESULT_TS" ] && [ "$RESULT_TS" -ge "$wake_ts" ] && [ "$RESULT_TS" -gt "$last_ts" ] && [ -n "$RESULT_DOMAIN" ]; then
+            [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark native_result
             last_ts="$RESULT_TS"
             [ -n "$RESULT_QUERY" ] && fallback_query="$RESULT_QUERY"
             elapsed=$(elapsed_s "$start_ms")
@@ -3809,6 +3970,7 @@ handle_wakeup() {
 
             if is_unsupported_result; then
                 log "[NATIVE] unsupported，停止原生播报并转 LLM"
+                [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark route_llm
                 set_state "NATIVE_FALLBACK"
                 [ "$FOLLOWUP_ENABLED" = "1" ] && [ "$FOLLOWUP_MODE" = "native_multirounds" ] && native_followup_mark_multirounds
                 freeze_native_player
@@ -3825,6 +3987,7 @@ handle_wakeup() {
                 return 0
             else
                 log "[NATIVE] non-success-domain，立即 fallback LLM"
+                [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark route_llm
                 set_state "NATIVE_FALLBACK"
                 [ "$FOLLOWUP_ENABLED" = "1" ] && [ "$FOLLOWUP_MODE" = "native_multirounds" ] && native_followup_mark_multirounds
                 freeze_native_player
@@ -3846,6 +4009,7 @@ handle_wakeup() {
 
     if [ -n "$fallback_query" ]; then
         log "[NATIVE] 无明确成功结果，fallback LLM query=$fallback_query"
+        [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark route_llm
         set_state "NATIVE_FALLBACK"
         [ "$FOLLOWUP_ENABLED" = "1" ] && [ "$FOLLOWUP_MODE" = "native_multirounds" ] && native_followup_mark_multirounds
         freeze_native_player
@@ -3861,6 +4025,7 @@ handle_wakeup() {
 }
 
 cleanup() {
+    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_discard
     stop_native_endpoint
     end_native_queue_drain
     stop_aivs_speech_guard
@@ -3936,6 +4101,7 @@ log "Config: $CONFIG_FILE"
 log "Server: $SERVER"
 log "Backend: $BACKEND"
 llm_web_init
+latency_init
 log "Web search: mode=$LLM_WEB_SEARCH pipeline=$LLM_PIPELINE planner_timeout=${LLM_WEB_PLAN_TIMEOUT}s tool_timeout=${LLM_WEB_TIMEOUT}s retries=$LLM_WEB_RETRIES budget=${LLM_WEB_TOTAL_BUDGET}s fallback=$LLM_WEB_FALLBACK"
 log "LLM_VOLUME: $LLM_VOLUME"
 log "LLM_MASTER_VOLUME: $LLM_MASTER_VOLUME"
@@ -4001,6 +4167,7 @@ while true; do
         continue
     fi
     handle_wakeup "$ts"
+    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_discard
     rm -f "$AIVS_GUARD_ARMED"
     log "[IDLE] 等待原生唤醒词：小爱同学"
 done

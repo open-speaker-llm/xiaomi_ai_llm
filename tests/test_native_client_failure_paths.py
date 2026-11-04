@@ -325,7 +325,7 @@ printf 'RESULT=%s\n' "$?"
 
     def test_stream_ttft_ignores_first_filler_line(self):
         source = (ROOT / 'device/native_first_client.sh').read_text()
-        awk = re.search(r"\| awk -v wd=\"\$wd\" -v filler=\"\$LLM_WEB_FILLER\" '(.*?)' \\",
+        awk = re.search(r"\| awk -v wd=\"\$wd\" -v filler=\"\$LLM_WEB_FILLER\" -v trace=\"\$\{LATENCY_TRACE_ENABLED:-0\}\" '(.*?)' \\",
                         source, re.S).group(1)
         with tempfile.TemporaryDirectory() as temp:
             # Replace only the clock IO in the actual production awk fragment.

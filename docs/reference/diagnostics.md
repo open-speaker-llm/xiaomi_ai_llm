@@ -130,3 +130,44 @@ sh device/speaker_doctor.sh --root /绝对路径/音箱快照
 4. 若启用了 boot1 追问或判停，分别检查组件文件、包摘要与快照项。出现 `FAIL` 时按对应“下一步”排查；仅有进程或快照迹象时仍不能记作真实语音验收通过。
 
 5. 后续另行安排真人用例时，按[人工验收](../../tests/manual_native_first_cases.md)检查原生报时、LLM 完整播放、上下文追问、静默退出与首轮停顿续说。诊断不代替听觉、家居动作、重启、断电或全天稳定性测试。
+
+
+## M03 分段计时
+
+native + 端侧流式在轮末输出一行 `[LATENCY]`，同步追加到 `/tmp/native_first_latency.log`，默认只保留最近 200 行。关闭 `LATENCY_TRACE_ENABLED` 后不生成新计时数据；已存在的日志不会被清空。原有客户端日志仍可能含对话原文，应留在私有环境。
+
+所有时间字段单位为秒，保留三位小数；`-` 表示缺失或时序倒置，不算作零。示例：
+
+```text
+[LATENCY] wake→route=0.600 route→req=0.100 ttft=1.100 split1=0.350 tts1=0.700 commit1=0.050 wake→commit1=2.900 pcm1=1.800 segs=2 retries=0 web=off plan=- search=- filler=- llm=1.700 play=5.000
+```
+
+| 字段 | 口径 |
+|---|---|
+| `wake→route` | `handle_wakeup` 入口至决定转 LLM；不代表物理唤醒词结束 |
+| `route→req` | 路由决定至请求开始，包含原生冻结、暂停及请求准备 |
+| `ttft` | 请求开始至首个非垫话回答片段；包含联网规划和工具耗时 |
+| `split1` | 首个非垫话片段至消费第一播放段；沿用串行消费位置，可能包含管道缓冲等待 |
+| `tts1` | 第一播放段的整次合成调用，包含既有重试和 PCM 解码 |
+| `commit1` | 第一段合成结束至第一次 FIFO 写入前的时间戳；队首原生兜底或垫话时可能缺失/不对应第一段 PCM |
+| `wake→commit1` | 本轮唤醒入口至第一次 PCM FIFO 提交；不是声学首声 |
+| `pcm1` | 第一播放段 PCM 字节数 ÷（采样率 × 2），为单声道 S16LE 音频秒数 |
+| `segs` / `retries` | 已结束合成调用的播放段数（含垫话/兜底）；所有句子的额外尝试总次数 |
+| `web` | 只读本轮已有 action：`off/answer/search/fetch`；状态不足为 `unknown`，不证明搜索成功 |
+| `plan` / `search` / `filler` | 若 marks 中有 `web_plan_start/end`、`web_tool_start/end`、`web_filler`，分别输出规划、工具耗时和请求至垫话的时间；本步骤不新增这些搜索打点，通常为 `-` |
+| `llm` / `play` | 请求开始至流结束、消费者结束（含失败退出） |
+
+每轮 marks 为 `name ms`，位于 `/tmp/native_first_stream/marks`（`sentN_pcm_bytes` 和 `sentN_retries` 为字节/次数），下一流式轮覆盖。唤醒阶段先用私有 `/tmp/native_first_marks.XXXXXX`，进入流式后合并并删除临时目录；未转 LLM 和客户端清理时也删除待合并目录。纯追问没有物理唤醒，相关字段为 `-`，不继承上轮数据。计时写入失败不会改变回答的成功/失败判断。
+
+在开发机仓库根目录手动上传离线汇总脚本：
+
+```sh
+scp -O device/latency_summary.sh xiaomi:/data/latency_summary.sh
+ssh xiaomi 'sh /data/latency_summary.sh'
+```
+
+脚本默认读取 `/tmp/native_first_latency.log`，也可传入一个日志文件路径；只输出固定时间字段的样本数、P50/P90/max，缺失样本不计入。百分位按最近秩第 `ceil(p*n)` 个数取值，不需要 Python 或新工具。脚本不安装或重启任何组件。
+
+`ETTSC_TIMING=1` 时，端侧流式每次尝试日志 `/tmp/native_first_stream/NNNN.attempt-N.log` 中出现 `[T] tcp_ms=… tls_ws_ms=… first_audio_ms=… turn_end_ms=…`。TCP 含 DNS，`tls_ws_ms` 含请求构建和 TLS/WebSocket 握手；后两项从 config/SSML 发送完成起算，分别至首个非空音频负载和真实 `turn.end`。未达到的阶段为 `-`。该行使用 `[T]`，不会触发已有 `[!]` 失败判定；握手失败沿用原有退出路径，可能没有完整计时行。
+
+声学校准仍需真机录音：固定手机位置，保留唤醒词和首段语音，测唤醒词末尾到首个语音波形；同时对齐 `handle_wakeup` 入口和唤醒词末尾的偏移，再与 `wake→commit1` 相减，得到 FIFO 提交至实际出声的偏移。至少记录 5 轮、设备分区/音量和测量误差；存在垫话时单列测量，不能把垫话首声当答案首声。结果未测前不使用固定补偿值。人工验收见[M03 实际测试](../testing/2026-11-04-latency-trace.md)。

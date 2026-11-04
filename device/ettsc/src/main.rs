@@ -7,7 +7,7 @@
 // rustls 自带 webpki 根证书，无需 SSL_CERT_FILE。
 use sha2::{Digest, Sha256};
 use std::net::TcpStream;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tungstenite::Message;
 mod gec_v2;
 
@@ -104,26 +104,85 @@ mod request_tests {
     }
 }
 
+// 可选观测，全部用单调时钟；未到达的阶段输出 -，不参与失败判定。
+#[derive(Default)]
+struct Timing {
+    enabled: bool,
+    tcp_ms: Option<u128>,
+    tls_ws_ms: Option<u128>,
+    first_audio_ms: Option<u128>,
+    turn_end_ms: Option<u128>,
+}
+
+impl Timing {
+    fn start(&self) -> Option<Instant> {
+        if self.enabled { Some(Instant::now()) } else { None }
+    }
+
+    fn elapsed(start: Option<Instant>) -> Option<u128> {
+        start.map(|t| t.elapsed().as_millis())
+    }
+
+    fn line(&self) -> Option<String> {
+        if !self.enabled { return None; }
+        let value = |v: Option<u128>| v.map(|n| n.to_string()).unwrap_or_else(|| "-".into());
+        Some(format!("[T] tcp_ms={} tls_ws_ms={} first_audio_ms={} turn_end_ms={}",
+            value(self.tcp_ms), value(self.tls_ws_ms),
+            value(self.first_audio_ms), value(self.turn_end_ms)))
+    }
+
+    fn report(&self) {
+        if let Some(line) = self.line() { eprintln!("{line}"); }
+    }
+}
+
+#[cfg(test)]
+mod timing_tests {
+    use super::*;
+
+    #[test]
+    fn timing_is_opt_in_and_missing_stages_are_not_zero() {
+        assert_eq!(Timing::default().line(), None);
+        assert!(Timing::default().start().is_none());
+        let timing = Timing { enabled: true, tcp_ms: Some(12), tls_ws_ms: Some(34),
+            first_audio_ms: Some(56), ..Timing::default() };
+        let line = timing.line().unwrap();
+        assert_eq!(line, "[T] tcp_ms=12 tls_ws_ms=34 first_audio_ms=56 turn_end_ms=-");
+        assert!(!line.contains("[!]"));
+    }
+}
+
 // 阻塞建链：TCP（带超时）→ rustls TLS → WebSocket 升级握手。
-fn connect() -> tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>> {
+fn connect(timing: &mut Timing) -> tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>> {
+    let tcp_start = timing.start();
     let tcp = TcpStream::connect((HOST, 443)).expect("tcp connect");
+    timing.tcp_ms = Timing::elapsed(tcp_start);
     tcp.set_read_timeout(Some(Duration::from_secs(20))).ok();
     tcp.set_write_timeout(Some(Duration::from_secs(20))).ok();
+    let tls_start = timing.start();
     let (ws, resp) = tungstenite::client_tls(build_request(), tcp).unwrap_or_else(|e| {
         eprintln!("[!] ws handshake failed: {e}");
         std::process::exit(2);
     });
+    timing.tls_ws_ms = Timing::elapsed(tls_start);
     eprintln!("[+] handshake OK, HTTP {}", resp.status());
     ws
 }
 
 fn main() {
+    let enabled = match env_or("ETTSC_TIMING", "0").as_str() {
+        "1" => true,
+        "0" => false,
+        _ => { eprintln!("[T-CONFIG] ETTSC_TIMING 非法，使用 0"); false }
+    };
+    let mut timing = Timing { enabled, ..Timing::default() };
     let a: Vec<String> = std::env::args().collect();
 
     if a.get(1).map(|s| s == "probe").unwrap_or(false) {
         eprintln!("[*] probe ...");
-        let mut ws = connect();
+        let mut ws = connect(&mut timing);
         let _ = ws.close(None);
+        timing.report();
         return;
     }
 
@@ -132,7 +191,7 @@ fn main() {
     let voice = a.get(3).cloned().unwrap_or_else(|| "zh-CN-YunjianNeural".into());
 
     eprintln!("[*] connecting ...");
-    let mut ws = connect();
+    let mut ws = connect(&mut timing);
 
     let date = chrono::Utc::now()
         .format("%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)")
@@ -149,12 +208,14 @@ fn main() {
     ws.send(Message::Text(ssml)).unwrap();
     eprintln!("[*] sent config+ssml, receiving ...");
 
+    let receive_start = timing.start();
     let mut audio: Vec<u8> = Vec::new();
     let mut frames = 0u32;
     loop {
         match ws.read() {
             Ok(Message::Text(t)) => {
                 if t.contains("Path:turn.end") {
+                    timing.turn_end_ms = Timing::elapsed(receive_start);
                     break;
                 }
             }
@@ -165,6 +226,9 @@ fn main() {
                 let hlen = ((b[0] as usize) << 8) | (b[1] as usize);
                 let start = 2 + hlen;
                 if start <= b.len() {
+                    if start < b.len() && timing.first_audio_ms.is_none() {
+                        timing.first_audio_ms = Timing::elapsed(receive_start);
+                    }
                     audio.extend_from_slice(&b[start..]);
                     frames += 1;
                 }
@@ -177,6 +241,7 @@ fn main() {
             }
         }
     }
+    timing.report();
     // ETTSC_PCM=1：本地把 mp3 解码成裸 PCM(S16LE) 输出，供 aplay 连续播放（句级流式无缝）。
     // 默认仍输出原始 mp3（兼容 miplayer --file 老用法）。
     if env_or("ETTSC_PCM", "") == "1" {

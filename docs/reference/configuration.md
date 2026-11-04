@@ -73,6 +73,18 @@ DeepSeek 默认 `LLM_THINKING=disabled`，GLM 使用 `LLM_REASONING_EFFORT=low`�
 
 本机现有的 Dirac 播放适配、音量恢复与参考通道各有固件限制；音效的构建和验证见 [Dirac 组件](../../device/dirac/README.md)，出现音量异常从[排障](../runbooks/troubleshooting.md#7-llm-音量忽大忽小)进入。
 
+## M03 延迟观测
+
+仅 `LLM_PIPELINE=native`、`TTS_ENGINE=device`、`DEVICE_TTS_STREAM=1` 的轮次生成分段数据。计时不改变切句、播放顺序、超时、重试次数或间隔；旧配置文件无需增加参数。
+
+| 配置 | 默认值 | 含义 |
+|---|---|---|
+| `LATENCY_TRACE_ENABLED` | `1` | `0/1`，关闭时不新增打点和 `[LATENCY]` 汇总 |
+| `LATENCY_LOG_MAX_LINES` | `200` | `/tmp/native_first_latency.log` 最近行数，允许 20–2000 |
+| `ETTSC_TIMING` | `0` | `0/1`，端侧流式 ettsc 输出可选 `[T]` 毫秒计时到各次合成日志 |
+
+非法值只警告一次并回退到表中默认值，警告不打印输入值。新增计时日志只记阶段、时间、PCM 长度、分段数和重试次数，保存在 `/tmp`；原有对话日志的内容保持现状。FIFO 提交时间不等于声学首声。字段、离线统计和录音校准见[诊断参考](diagnostics.md#m03-分段计时)，实际操作见[M03 验收说明](../testing/2026-11-04-latency-trace.md)。
+
 ## 会话与可选组件
 
 | 项 | 用途 |
