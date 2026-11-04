@@ -41,18 +41,18 @@ The speaker understands Chinese voice commands (Xiaomi's ASR is Chinese). The tr
 The project reuses Xiaomi's wake word, speech recognition and device control. A client running **on the speaker** reads each recognition result and decides: keep it native, or send it to the LLM. LLM answers are split into sentences, synthesized and played as they stream in; then the speaker opens a short follow-up window.
 
 ```mermaid
-flowchart TD
-    wake["Wake XiaoAI"] --> speech["Native mic + Xiaomi cloud ASR"]
-    speech --> route{"On-speaker router"}
-    route -->|keep native| native["XiaoAI executes / answers<br/>devices, weather, volume"]
-    route -->|matches LLM rule or XiaoAI fails| llm["Speaker calls LLM API directly<br/>(OpenAI-compatible, streaming)"]
-    llm --> tts["Sentence-by-sentence TTS<br/>EdgeTTS, native TTS fallback"]
-    tts --> followup{"Follow-up enabled?"}
-    followup -->|yes| listen["Listen without wake word"]
-    followup -->|no| idle["Idle"]
-    listen -->|follow-up, same context| llm
-    listen -->|silence / timeout| idle
+flowchart LR
+    A["🗣️ XiaoAI, …"] --> B{"On-speaker client<br/>decides who answers"}
+    B -->|lights, weather, volume| C["Native XiaoAI<br/>same as before"]
+    B -->|can't answer / ask DeepSeek| D["Speaker calls the LLM<br/>web search when needed"]
+    D --> E["EdgeTTS, sentence by sentence"]
+    E --> F["Green light on<br/>follow up without the wake word"]
+    F -->|follow-up question| D
+    F -->|say XiaoAI| B
+    F -->|silence| G["End, wait for the next wake"]
 ```
+
+The detailed technical flow (boot1 VAD and the two system images) is in [一次对话的完整过程](docs/concepts/native-first.md) (Chinese).
 
 ### What runs where
 
