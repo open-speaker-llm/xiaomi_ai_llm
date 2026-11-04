@@ -11,6 +11,18 @@ English | [简体中文](README.md)
 
 > **Make an old Xiaomi AI speaker talk to DeepSeek (or any OpenAI-compatible LLM). Lights, weather and volume stay with native XiaoAI; questions it can't answer go to the LLM — and you can keep asking follow-ups without the wake word.**
 
+**In one sentence:** This is a client on the Xiaomi AI Speaker MDZ-25-DA (S12A). Commands XiaoAI already handles, such as lights and weather, stay with XiaoAI. Open questions go to a cloud LLM the speaker calls directly, and online EdgeTTS speaks the answer. The model does not run on the speaker, and this does not work offline.
+
+| Item | Fact |
+|---|---|
+| Tested model | MDZ-25-DA / S12A only |
+| Offline | No. Recognition, the LLM and EdgeTTS are cloud services; the speaker runs the client |
+| Always-on computer | Not required when the speaker calls the LLM and `TTS_ENGINE=device`. The example config defaults `TTS_ENGINE` to `server`, which needs that service online |
+| Models | DeepSeek (default `deepseek-flash`), GLM, Kimi, MiniMax, or another OpenAI-compatible API |
+| License | [MIT](LICENSE) for code written in this repo. Not an official Xiaomi product |
+
+Common questions: [docs/faq_en.md](docs/faq_en.md) ([中文](docs/faq.md)).
+
 ![Same speaker: XiaoAI turns on the light → ask DeepSeek → follow-up without wake word](docs/assets/demo-native-vs-llm.gif)
 
 [![Watch the latest demo: DeepSeek reads the news, then the light still turns on mid-playback](docs/assets/bilibili-news-demo.jpg)](https://www.bilibili.com/video/BV1bu4u6GEEL/)
@@ -93,7 +105,7 @@ The client streams `/chat/completions` over SSE and speaks only the `content` fi
 
 ## Getting started
 
-Docs are currently in Chinese; the commands and config files are universal.
+Docs are currently in Chinese; the commands and config files are universal. Common questions: [FAQ](docs/faq_en.md) ([中文](docs/faq.md)).
 
 1. **Check your device** — [Hardware & preparation](docs/reference/hardware.md)
 2. **UART → SSH** — [Bring-up from zero](docs/getting-started/bringup.md)

@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: If you use this software, please cite it using this metadata.
+type: software
+title: xiaomi_ai_llm
+abstract: >-
+  Client for the Xiaomi AI speaker MDZ-25-DA (S12A). Native XiaoAI keeps
+  lights, weather and similar commands. Open questions go to a cloud LLM
+  called by the speaker, then online EdgeTTS. The model does not run on
+  the speaker. Not an official Xiaomi product.
+authors:
+  - name: open-speaker-llm
+repository-code: https://github.com/open-speaker-llm/xiaomi_ai_llm
+url: https://open-speaker-llm.github.io/xiaomi_ai_llm/
+license: MIT
+keywords:
+  - Xiaomi
+  - XiaoAI
+  - DeepSeek
+  - speaker
+  - LLM

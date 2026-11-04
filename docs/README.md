@@ -8,6 +8,8 @@
 
 这个项目有两条阅读线：一条带你把音箱用起来，另一条解释它为什么这样工作。第一次阅读不必遍历所有目录；先沿着自己的问题走，遇到配置、构建或固件细节时再进入参考页。
 
+同目录的 [index.html](index.html) 是 GitHub Pages 的站点首页，不替代本导读。常见问题见 [faq.md](faq.md)，英文见 [faq_en.md](faq_en.md)。站点上的 `faq.html` 由 `python3 tools/build_pages_faq.py` 从这两份 Markdown 生成。
+
 ## 先建立全貌
 
 从[项目首页](../README.md)看一次实际对话，再读[当前状态](status.md)，了解自己的设备和固件能用到哪一步。如果还不熟悉 ASR、TTS、VAD，这些词分别指语音识别、语音合成和语音活动检测；其余术语可以随时查[词表](concepts/glossary.md)。

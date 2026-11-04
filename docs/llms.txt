@@ -1,0 +1,44 @@
+# xiaomi_ai_llm
+
+> 这是跑在小米 AI 音箱 MDZ-25-DA（系统代号 S12A）上的客户端：开灯、天气等小爱能处理的仍走小爱，开放问题由音箱直连云端大模型，再用在线 EdgeTTS 念出来。大模型不在音箱上运行，断网后不能靠它继续对话。不是小米官方产品。
+
+> A client on the Xiaomi AI Speaker MDZ-25-DA (S12A). Native XiaoAI keeps lights, weather and similar commands. Open questions go to a cloud LLM the speaker calls directly, then online EdgeTTS. The model does not run on the speaker, and it does not work offline. Not an official Xiaomi product.
+
+仓库没有给出可以引用的速度或延迟数字，这里也不写。
+
+## 事实
+
+- 实测型号只有小米 AI 音箱 MDZ-25-DA / S12A。其他型号未测试。
+- 原生优先：开灯、天气、报时、音量等仍可交给小爱。不保证每一句都路由正确。播放中用语音停掉大模型回答尚未实现。
+- 客户端在音箱上。语音识别走小米云，大模型走配置的云 API，EdgeTTS 走微软在线语音合成。可选的本机 Silero VAD 只判断说完没有，不是大模型。
+- 音箱直连模型且 TTS_ENGINE=device、追问走 boot1 原生识别时，不需要电脑或 NAS 一直开着。示例配置默认 TTS_ENGINE=server，保持默认则那台 TTS 服务要在线。
+- 音箱直连的 BACKEND：deepseek（默认 deepseek-flash）、glm（glm-5.3-flash）、kimi（kimi-k2.6）、minimax（MiniMax-M2.7），或用 LLM_API_BASE / LLM_MODEL / LLM_API_KEY 指向其他 OpenAI 兼容接口。本地模型（如 Ollama）尚未测试。
+- 联网搜索只在 LLM_PIPELINE=native 且 BACKEND=deepseek 时可用，默认 LLM_WEB_SEARCH=auto。
+- 免唤醒追问要先安装组件。默认靠保持安静结束。FOLLOWUP_EXIT_ENABLED 默认为 0；设为 1 后，追问窗口里单独说出“结束对话 / 退出对话 / 停止对话 / 不聊了 / 退下”才会直接结束。真人收听验收尚未完成。
+- 不用焊接。打通 SSH 可能改写系统分区，有变砖和失去保修的风险。
+- 自有代码 MIT。device/ettsc/src/gec_v2.rs 为 LGPL-3.0-only。EdgeTTS 在 README 中标为免费；大模型 API 由服务商计费。
+
+## 文档
+
+- [项目页](https://open-speaker-llm.github.io/xiaomi_ai_llm/): 中文首页
+- [English](https://open-speaker-llm.github.io/xiaomi_ai_llm/en/): English landing page
+- [常见问题](https://open-speaker-llm.github.io/xiaomi_ai_llm/faq.html): 中文 FAQ
+- [English FAQ](https://open-speaker-llm.github.io/xiaomi_ai_llm/en/faq.html): English FAQ
+- [安装准备](https://open-speaker-llm.github.io/xiaomi_ai_llm/install.html): 拆机、串口、SSH 会改分区
+- [支持型号](https://open-speaker-llm.github.io/xiaomi_ai_llm/models.html): 只实测 MDZ-25-DA / S12A
+- [完整文本](https://open-speaker-llm.github.io/xiaomi_ai_llm/llms-full.txt): 上述事实加上两份 FAQ 原文
+- [中文 README](https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/README.md): 仓库首页
+- [English README](https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/README_en.md): English README
+- [FAQ Markdown](https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/faq.md): 中文 FAQ 源文
+- [English FAQ Markdown](https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/faq_en.md): English FAQ source
+- [从零接入](https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/getting-started/bringup.md): 串口与 SSH
+- [设备与准备](https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/reference/hardware.md): 型号和工具
+- [跑通第一轮](https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/getting-started/quickstart.md): 部署客户端
+- [配置参考](https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/reference/configuration.md): 切换模型和结束语
+
+## 视频
+
+- [哔哩哔哩实机演示](https://www.bilibili.com/video/BV1bu4u6GEEL/)
+- [哔哩哔哩原理](https://www.bilibili.com/video/BV1Vzja69ELB/)
+- [哔哩哔哩原理短版](https://www.bilibili.com/video/BV1ShjG6tEVz/)
+- [YouTube](https://www.youtube.com/watch?v=1R8bhbN42KE)
