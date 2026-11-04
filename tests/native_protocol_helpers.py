@@ -14,3 +14,13 @@ def embedded_protocol(source=None):
     if source.count(begin) != 1 or source.count(end) != 1:
         raise ValueError('Expected exactly one generated native protocol block')
     return source.split(begin, 1)[1].split(end, 1)[0]
+
+
+def embedded_web(source=None):
+    if source is None:
+        source = (ROOT / 'device/native_first_client.sh').read_text()
+    begin = '# BEGIN GENERATED NATIVE WEB\n'
+    end = '# END GENERATED NATIVE WEB\n'
+    if source.count(begin) != 1 or source.count(end) != 1:
+        raise ValueError('Expected exactly one generated native web block')
+    return source.split(begin, 1)[1].split(end, 1)[0]

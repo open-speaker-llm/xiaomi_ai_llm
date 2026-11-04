@@ -15,6 +15,7 @@ fi
 
 echo "== Embedded protocol module =="
 "$PYTHON" scripts/embed_native_protocol.py --check
+"$PYTHON" scripts/embed_native_web.py --check
 
 echo "== Python unit tests =="
 "$PYTHON" -m unittest discover -s tests -p 'test_*.py'
@@ -26,6 +27,7 @@ for script in \
     device/speaker_doctor.sh \
     device/native_first_client.sh \
     device/lib/native_protocol.sh \
+    device/lib/native_web.sh \
     device/endpoint_probe/run.sh \
     device/endpoint_probe/run_protocol.sh \
     device/endpoint_probe/build_shadow.sh \

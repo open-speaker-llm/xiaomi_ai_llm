@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from tests.native_protocol_helpers import PROTOCOL_FUNCTIONS, embedded_protocol
+from tests.native_protocol_helpers import PROTOCOL_FUNCTIONS, embedded_protocol, embedded_web
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / 'device/native_first_client.sh').read_text()
@@ -17,7 +17,8 @@ def functions(*names):
                   'llm_history_owned', 'llm_history_filter', 'llm_history_load',
                   'llm_history_commit', 'llm_history_gc')
     protocol = embedded_protocol(SOURCE) if PROTOCOL_FUNCTIONS.intersection(names) else ''
-    return protocol + '\n' + '\n'.join(m.group() for name in names if name not in PROTOCOL_FUNCTIONS
+    web = embedded_web(SOURCE) if 'llm_stream_answer_and_play' in names else ''
+    return protocol + '\n' + web + '\n' + '\n'.join(m.group() for name in names if name not in PROTOCOL_FUNCTIONS
                                        if (m := re.search(r'^' + name + r'\(\) \{.*?^\}', SOURCE, re.M | re.S)))
 
 

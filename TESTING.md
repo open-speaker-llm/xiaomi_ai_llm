@@ -60,6 +60,7 @@
 
 | 改动范围 | 必跑 |
 |---|---|
+| native DeepSeek 联网搜索 | 完整自动化、真实 jsonfilter/BusyBox 独立 API；[联网搜索实际步骤](docs/testing/2026-11-02-web-search.md)及原生路由、播放与追问复验 |
 | 服务端 LLM/TTS/ASR | 完整自动化测试 |
 | 主客户端状态机或路由 | 自动化 + M1/M2/M3 |
 | 播放 freeze/replay | 自动化 + M1/M2/M3/B3 |

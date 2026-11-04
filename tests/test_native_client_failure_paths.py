@@ -14,7 +14,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from tests.native_protocol_helpers import PROTOCOL_FUNCTIONS, embedded_protocol
+from tests.native_protocol_helpers import PROTOCOL_FUNCTIONS, embedded_protocol, embedded_web
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -26,7 +26,8 @@ def functions(*names):
                   'llm_history_commit', 'llm_history_gc')
     source = (ROOT / 'device/native_first_client.sh').read_text()
     protocol = embedded_protocol(source) if PROTOCOL_FUNCTIONS.intersection(names) else ''
-    return protocol + '\n' + '\n'.join(
+    web = embedded_web(source) if 'llm_direct_answer' in names else ''
+    return protocol + '\n' + web + '\n' + '\n'.join(
         re.search(r'^' + name + r'\(\) \{.*?^\}', source, re.M | re.S).group()
         for name in names if name not in PROTOCOL_FUNCTIONS)
 

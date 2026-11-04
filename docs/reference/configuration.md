@@ -41,6 +41,20 @@ DeepSeek 默认 `LLM_THINKING=disabled`，GLM 使用 `LLM_REASONING_EFFORT=low`�
 
 服务端另支持 Claude/OpenAI 等配置，地址和模型见 `config.yaml`，密钥放 `.env`。音箱发送的显式 `BACKEND` 优先于服务端默认后端，两边需要保持一致。
 
+## 联网搜索
+
+`LLM_PIPELINE=native`、`BACKEND=deepseek` 时默认 `LLM_WEB_SEARCH=auto`：进入 LLM 的问题先结合当前会话做语义判断，明确搜索、实时信息及需要新事实的追问调用 DeepSeek 官方 Search API；指定网页调用 Fetch API。稳定知识、创作、翻译和整理上一回答直接回答。小爱原生已处理的家控、天气和报时保持原路由。
+
+| 配置 | 默认值 | 含义 |
+|---|---|---|
+| `LLM_WEB_SEARCH` | `auto` | `auto` 按语义联网；`off` 关闭判断和搜索，恢复纯聊天 |
+| `LLM_WEB_PLAN_TIMEOUT` | `8` | 每轮联网判断的最长秒数，允许 1–20 |
+| `LLM_WEB_TIMEOUT` | `8` | 单次搜索或网页读取的最长秒数，允许 1–20 |
+
+搜索使用 `DEEPSEEK_API_KEY`；只有官方 DeepSeek 聊天地址才允许回用通用 `LLM_API_KEY`，不会把其它服务商的通用密钥发送给 DeepSeek。需要系统已有的 `jsonfilter`，不需要 Python、jq 或 Mac 搜索服务。判断本身每轮增加一次模型请求；搜索最多返回三条来源，Search/Fetch 及模型调用分别计费。
+
+联网失败、结果为空或判断无效时，固定提示“暂时无法联网查询，请稍后再试。”，不继续生成未经核验的实时答案。回答用口语说明来源，原始网址保留在客户端日志的 `[WEB] source=` 行。具体行为和限制见[联网搜索参考](native-web-search.md)，操作见[联网搜索测试](../testing/2026-11-02-web-search.md)。可选 `server` 链路不包含此功能。
+
 ## 再选文字怎样变成声音
 
 | 配置 | 所需部署 | 音色配置 |
