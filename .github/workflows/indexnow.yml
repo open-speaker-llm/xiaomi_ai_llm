@@ -1,0 +1,32 @@
+name: IndexNow
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/index.html"
+      - "docs/faq.html"
+      - "docs/install.html"
+      - "docs/models.html"
+      - "docs/en/**"
+      - "docs/sitemap.xml"
+      - "docs/robots.txt"
+      - "docs/llms.txt"
+      - "docs/llms-full.txt"
+      - "docs/site.css"
+      - "docs/faq.md"
+      - "docs/faq_en.md"
+      - "docs/*.txt"
+      - ".github/workflows/indexnow.yml"
+      - ".github/scripts/indexnow.py"
+
+permissions:
+  contents: read
+
+jobs:
+  submit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Submit sitemap URLs to IndexNow
+        run: python3 .github/scripts/indexnow.py

@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Language" content="zh-CN">
+  <meta name="applicable-device" content="pc,mobile">
+  <title>小爱音箱接入 DeepSeek / 大模型（Xiaomi XiaoAI speaker LLM）</title>
+  <meta name="description" content="小米 AI 音箱 MDZ-25-DA（S12A）上的客户端：开灯、天气仍交给小爱，开放问题直连 DeepSeek 等云端大模型，再用 EdgeTTS 播报。不是音箱本地大模型，也不是小米官方产品。Xiaomi XiaoAI speaker LLM。">
+  <meta name="keywords" content="小爱音箱,小爱音箱接入DeepSeek,小爱同学,大模型,小米AI音箱,MDZ-25-DA,S12A,DeepSeek,Xiaomi XiaoAI speaker LLM">
+  <meta name="robots" content="index,follow">
+  <link rel="canonical" href="https://open-speaker-llm.github.io/xiaomi_ai_llm/">
+  <link rel="alternate" hreflang="zh-CN" href="https://open-speaker-llm.github.io/xiaomi_ai_llm/">
+  <link rel="alternate" hreflang="en" href="https://open-speaker-llm.github.io/xiaomi_ai_llm/en/">
+  <link rel="alternate" hreflang="x-default" href="https://open-speaker-llm.github.io/xiaomi_ai_llm/">
+  <link rel="alternate" type="text/plain" href="llms.txt" title="LLM-readable summary">
+  <meta property="og:type" content="website">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:locale:alternate" content="en_US">
+  <meta property="og:site_name" content="xiaomi_ai_llm">
+  <meta property="og:title" content="小爱音箱接入 DeepSeek / 大模型">
+  <meta property="og:description" content="客户端跑在已实测的小米 AI 音箱 MDZ-25-DA（S12A）上。开灯和天气仍走小爱，开放问题直连云端大模型。不是离线方案，也不是小米官方产品。">
+  <meta property="og:url" content="https://open-speaker-llm.github.io/xiaomi_ai_llm/">
+  <meta property="og:image" content="https://open-speaker-llm.github.io/xiaomi_ai_llm/assets/bilibili-news-demo.jpg">
+  <meta property="og:image:alt" content="小爱音箱用 DeepSeek 播报新闻时，仍可以开灯">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="stylesheet" href="site.css">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareSourceCode",
+    "@id": "https://open-speaker-llm.github.io/xiaomi_ai_llm/#software",
+    "name": "xiaomi_ai_llm",
+    "description": "客户端跑在小米 AI 音箱 MDZ-25-DA（S12A）上。开灯、天气等仍交给小爱；开放问题由音箱直连云端大模型，再用在线 EdgeTTS 播报。大模型不在音箱上运行。不是小米官方产品。",
+    "codeRepository": "https://github.com/open-speaker-llm/xiaomi_ai_llm",
+    "url": "https://open-speaker-llm.github.io/xiaomi_ai_llm/",
+    "programmingLanguage": ["Shell", "Python", "C", "Rust"],
+    "runtimePlatform": "Xiaomi AI Speaker MDZ-25-DA (S12A)",
+    "license": "https://opensource.org/licenses/MIT",
+    "author": {"@type": "Organization", "name": "open-speaker-llm"}
+  }
+  </script>
+</head>
+<body>
+  <header class="top">
+    <div class="wrap">
+      <p class="brand"><a href="./">小爱音箱与大模型</a></p>
+      <nav>
+        <a href="./" aria-current="page">首页</a>
+        <a href="faq.html">常见问题</a>
+        <a href="install.html">安装</a>
+        <a href="models.html">型号</a>
+        <a href="en/">English</a>
+        <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm">GitHub</a>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    <h1>小爱音箱接入 DeepSeek / 大模型</h1>
+    <p class="lead">这是跑在小米 AI 音箱 MDZ-25-DA（系统代号 S12A）上的客户端：开灯、天气等小爱能处理的仍走小爱，开放问题由音箱直连云端大模型，再用在线 EdgeTTS 念出来。大模型不在音箱上运行，断网后不能靠它继续对话。</p>
+    <p class="en">A client on the tested Xiaomi AI Speaker MDZ-25-DA (S12A). Native XiaoAI keeps lights, weather and similar commands. Open questions go to a cloud LLM the speaker calls directly, then online EdgeTTS. The model does not run on the speaker, and it does not work offline. This is not an official Xiaomi product.</p>
+
+    <h2>几项可以核对的事实</h2>
+    <table>
+      <thead>
+        <tr><th>项</th><th>仓库里的事实</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>实测型号</td><td>只有 MDZ-25-DA / S12A</td></tr>
+        <tr><td>是否离线</td><td>否。识别、大模型和 EdgeTTS 都在云端；音箱上是客户端</td></tr>
+        <tr><td>是否要电脑一直开着</td><td>音箱直连模型且 <code>TTS_ENGINE=device</code> 时不需要。示例配置默认 <code>TTS_ENGINE=server</code>，保持默认则 TTS 服务要在线</td></tr>
+        <tr><td>支持的模型</td><td>DeepSeek（默认 <code>deepseek-flash</code>）、GLM、Kimi、MiniMax，或其他 OpenAI 兼容接口</td></tr>
+        <tr><td>许可证</td><td>本仓库自有代码 MIT。不是小米官方产品</td></tr>
+      </tbody>
+    </table>
+
+    <h2>同一台音箱上的一段演示</h2>
+    <p>先让小爱开灯，再问 DeepSeek，回答结束后不喊唤醒词继续追问。免唤醒追问需要另行安装组件。图不附带速度或延迟数字。</p>
+    <img class="demo" src="assets/demo-native-vs-llm.gif" alt="同一台 MDZ-25-DA：小爱开灯，再问 DeepSeek，然后免唤醒追问">
+
+    <h2>它怎么工作</h2>
+    <ol>
+      <li>唤醒小爱。语音识别仍走小米云。</li>
+      <li>音箱上的客户端决定这句话交给小爱，还是转给大模型。</li>
+      <li>转给大模型时，默认由音箱直接调用你配置的云 API。DeepSeek 这条主线还可以先判断要不要联网搜索。</li>
+      <li>回答用 EdgeTTS 播出来；合成失败时可以退回小爱自己的语音。</li>
+      <li>安装并启用追问组件后，绿灯亮着可以接着说。不说话就会结束。五句口头结束语默认关闭。</li>
+    </ol>
+    <p>更细的过程在仓库里的 <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/concepts/native-first.md">一次对话的完整过程</a>。</p>
+
+    <h2>支持型号</h2>
+    <p>只实测过小米 AI 音箱 MDZ-25-DA，系统代号 S12A。其他型号没有测过，命令不能照搬。</p>
+    <p><a href="models.html">型号说明</a></p>
+
+    <h2>安装要做什么</h2>
+    <p>要拆机，不用焊接。主板上有现成串口，用 USB-TTL 和杜邦线接上。打通 SSH 时可能改写系统分区，写错可能无法启动。已经能 SSH 的设备不必再写一遍分区。</p>
+    <p><a href="install.html">安装准备</a> · <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/getting-started/bringup.md">从零接入（仓库文档）</a></p>
+
+    <h2>常见问题</h2>
+    <ul>
+      <li><a href="faq.html#models">支持哪些型号？</a></li>
+      <li><a href="faq.html#hardware">要不要焊接，要不要刷机？</a></li>
+      <li><a href="faq.html#offline">是不是在音箱上跑大模型？能离线吗？</a></li>
+      <li><a href="faq.html#always-on">需要电脑或 NAS 一直开着吗？</a></li>
+      <li><a href="faq.html#native">开灯、天气这些原来的功能还能用吗？</a></li>
+      <li><a href="faq.html#llm">支持哪些大模型？怎么切换？能联网搜索吗？</a></li>
+      <li><a href="faq.html#followup">能免唤醒连续追问吗？怎么结束？</a></li>
+      <li><a href="faq.html#compare">和 mi-gpt、open-xiaoai 有什么不同？</a></li>
+      <li><a href="faq.html#cost">费用怎么算？</a></li>
+      <li><a href="faq.html#license">有什么风险？用的是什么许可证？</a></li>
+    </ul>
+    <p>完整回答在 <a href="faq.html">常见问题</a>，仓库原文是 <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/faq.md">docs/faq.md</a>。英文：<a href="en/faq.html">English FAQ</a>。</p>
+
+    <h2>代码和视频</h2>
+    <ul>
+      <li><a href="https://github.com/open-speaker-llm/xiaomi_ai_llm">GitHub 仓库</a></li>
+      <li><a href="https://www.bilibili.com/video/BV1bu4u6GEEL/">哔哩哔哩：实机演示</a></li>
+      <li><a href="https://www.bilibili.com/video/BV1Vzja69ELB/">哔哩哔哩：原理</a></li>
+      <li><a href="https://www.bilibili.com/video/BV1ShjG6tEVz/">哔哩哔哩：原理短版</a></li>
+      <li><a href="https://www.youtube.com/watch?v=1R8bhbN42KE">YouTube</a></li>
+    </ul>
+
+    <footer>
+      <p>自有代码 MIT。不是小米或小爱的官方项目。只在自己拥有或已获授权的设备上使用。拆机和写系统分区有变砖和失去保修的风险。</p>
+    </footer>
+  </main>
+</body>
+</html>

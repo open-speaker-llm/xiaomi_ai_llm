@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Language" content="en">
+  <meta name="applicable-device" content="pc,mobile">
+  <title>Xiaomi XiaoAI speaker LLM — DeepSeek on MDZ-25-DA</title>
+  <meta name="description" content="A client on the Xiaomi AI Speaker MDZ-25-DA (S12A). Native XiaoAI keeps lights and weather. Open questions go to a cloud LLM such as DeepSeek, spoken with online EdgeTTS. Not an on-device LLM, and not an official Xiaomi product.">
+  <meta name="keywords" content="Xiaomi XiaoAI speaker LLM,XiaoAI,DeepSeek,MDZ-25-DA,S12A,Xiaomi AI speaker">
+  <meta name="robots" content="index,follow">
+  <link rel="canonical" href="https://open-speaker-llm.github.io/xiaomi_ai_llm/en/">
+  <link rel="alternate" hreflang="en" href="https://open-speaker-llm.github.io/xiaomi_ai_llm/en/">
+  <link rel="alternate" hreflang="zh-CN" href="https://open-speaker-llm.github.io/xiaomi_ai_llm/">
+  <link rel="alternate" hreflang="x-default" href="https://open-speaker-llm.github.io/xiaomi_ai_llm/">
+  <link rel="alternate" type="text/plain" href="../llms.txt" title="LLM-readable summary">
+  <meta property="og:type" content="website">
+  <meta property="og:locale" content="en_US">
+  <meta property="og:locale:alternate" content="zh_CN">
+  <meta property="og:site_name" content="xiaomi_ai_llm">
+  <meta property="og:title" content="Xiaomi XiaoAI speaker LLM">
+  <meta property="og:description" content="Client on the tested MDZ-25-DA / S12A. Native XiaoAI stays for lights and weather. The LLM and EdgeTTS are cloud services. Not official Xiaomi software.">
+  <meta property="og:url" content="https://open-speaker-llm.github.io/xiaomi_ai_llm/en/">
+  <meta property="og:image" content="https://open-speaker-llm.github.io/xiaomi_ai_llm/assets/bilibili-news-demo.jpg">
+  <meta property="og:image:alt" content="The same speaker answers with DeepSeek and can still turn on a light">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="stylesheet" href="../site.css">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareSourceCode",
+    "@id": "https://open-speaker-llm.github.io/xiaomi_ai_llm/#software",
+    "name": "xiaomi_ai_llm",
+    "description": "Client on the Xiaomi AI Speaker MDZ-25-DA (S12A). Native XiaoAI keeps lights, weather and similar commands. Open questions go to a cloud LLM called by the speaker, then online EdgeTTS. The model does not run on the speaker. Not an official Xiaomi product.",
+    "codeRepository": "https://github.com/open-speaker-llm/xiaomi_ai_llm",
+    "url": "https://open-speaker-llm.github.io/xiaomi_ai_llm/",
+    "programmingLanguage": ["Shell", "Python", "C", "Rust"],
+    "runtimePlatform": "Xiaomi AI Speaker MDZ-25-DA (S12A)",
+    "license": "https://opensource.org/licenses/MIT",
+    "author": {"@type": "Organization", "name": "open-speaker-llm"}
+  }
+  </script>
+</head>
+<body>
+  <header class="top">
+    <div class="wrap">
+      <p class="brand"><a href="../">xiaomi_ai_llm</a></p>
+      <nav>
+        <a href="./" aria-current="page">Home</a>
+        <a href="faq.html">FAQ</a>
+        <a href="../install.html">安装</a>
+        <a href="../models.html">型号</a>
+        <a href="../">中文</a>
+        <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm">GitHub</a>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    <h1>Xiaomi XiaoAI speaker LLM</h1>
+    <p class="lead">A client on the Xiaomi AI Speaker MDZ-25-DA (S12A). Native XiaoAI still handles lights, weather and similar commands. Open questions go to a cloud LLM the speaker calls directly, and online EdgeTTS speaks the answer. The model does not run on the speaker, and the LLM path does not work offline.</p>
+    <p class="en">小米 AI 音箱 MDZ-25-DA（S12A）上的客户端。开灯、天气仍走小爱，开放问题直连云端大模型。不是离线方案，也不是小米官方产品。</p>
+
+    <h2>Facts from the repo</h2>
+    <table>
+      <thead>
+        <tr><th>Item</th><th>What the repo says</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Tested model</td><td>MDZ-25-DA / S12A only</td></tr>
+        <tr><td>Offline</td><td>No. Recognition, the LLM and EdgeTTS are cloud services. The speaker runs the client.</td></tr>
+        <tr><td>Always-on computer</td><td>Not required when the speaker calls the LLM and <code>TTS_ENGINE=device</code>. The example config defaults TTS to <code>server</code>, which needs that service online.</td></tr>
+        <tr><td>Models</td><td>DeepSeek (default <code>deepseek-flash</code>), GLM, Kimi, MiniMax, or another OpenAI-compatible API</td></tr>
+        <tr><td>License</td><td>MIT for code written in this repo. Not an official Xiaomi product.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Demo</h2>
+    <p>The same speaker: XiaoAI turns on a light, DeepSeek answers, then a follow-up without the wake word. Follow-up without the wake word needs its component installed. No timing figures are attached to this clip.</p>
+    <img class="demo" src="../assets/demo-native-vs-llm.gif" alt="Same MDZ-25-DA: native light control, a DeepSeek answer, then a follow-up without the wake word">
+
+    <h2>How it works</h2>
+    <ol>
+      <li>Wake XiaoAI. Speech recognition stays on Xiaomi's cloud.</li>
+      <li>The on-speaker client chooses native XiaoAI or the LLM.</li>
+      <li>The speaker calls your cloud LLM by default. On the DeepSeek path it can first decide whether to search the web.</li>
+      <li>EdgeTTS speaks the answer, with native XiaoAI TTS as a fallback.</li>
+      <li>After the follow-up component is installed, a steady green light means you can continue. Silence ends it. The five spoken exit phrases are off by default.</li>
+    </ol>
+
+    <h2>Read next</h2>
+    <ul>
+      <li><a href="faq.html">FAQ</a> · <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/faq_en.md">docs/faq_en.md</a></li>
+      <li><a href="../models.html">Tested hardware</a> (Chinese)</li>
+      <li><a href="../install.html">Install notes</a> (Chinese; the command docs are in Chinese)</li>
+      <li><a href="https://github.com/open-speaker-llm/xiaomi_ai_llm">GitHub</a></li>
+      <li><a href="https://www.youtube.com/watch?v=1R8bhbN42KE">YouTube</a></li>
+      <li><a href="https://www.bilibili.com/video/BV1bu4u6GEEL/">Bilibili: live demo</a></li>
+      <li><a href="https://www.bilibili.com/video/BV1Vzja69ELB/">Bilibili: how it works</a></li>
+      <li><a href="https://www.bilibili.com/video/BV1ShjG6tEVz/">Bilibili: short overview</a></li>
+    </ul>
+    <footer>
+      <p>MIT for this repo's own code. Not affiliated with Xiaomi. Opening the case and writing system partitions can brick the device and void the warranty.</p>
+    </footer>
+  </main>
+</body>
+</html>

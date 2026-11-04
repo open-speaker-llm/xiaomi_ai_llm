@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Language" content="en">
+  <meta name="applicable-device" content="pc,mobile">
+  <title>FAQ: Xiaomi XiaoAI speaker LLM, DeepSeek, MDZ-25-DA</title>
+  <meta name="description" content="FAQ for the Xiaomi AI Speaker MDZ-25-DA (S12A): tested model, soldering, offline use, an always-on computer, native XiaoAI, switching LLMs, web search, follow-up exit phrases, cost, and the MIT license.">
+  <meta name="keywords" content="Xiaomi XiaoAI speaker LLM,DeepSeek,MDZ-25-DA,S12A,FAQ">
+  <meta name="robots" content="index,follow">
+  <link rel="canonical" href="https://open-speaker-llm.github.io/xiaomi_ai_llm/en/faq.html">
+  <link rel="alternate" hreflang="en" href="https://open-speaker-llm.github.io/xiaomi_ai_llm/en/faq.html">
+  <link rel="alternate" hreflang="zh-CN" href="https://open-speaker-llm.github.io/xiaomi_ai_llm/faq.html">
+  <link rel="alternate" hreflang="x-default" href="https://open-speaker-llm.github.io/xiaomi_ai_llm/">
+  <meta property="og:type" content="article">
+  <meta property="og:locale" content="en_US">
+  <meta property="og:title" content="FAQ: Xiaomi XiaoAI speaker LLM, DeepSeek, MDZ-25-DA">
+  <meta property="og:description" content="FAQ for the Xiaomi AI Speaker MDZ-25-DA (S12A): tested model, soldering, offline use, an always-on computer, native XiaoAI, switching LLMs, web search, follow-up exit phrases, cost, and the MIT license.">
+  <meta property="og:url" content="https://open-speaker-llm.github.io/xiaomi_ai_llm/en/faq.html">
+  <meta property="og:image" content="https://open-speaker-llm.github.io/xiaomi_ai_llm/assets/bilibili-news-demo.jpg">
+  <link rel="stylesheet" href="../site.css">
+  <script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "SoftwareSourceCode",
+      "@id": "https://open-speaker-llm.github.io/xiaomi_ai_llm/#software",
+      "name": "xiaomi_ai_llm",
+      "codeRepository": "https://github.com/open-speaker-llm/xiaomi_ai_llm",
+      "url": "https://open-speaker-llm.github.io/xiaomi_ai_llm/",
+      "license": "https://opensource.org/licenses/MIT",
+      "author": {
+        "@type": "Organization",
+        "name": "open-speaker-llm"
+      }
+    },
+    {
+      "@type": "FAQPage",
+      "@id": "https://open-speaker-llm.github.io/xiaomi_ai_llm/en/faq.html#faq",
+      "url": "https://open-speaker-llm.github.io/xiaomi_ai_llm/en/faq.html",
+      "isPartOf": {
+        "@id": "https://open-speaker-llm.github.io/xiaomi_ai_llm/#software"
+      },
+      "inLanguage": "en",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "Which speaker models are supported?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Only one has been tested: the Xiaomi AI Speaker, product model MDZ-25-DA. The system hostname and internal codename are S12A. The SoC is an Amlogic A113X. The PCB silkscreen reads DKSND-S12C-ECHO-AB-20180820, which is not the same string as the product model or the hostname. The docs list all three as measured, and do not collapse them into one name.\nNo other model has been tested. A similar case does not mean the firmware or the connector is the same. The commands are not portable."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Do I have to solder or flash the speaker?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "No soldering. Open the back cover with a Phillips screwdriver. The board already has a JST UART socket. The cable used in the docs is an SH1.0 to 2.54 mm Dupont 3-pin lead. The USB-TTL example is a CH340. Three wires: adapter TX to speaker RX, adapter RX to speaker TX, GND to GND. 115200 8N1. Do not connect the adapter's 5V or 3.3V pin to the board, and do not trust wire color for TX, RX, and GND. Check the pins with a meter first.\nThis is not a flash that replaces the system and takes over the microphone and playback. XiaoAI's own recognition and device control stay in place. If SSH is not already available, a startup script has to be written into the system partition so dropbear starts. The boot0 and boot1 runbooks both modify the matching rootfs; the boot1 runbook records an mtd write of system1. A bad partition write can leave the device unable to boot. UART stays the recovery path after SSH works. If SSH already works, the docs say not to rewrite the partition just to follow the steps again.\nThe commands live in those pages, not here: hardware, bring-up, boot0 SSH, boot1 SSH."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Does the speaker run the LLM? Does it work offline?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "No. An LLM conversation does not work offline.\nThe speaker runs the client: it routes each turn and plays audio. Speech recognition, device control, and XiaoAI's own answers stay on Xiaomi's cloud, as before. The LLM is the cloud API you configure. By default the speaker calls it. With LLM_PIPELINE=server, a service you run calls it instead. EdgeTTS is Microsoft's online speech synthesis, called by the speaker or by the TTS service. If it fails, playback can fall back to native XiaoAI TTS.\nThe docs say that without a network, only native XiaoAI remains. Optional boot1 Silero VAD runs on the speaker and only decides whether speech has stopped. The words still come from Xiaomi's cloud. That component is not an LLM."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Does a computer or NAS have to stay on?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "You need a computer to deploy, copy files, and change configuration. You do not necessarily need one for everyday conversation.\nConversation does not depend on an always-on computer or NAS when all of these are true:\nLLM_PIPELINE=native (this is the client default when the variable is unset)\nTTS_ENGINE=device (on-speaker ettsc calls EdgeTTS directly)\nfollow-up uses boot1's native recognition, not audio sent to a computer\nModel calls and speech synthesis then leave from the speaker. Recognition still uses Xiaomi's cloud.\nIn device/native_first.env.example, TTS_ENGINE is server. If the variable is unset, the client also falls back to server. The example address is http://192.168.8.150:8080. Leave that default in place and the TTS service has to be up while the speaker answers. With LLM_PIPELINE=server, the optional FastAPI service has to keep running and it calls the model and synthesizes speech. An older boot1 follow-up path sends audio to a Mac for recognition; that path also needs the computer on.\nThe status page says: with on-device TTS and native follow-up, a Mac does not have to stay running."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Do lights, weather, and the other native features still work?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Yes. That is the main path, called native-first. Lights, weather, time, and volume, when XiaoAI already handles them, still go to XiaoAI. boot0 looks at domain, action, and failure text in the native result. boot1 first checks whether the utterance names the LLM. The default patterns are DEEPSEEK, DeepSeek, and deepseek. Otherwise it waits for XiaoAI's failure prompt and only then sends the turn to the LLM.\nboot1 uses text rules. The docs say an unseen failure sentence can be missed, and a similar normal answer can be misread. Not every utterance is guaranteed to route correctly.\nDuring LLM playback you can wake XiaoAI again for device control, and playback continues. That is the behavior described in the docs and the demo. Stopping the LLM answer by voice while it is playing is not implemented."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Which LLMs are supported, how do I switch, and is there web search?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "On the direct-from-speaker path, set BACKEND in /data/native_first.env on the device and restart the client when it is idle. Defaults in the current script:\nBACKEND | Default model when not overridden\ndeepseek (also the default if unset) | deepseek-flash\nglm | glm-5.3-flash\nkimi | kimi-k2.6\nminimax | MiniMax-M2.7\nIf LLM_API_BASE, LLM_MODEL, or LLM_API_KEY is set, it overrides that table. Changing only BACKEND while an old override remains sends the request to the old endpoint or model. Saying \"call Kimi\" to the speaker does not switch backends. The default direct-to-LLM patterns are the three DeepSeek spellings above; change DIRECT_LLM_QUERY_PATTERNS to adjust them.\nThe English README says local models (Ollama is the example) have not been tested. Any other OpenAI-compatible endpoint can be filled into the three overrides. That does not mean it has been tried on this speaker.\nThe optional computer service's config.yaml also lists Claude and OpenAI. Those apply only when LLM_PIPELINE=server. The on-speaker path does not use them.\nWeb search exists only when the speaker calls the model itself and BACKEND=deepseek. The default LLM_WEB_SEARCH=auto first decides whether the question needs live information (news, prices, opening status, a given page, and similar). If it does, the speaker calls DeepSeek's official Search or Fetch API and the answer names its sources. Other backends do not have this, and neither does the server pipeline. off disables both the decision and the search. On failure, an empty result, or an invalid decision, the client says exactly “暂时无法联网查询，请稍后再试。” and does not continue with an unchecked live answer. Each LLM turn adds one decision request. See web search."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Can I ask follow-ups without the wake word, and how does that end?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Yes, but copying the example config is not enough. The matching component has to be installed and enabled. On boot1, after an LLM answer finishes playing, the speaker can listen again without another “小爱同学”, in the same context. The words still come from Xiaomi's cloud. A steady green light means it is ready for the next utterance. Native VAD decides when speech has stopped. The docs describe about 6 seconds of idle before exit. NATIVE_ASR_LISTEN_TIMEOUT defaults to 20 seconds and is a whole-turn safety limit, not an extra 20 seconds of waiting before you start speaking. Staying quiet ends the session.\nboot0 follow-up is a different path: record on the device, then Xiaomi file recognition. The status page lists it as experimental. The boot1 native follow-up component does not transfer onto boot0.\nSpoken exit phrases are off by default. In device/native_first_client.sh, anything other than FOLLOWUP_EXIT_ENABLED=1 returns immediately. The example config is 0. After you set it to 1 and restart the client while idle, the session ends only if a follow-up window is already open and the utterance is exactly one of these five:\n结束对话, 退出对话, 停止对话, 不聊了, 退下\nLeading and trailing space is allowed, and so is trailing 。！？.!?. The same words in the first question are not intercepted. “不要结束对话”, “请结束对话”, and “不要再讲了” are not in the list. The status page says real listening checks for this switch are not finished.\nSaying “小爱同学” again during follow-up hands the turn back to XiaoAI. Details: exit phrases."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "How is this different from mi-gpt and open-xiaoai?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "The README names mi-gpt and open-xiaoai as projects this repo learned from, and says both repositories are archived and no longer maintained. comparison.md classifies where each approach attaches. Its notes were collected in 2026-06. It is not a current feature or maintenance review. Check those repositories for their present state.\nmi-gpt uses Xiaomi account interfaces, and the program runs on a computer or NAS. This project does not poll an account. The client runs on the speaker, which means opening the case for UART, and only MDZ-25-DA has been tested.\nIn this repo's description, open-xiaoai flashes the speaker and takes over audio. The models named there include LX06 / OH2P. This project leaves XiaoAI recognition and device control on the original path and sends only open questions to the LLM. It does not support LX06 / OH2P. The README says the /data/init.sh autostart approach comes from open-xiaoai.\nBoth can use an OpenAI-compatible API. The difference recorded here is where the software attaches."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "What does it cost?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "The LLM API is billed by the provider you choose. This repo does not list prices. DeepSeek web search uses the same DEEPSEEK_API_KEY. The docs say the decision request and successful Search/Fetch calls are billed separately. Prices are whatever DeepSeek publishes.\nThe README marks EdgeTTS as free. The on-speaker EdgeTTS client has no separate EdgeTTS API-key setting. XiaoAI recognition and device control still use the speaker's existing Xiaomi services. This repo does not charge a fee."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "What are the risks, and what license is this?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Code written in this repository is MIT. MIT does not cover third-party dependencies. device/ettsc/src/gec_v2.rs is LGPL-3.0-only, as that directory's notice says. The repository MIT license does not cover that file.\nThis is not an official Xiaomi or XiaoAI project, and it is not affiliated with, endorsed by, or representing them. The names only identify the hardware. Use it only on a device you own or are allowed to modify. Opening the case, enabling SSH, or writing system partitions can brick the device, lose data, void the warranty, or conflict with terms of service. Voice, text, and device-control requests are sent to the LLM and TTS services you configure, and to Xiaomi's cloud recognition. Do not send sensitive content."
+          }
+        }
+      ]
+    }
+  ]
+}
+  </script>
+</head>
+<body>
+
+  <header class="top">
+    <div class="wrap">
+      <p class="brand"><a href="../">xiaomi_ai_llm</a></p>
+      <nav>
+        <a href="./">Home</a>
+        <a href="faq.html" aria-current="page">FAQ</a>
+        <a href="../install.html">安装</a>
+        <a href="../models.html">型号</a>
+        <a href="../faq.html">中文</a>
+        <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <h1>FAQ</h1>
+    <p><a href="../faq.html">简体中文</a> · <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/README_en.md">Project README</a></p>
+<p>Each answer was checked against the current code and docs. If the repo does not state it, it is not added here.</p>
+    <article class="qa" id="models">
+<h2>Which speaker models are supported?</h2>
+<div class="a">
+<p>Only one has been tested: the <strong>Xiaomi AI Speaker, product model MDZ-25-DA</strong>. The system hostname and internal codename are <strong>S12A</strong>. The SoC is an Amlogic A113X. The PCB silkscreen reads <code>DKSND-S12C-ECHO-AB-20180820</code>, which is not the same string as the product model or the hostname. The docs list all three as measured, and do not collapse them into one name.</p>
+<p>No other model has been tested. A similar case does not mean the firmware or the connector is the same. The commands are not portable.</p>
+</div>
+</article><article class="qa" id="hardware">
+<h2>Do I have to solder or flash the speaker?</h2>
+<div class="a">
+<p>No soldering. Open the back cover with a Phillips screwdriver. The board already has a JST UART socket. The cable used in the docs is an <strong>SH1.0 to 2.54 mm Dupont 3-pin</strong> lead. The USB-TTL example is a CH340. Three wires: adapter TX to speaker RX, adapter RX to speaker TX, GND to GND. <strong>115200 8N1</strong>. Do not connect the adapter&#x27;s 5V or 3.3V pin to the board, and do not trust wire color for TX, RX, and GND. Check the pins with a meter first.</p>
+<p>This is not a flash that replaces the system and takes over the microphone and playback. XiaoAI&#x27;s own recognition and device control stay in place. If SSH is not already available, a startup script has to be written into the system partition so dropbear starts. The boot0 and boot1 runbooks both modify the matching rootfs; the boot1 runbook records an <code>mtd</code> write of <code>system1</code>. A bad partition write can leave the device unable to boot. UART stays the recovery path after SSH works. If SSH already works, the docs say not to rewrite the partition just to follow the steps again.</p>
+<p>The commands live in those pages, not here: <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/reference/hardware.md">hardware</a>, <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/getting-started/bringup.md">bring-up</a>, <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/runbooks/boot0-ssh.md">boot0 SSH</a>, <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/runbooks/boot1-ssh.md">boot1 SSH</a>.</p>
+</div>
+</article><article class="qa" id="offline">
+<h2>Does the speaker run the LLM? Does it work offline?</h2>
+<div class="a">
+<p>No. An LLM conversation does not work offline.</p>
+<p>The speaker runs the client: it routes each turn and plays audio. Speech recognition, device control, and XiaoAI&#x27;s own answers stay on Xiaomi&#x27;s cloud, as before. The LLM is the cloud API you configure. By default the speaker calls it. With <code>LLM_PIPELINE=server</code>, a service you run calls it instead. EdgeTTS is Microsoft&#x27;s online speech synthesis, called by the speaker or by the TTS service. If it fails, playback can fall back to native XiaoAI TTS.</p>
+<p>The docs say that without a network, only native XiaoAI remains. Optional boot1 Silero VAD runs on the speaker and only decides whether speech has stopped. The words still come from Xiaomi&#x27;s cloud. That component is not an LLM.</p>
+</div>
+</article><article class="qa" id="always-on">
+<h2>Does a computer or NAS have to stay on?</h2>
+<div class="a">
+<p>You need a computer to deploy, copy files, and change configuration. You do not necessarily need one for everyday conversation.</p>
+<p>Conversation does not depend on an always-on computer or NAS when all of these are true:</p>
+<ul><li><code>LLM_PIPELINE=native</code> (this is the client default when the variable is unset)</li><li><code>TTS_ENGINE=device</code> (on-speaker <code>ettsc</code> calls EdgeTTS directly)</li><li>follow-up uses boot1&#x27;s native recognition, not audio sent to a computer</li></ul>
+<p>Model calls and speech synthesis then leave from the speaker. Recognition still uses Xiaomi&#x27;s cloud.</p>
+<p>In <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/device/native_first.env.example"><code>device/native_first.env.example</code></a>, <code>TTS_ENGINE</code> is <code>server</code>. If the variable is unset, the client also falls back to <code>server</code>. The example address is <code>http://192.168.8.150:8080</code>. Leave that default in place and the TTS service has to be up while the speaker answers. With <code>LLM_PIPELINE=server</code>, the optional FastAPI service has to keep running and it calls the model and synthesizes speech. An older boot1 follow-up path sends audio to a Mac for recognition; that path also needs the computer on.</p>
+<p>The status page says: with on-device TTS and native follow-up, a Mac does not have to stay running.</p>
+</div>
+</article><article class="qa" id="native">
+<h2>Do lights, weather, and the other native features still work?</h2>
+<div class="a">
+<p>Yes. That is the main path, called native-first. Lights, weather, time, and volume, when XiaoAI already handles them, still go to XiaoAI. boot0 looks at domain, action, and failure text in the native result. boot1 first checks whether the utterance names the LLM. The default patterns are <code>DEEPSEEK</code>, <code>DeepSeek</code>, and <code>deepseek</code>. Otherwise it waits for XiaoAI&#x27;s failure prompt and only then sends the turn to the LLM.</p>
+<p>boot1 uses text rules. The docs say an unseen failure sentence can be missed, and a similar normal answer can be misread. Not every utterance is guaranteed to route correctly.</p>
+<p>During LLM playback you can wake XiaoAI again for device control, and playback continues. That is the behavior described in the docs and the demo. Stopping the LLM answer by voice while it is playing is not implemented.</p>
+</div>
+</article><article class="qa" id="llm">
+<h2>Which LLMs are supported, how do I switch, and is there web search?</h2>
+<div class="a">
+<p>On the direct-from-speaker path, set <code>BACKEND</code> in <code>/data/native_first.env</code> on the device and restart the client when it is idle. Defaults in the current script:</p>
+<table><tr><th><code>BACKEND</code></th><th>Default model when not overridden</th></tr><tr><td><code>deepseek</code> (also the default if unset)</td><td><code>deepseek-flash</code></td></tr><tr><td><code>glm</code></td><td><code>glm-5.3-flash</code></td></tr><tr><td><code>kimi</code></td><td><code>kimi-k2.6</code></td></tr><tr><td><code>minimax</code></td><td><code>MiniMax-M2.7</code></td></tr></table>
+<p>If <code>LLM_API_BASE</code>, <code>LLM_MODEL</code>, or <code>LLM_API_KEY</code> is set, it overrides that table. Changing only <code>BACKEND</code> while an old override remains sends the request to the old endpoint or model. Saying &quot;call Kimi&quot; to the speaker does not switch backends. The default direct-to-LLM patterns are the three DeepSeek spellings above; change <code>DIRECT_LLM_QUERY_PATTERNS</code> to adjust them.</p>
+<p>The English README says local models (Ollama is the example) have not been tested. Any other OpenAI-compatible endpoint can be filled into the three overrides. That does not mean it has been tried on this speaker.</p>
+<p>The optional computer service&#x27;s <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/config.yaml"><code>config.yaml</code></a> also lists Claude and OpenAI. Those apply only when <code>LLM_PIPELINE=server</code>. The on-speaker path does not use them.</p>
+<p>Web search exists only when the speaker calls the model itself and <code>BACKEND=deepseek</code>. The default <code>LLM_WEB_SEARCH=auto</code> first decides whether the question needs live information (news, prices, opening status, a given page, and similar). If it does, the speaker calls DeepSeek&#x27;s official Search or Fetch API and the answer names its sources. Other backends do not have this, and neither does the <code>server</code> pipeline. <code>off</code> disables both the decision and the search. On failure, an empty result, or an invalid decision, the client says exactly “暂时无法联网查询，请稍后再试。” and does not continue with an unchecked live answer. Each LLM turn adds one decision request. See <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/reference/native-web-search.md">web search</a>.</p>
+</div>
+</article><article class="qa" id="followup">
+<h2>Can I ask follow-ups without the wake word, and how does that end?</h2>
+<div class="a">
+<p>Yes, but copying the example config is not enough. The matching component has to be installed and enabled. On boot1, after an LLM answer finishes playing, the speaker can listen again without another “小爱同学”, in the same context. The words still come from Xiaomi&#x27;s cloud. A steady green light means it is ready for the next utterance. Native VAD decides when speech has stopped. The docs describe about 6 seconds of idle before exit. <code>NATIVE_ASR_LISTEN_TIMEOUT</code> defaults to 20 seconds and is a whole-turn safety limit, not an extra 20 seconds of waiting before you start speaking. Staying quiet ends the session.</p>
+<p>boot0 follow-up is a different path: record on the device, then Xiaomi file recognition. The status page lists it as experimental. The boot1 native follow-up component does not transfer onto boot0.</p>
+<p>Spoken exit phrases are off by default. In <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/device/native_first_client.sh"><code>device/native_first_client.sh</code></a>, anything other than <code>FOLLOWUP_EXIT_ENABLED=1</code> returns immediately. The example config is <code>0</code>. After you set it to <code>1</code> and restart the client while idle, the session ends only if a follow-up window is already open and the utterance is exactly one of these five:</p>
+<p><strong>结束对话, 退出对话, 停止对话, 不聊了, 退下</strong></p>
+<p>Leading and trailing space is allowed, and so is trailing <code>。！？.!?</code>. The same words in the first question are not intercepted. “不要结束对话”, “请结束对话”, and “不要再讲了” are not in the list. The status page says real listening checks for this switch are not finished.</p>
+<p>Saying “小爱同学” again during follow-up hands the turn back to XiaoAI. Details: <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/reference/configuration.md#用结束语退出追问">exit phrases</a>.</p>
+</div>
+</article><article class="qa" id="compare">
+<h2>How is this different from mi-gpt and open-xiaoai?</h2>
+<div class="a">
+<p>The README names <a href="https://github.com/idootop/mi-gpt">mi-gpt</a> and <a href="https://github.com/idootop/open-xiaoai">open-xiaoai</a> as projects this repo learned from, and says both repositories are archived and no longer maintained. <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/concepts/comparison.md">comparison.md</a> classifies where each approach attaches. Its notes were collected in 2026-06. It is not a current feature or maintenance review. Check those repositories for their present state.</p>
+<p>mi-gpt uses Xiaomi account interfaces, and the program runs on a computer or NAS. This project does not poll an account. The client runs on the speaker, which means opening the case for UART, and only MDZ-25-DA has been tested.</p>
+<p>In this repo&#x27;s description, open-xiaoai flashes the speaker and takes over audio. The models named there include LX06 / OH2P. This project leaves XiaoAI recognition and device control on the original path and sends only open questions to the LLM. It does not support LX06 / OH2P. The README says the <code>/data/init.sh</code> autostart approach comes from open-xiaoai.</p>
+<p>Both can use an OpenAI-compatible API. The difference recorded here is where the software attaches.</p>
+</div>
+</article><article class="qa" id="cost">
+<h2>What does it cost?</h2>
+<div class="a">
+<p>The LLM API is billed by the provider you choose. This repo does not list prices. DeepSeek web search uses the same <code>DEEPSEEK_API_KEY</code>. The docs say the decision request and successful Search/Fetch calls are billed separately. Prices are whatever DeepSeek publishes.</p>
+<p>The README marks EdgeTTS as free. The on-speaker EdgeTTS client has no separate EdgeTTS API-key setting. XiaoAI recognition and device control still use the speaker&#x27;s existing Xiaomi services. This repo does not charge a fee.</p>
+</div>
+</article><article class="qa" id="license">
+<h2>What are the risks, and what license is this?</h2>
+<div class="a">
+<p>Code written in this repository is <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/LICENSE">MIT</a>. MIT does not cover third-party dependencies. <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/device/ettsc/NOTICE.edge-tts.md"><code>device/ettsc/src/gec_v2.rs</code></a> is LGPL-3.0-only, as that directory&#x27;s notice says. The repository MIT license does not cover that file.</p>
+<p>This is not an official Xiaomi or XiaoAI project, and it is not affiliated with, endorsed by, or representing them. The names only identify the hardware. Use it only on a device you own or are allowed to modify. Opening the case, enabling SSH, or writing system partitions can brick the device, lose data, void the warranty, or conflict with terms of service. Voice, text, and device-control requests are sent to the LLM and TTS services you configure, and to Xiaomi&#x27;s cloud recognition. Do not send sensitive content.</p>
+</div>
+</article>
+    <footer><p>MIT for this repo's own code. Not an official Xiaomi project.</p></footer>
+  </main>
+</body>
+</html>

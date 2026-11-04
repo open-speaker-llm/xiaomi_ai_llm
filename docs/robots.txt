@@ -1,0 +1,16 @@
+User-agent: *
+Allow: /
+
+User-agent: Baiduspider
+Allow: /
+
+User-agent: Baiduspider-image
+Allow: /
+
+User-agent: Bingbot
+Allow: /
+
+User-agent: bingbot
+Allow: /
+
+Sitemap: https://open-speaker-llm.github.io/xiaomi_ai_llm/sitemap.xml

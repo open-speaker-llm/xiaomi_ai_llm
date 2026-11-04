@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Language" content="zh-CN">
+  <meta name="applicable-device" content="pc,mobile">
+  <title>小爱音箱接入大模型安装准备（MDZ-25-DA / S12A）</title>
+  <meta name="description" content="小爱音箱 MDZ-25-DA（S12A）接入大模型前要拆机、接现成串口，不用焊接。打通 SSH 可能改写系统分区。具体命令以仓库文档为准。">
+  <meta name="keywords" content="小爱音箱安装,小爱音箱刷机,小爱音箱串口,MDZ-25-DA,S12A,DeepSeek,大模型">
+  <meta name="robots" content="index,follow">
+  <link rel="canonical" href="https://open-speaker-llm.github.io/xiaomi_ai_llm/install.html">
+  <link rel="alternate" hreflang="zh-CN" href="https://open-speaker-llm.github.io/xiaomi_ai_llm/install.html">
+  <meta property="og:type" content="article">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:title" content="小爱音箱接入大模型安装准备">
+  <meta property="og:description" content="拆机、现成串口、不用焊接。SSH 尚未打通时要改系统分区。只适用于已实测的 MDZ-25-DA / S12A。">
+  <meta property="og:url" content="https://open-speaker-llm.github.io/xiaomi_ai_llm/install.html">
+  <meta property="og:image" content="https://open-speaker-llm.github.io/xiaomi_ai_llm/assets/bilibili-news-demo.jpg">
+  <link rel="stylesheet" href="site.css">
+</head>
+<body>
+  <header class="top">
+    <div class="wrap">
+      <p class="brand"><a href="./">小爱音箱与大模型</a></p>
+      <nav>
+        <a href="./">首页</a>
+        <a href="faq.html">常见问题</a>
+        <a href="install.html" aria-current="page">安装</a>
+        <a href="models.html">型号</a>
+        <a href="en/">English</a>
+        <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm">GitHub</a>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    <h1>安装准备</h1>
+    <p class="lead">只适用于已经实测的小米 AI 音箱 MDZ-25-DA（S12A）。本页只列仓库里写明的准备和顺序，分区写入命令以操作手册为准，这里不另写一套。</p>
+
+    <h2>开始前确认</h2>
+    <ul>
+      <li>音箱是你自己的，或你已经获准改动。</li>
+      <li>型号是 MDZ-25-DA / S12A。其他型号没有测过。</li>
+      <li>准备十字螺丝刀、USB-TTL（文档举例 CH340）、SH1.0 转 2.54 mm 杜邦 3P 线。</li>
+      <li>准备所选大模型的 API 密钥。密钥放在音箱的私有配置里，不要提交进仓库。</li>
+      <li>如果要自己编译音箱端 EdgeTTS，开发电脑还需要 Rust、Zig 和 cargo-zigbuild。不编译这一档就可以先不装。</li>
+    </ul>
+
+    <h2>串口，不用焊接</h2>
+    <p>打开后盖后，主板上有现成的 JST 串口插座。模块 TX 接音箱 RX，模块 RX 接音箱 TX，GND 共地。波特率 115200 8N1。不要连接 USB-TTL 的 5V 或 3.3V。不要只按线色判断针脚，先用万用表量过。</p>
+    <p>主板插座位置和线材说明在 <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/reference/hardware.md">设备与准备</a> 和 <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/getting-started/bringup.md">从零接入</a>。</p>
+
+    <h2>SSH 会动到系统分区</h2>
+    <p>这不是刷一套第三方固件来接管音频。小爱原来的识别和家电控制要留下来。SSH 还没有时，手册要求往系统分区写入启动脚本，dropbear 才会启动。boot1 手册记录过用 <code>mtd</code> 写 <code>system1</code>。写错可能导致无法启动，串口是救援通道。设备已经能 SSH 时，不要为了照抄再写一遍分区。</p>
+    <ul>
+      <li><a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/runbooks/boot0-ssh.md">boot0 SSH 手册</a></li>
+      <li><a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/runbooks/boot1-ssh.md">boot1 SSH 手册</a></li>
+    </ul>
+
+    <h2>SSH 之后</h2>
+    <ol>
+      <li>按 <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/getting-started/quickstart.md">跑通第一轮对话</a> 上传客户端，填写 <code>/data/native_first.env</code>。</li>
+      <li>要让电脑不必在回答时开着，使用 <code>LLM_PIPELINE=native</code> 和 <code>TTS_ENGINE=device</code>。示例配置里 TTS 默认是 <code>server</code>，那需要一台 TTS 服务在线。</li>
+      <li>第一轮先验证原生命令、天气，再验证大模型。追问和首轮停顿续说是后面的可选组件，见 <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/getting-started/conversation.md">逐步完善对话</a>。</li>
+    </ol>
+
+    <p>风险和许可证见 <a href="faq.html#license">常见问题</a>。</p>
+    <footer>
+      <p>自有代码 MIT。不是小米官方项目。操作失误可能变砖，保修可能失效。</p>
+    </footer>
+  </main>
+</body>
+</html>

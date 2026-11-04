@@ -11,6 +11,18 @@
 
 > **让 老款小米 AI 音箱直连 DeepSeek 等大模型：开灯、天气照旧交给小爱，答不上来的交给大模型，说完还能免唤醒接着追问。**
 
+**一句话定义：** 这是跑在小米 AI 音箱 MDZ-25-DA（系统代号 S12A）上的客户端：开灯、天气等小爱能处理的仍走小爱，开放问题由音箱直连云端大模型，再用在线 EdgeTTS 念出来。大模型不在音箱上运行，断网后不能靠它继续对话。
+
+| 项 | 事实 |
+|---|---|
+| 实测型号 | 只有 MDZ-25-DA / S12A |
+| 是否离线 | 否。识别、大模型和 EdgeTTS 都在云端；音箱上是客户端 |
+| 是否要电脑常驻 | 音箱直连模型且 `TTS_ENGINE=device` 时不需要。示例配置默认 `TTS_ENGINE=server`，保持默认则 TTS 服务要在线 |
+| 支持的模型 | DeepSeek（默认 `deepseek-flash`）、GLM、Kimi、MiniMax，或其他 OpenAI 兼容接口 |
+| 许可证 | 本仓库自有代码 [MIT](LICENSE)。不是小米官方产品 |
+
+常见问题：[docs/faq.md](docs/faq.md)（[English](docs/faq_en.md)）。
+
 ![同一台音箱：小爱开灯 → 问 DeepSeek → 免唤醒追问](docs/assets/demo-native-vs-llm.gif)
 
 “搜一下最近三天的 AI 新闻，说明日期和来源。”音箱用 DeepSeek 联网查询，开始播报。播到一半，再喊“小爱同学，开灯”，灯亮了，新闻还在播。两段对话都录自同一台 **MDZ-25-DA / S12A**。
@@ -112,6 +124,7 @@ flowchart LR
 
 | 你现在的位置 | 下一步 |
 |---|---|
+| 先确认型号、离线、费用、怎么结束追问 | [常见问题](docs/faq.md)（[English](docs/faq_en.md)） |
 | 想先理解整个项目 | [文档导读](docs/README.md)：按问题逐层展开 |
 | 手里有音箱，还没有 SSH | [从零接入](docs/getting-started/bringup.md)：先取得可靠的维护入口 |
 | SSH 已可用，准备第一次部署 | [跑通第一轮对话](docs/getting-started/quickstart.md) |
