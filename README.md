@@ -1,16 +1,68 @@
 # 小米 AI 音箱 LLM 助手
 
-> 让 2019 年的小米 AI 音箱直连大模型。家电仍由小爱控制，开放问题交给大模型，还可以接着追问。
+[![GitHub stars](https://img.shields.io/github/stars/open-speaker-llm/xiaomi_ai_llm?style=flat&logo=github)](https://github.com/open-speaker-llm/xiaomi_ai_llm/stargazers)
+[![License: MIT](https://img.shields.io/github/license/open-speaker-llm/xiaomi_ai_llm)](LICENSE)
+[![Last commit](https://img.shields.io/github/last-commit/open-speaker-llm/xiaomi_ai_llm)](https://github.com/open-speaker-llm/xiaomi_ai_llm/commits)
+[![实测机型](https://img.shields.io/badge/实测机型-MDZ--25--DA%20%2F%20S12A-orange)](docs/reference/hardware.md)
+[![Bilibili](https://img.shields.io/badge/Bilibili-实机演示-00A1D6?logo=bilibili&logoColor=white)](https://www.bilibili.com/video/BV1bu4u6GEEL/)
+[![YouTube](https://img.shields.io/badge/YouTube-Demo-FF0000?logo=youtube&logoColor=white)](https://www.youtube.com/watch?v=1R8bhbN42KE)
+
+[English](README_en.md) | 简体中文
+
+> **让 老款小米 AI 音箱直连 DeepSeek 等大模型：开灯、天气照旧交给小爱，答不上来的交给大模型，说完还能免唤醒接着追问。**
+
+![同一台音箱：小爱开灯 → 问 DeepSeek → 免唤醒追问](docs/assets/demo-native-vs-llm.gif)
 
 “搜一下最近三天的 AI 新闻，说明日期和来源。”音箱用 DeepSeek 联网查询，开始播报。播到一半，再喊“小爱同学，开灯”，灯亮了，新闻还在播。两段对话都录自同一台 **MDZ-25-DA / S12A**。
 
 [![观看实机演示：小爱音箱用 DeepSeek 搜新闻，播到一半我让它开灯](docs/assets/bilibili-news-demo.jpg)](https://www.bilibili.com/video/BV1bu4u6GEEL/)
 
-**实机演示 · 3 分 43 秒**　[看小爱搜新闻、边播边控灯](https://www.bilibili.com/video/BV1bu4u6GEEL/)
+| 视频 | 时长 | 内容 |
+|---|---|---|
+| [B 站 · 实机演示](https://www.bilibili.com/video/BV1bu4u6GEEL/) | 3 分 06 秒 | 小爱搜新闻，边播边控灯 |
+| [B 站 · 六月原理篇](https://www.bilibili.com/video/BV1Vzja69ELB/) | 5 分 21 秒 | 老音箱如何保留原生能力、直连大模型 |
+| [B 站 · 原理速览](https://www.bilibili.com/video/BV1ShjG6tEVz/) | 1 分 35 秒 | 原理篇的短版 |
+| [YouTube · Demo](https://www.youtube.com/watch?v=1R8bhbN42KE) | 1 分 34 秒 | 面向海外观众 |
 
-**六月原理篇 · 5 分 21 秒**　[看老音箱如何保留原生能力、直连大模型](https://www.bilibili.com/video/BV1Vzja69ELB/)
+> ℹ️ 主分支已支持 DeepSeek **联网搜索**。音箱直连 DeepSeek（`LLM_PIPELINE=native`、`BACKEND=deepseek`）时默认 `LLM_WEB_SEARCH=auto`：先判断问题是否需要实时信息（新闻、价格、营业状态、指定网页等）；需要时调用 DeepSeek 官方 Search/Fetch 接口，回答时说明来源。每轮会多一次判断请求，首声可能略慢；可设 `LLM_WEB_SEARCH=off` 关闭。详见 [联网搜索参考](docs/reference/native-web-search.md)。
 
-音箱直接调用配置好的模型服务，无需额外搭建中转服务器。视频里的 DeepSeek 联网搜索来自实机开发版，当前公开主分支提供大模型问答。想在自己的音箱上试用，可以从[设备与准备](docs/reference/hardware.md)开始。已有 SSH 的读者可直接看[跑通第一轮对话](docs/getting-started/quickstart.md)。
+### 哪些在音箱上，哪些在云端
+
+| 环节 | 在哪里运行 |
+|---|---|
+| 唤醒、收音、路由客户端、音频播放 | **音箱本机** |
+| 语音识别、家电控制、小爱原生回答 | 小米云（和原来一样） |
+| 大模型（DeepSeek / GLM / Kimi / MiniMax / 任意 OpenAI 兼容接口） | **你配置的云 API**，由音箱直接调用 |
+| 语音合成 EdgeTTS | 微软 Edge 在线 TTS 服务，由音箱直接调用；失败时退回小爱原生 TTS |
+
+不需要中转服务器，也不需要电脑常驻（开发电脑只用来部署和维护）；也不需要额外的小米账号轮询程序。**但它不是离线方案**：模型不在音箱上运行，断网后只剩小爱的原生能力。
+
+### 适用范围、难度与工具
+
+| 项 | 说明 |
+|---|---|
+| 已实测型号 | **小米 AI 音箱 MDZ-25-DA**（系统代号 S12A，Amlogic A113X）。只实测过这一款 |
+| 其他型号 | 未测试。外观相似不代表固件和接口相同，命令不能照搬 |
+| 难度 | ★★★★☆：需要拆机、接串口、建立 SSH，可能会改写系统分区；操作失误可能变砖 |
+| 是否焊接 | 不用焊接：主板上有现成的 JST 串口插座 |
+| 硬件工具 | USB-TTL 模块（如 CH340）、SH1.0 转 2.54mm 杜邦 3P 线、十字螺丝刀 |
+| 软件 | 开发电脑和 SSH 客户端；所选大模型的 API Key；端侧 TTS 要从源码构建的话，还需要 Rust、Zig、cargo-zigbuild |
+| 费用 | 大模型 API 按各平台计费；EdgeTTS 免费 |
+| 当前边界 | 还不能在 LLM 播报中途用语音打断；全天稳定性仍在验证。详见[当前状态](docs/status.md) |
+
+从这里开始：[设备与准备](docs/reference/hardware.md) → [从零接入（串口与 SSH）](docs/getting-started/bringup.md) → [跑通第一轮对话](docs/getting-started/quickstart.md)。
+
+### 从 mi-gpt / open-xiaoai 迁移过来？
+
+[mi-gpt](https://github.com/idootop/mi-gpt) 和 [open-xiaoai](https://github.com/idootop/open-xiaoai) 都是本项目参考和致谢的先行项目，两者的仓库目前都已归档、停止维护。迁移前请先确认三点：
+
+| 你原来用的是 | 和本项目的主要区别 | 迁移建议 |
+|---|---|---|
+| **mi-gpt**（通过小米账号接口，由电脑或 NAS 运行程序） | 本项目不走账号轮询，客户端直接跑在音箱上，不需要常驻电脑；代价是必须拆机接串口，而且只支持 MDZ-25-DA | 如果你的音箱不是 MDZ-25-DA，或者不想拆机，可以先看仍在维护的 [xiaogpt](https://github.com/yihong0618/xiaogpt)（同样走账号路线） |
+| **open-xiaoai**（刷机接管音频，支持 LX06 / OH2P） | 本项目保留小爱原生识别和家电控制，只把开放问题转给大模型；**目前不支持 LX06 / OH2P** | 只有手上是 MDZ-25-DA 才适用；本项目的 `/data/init.sh` 自启动思路就来自 open-xiaoai |
+| 两者共同点 | 本项目同样支持 OpenAI 兼容接口，原来的 API Key 可以直接写进 `/data/native_first.env` | 配置项对照见[配置参考](docs/reference/configuration.md) |
+
+想了解三种接入路线的取舍，见[本项目的取舍](docs/concepts/comparison.md)。
 
 ## 用起来是什么样
 
