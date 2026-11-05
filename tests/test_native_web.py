@@ -61,9 +61,10 @@ class NativeWebTest(unittest.TestCase):
     def run_web(self, decision=None, results=None, *, messages=None, post_rc=0, mode='auto',
                 backend='deepseek', base='https://api.deepseek.com', key='search-test', setup='',
                 plan_seq='0', tool_seq=None, post_error='timeout', http='000', retry_after='',
-                advance_ms=0, shell=None):
+                advance_ms=0, shell=None, after=''):
         for name in ('planner-request', 'web-request', 'web-key', 'final-args',
-                     'plan-calls', 'tool-calls', 'calls', 'sleeps', 'no_history', 'web_filler'):
+                     'plan-calls', 'tool-calls', 'calls', 'sleeps', 'no_history', 'web_filler',
+                     'marks', 'web_filler_cached', '0000.rdy', '0000.pcm'):
             (self.directory / name).unlink(missing_ok=True)
         (self.directory / 'now').write_text('10000')
         fixtures = {'planner': decision if decision is not None else plan(),
@@ -108,7 +109,7 @@ curl() {
     printf '%s\n' "$@" > "$TEST_DIR/final-args"
     printf 'data: {"choices":[{"delta":{"content":"根据官网的回答。"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
 }
-''' + setup + '\nllm_web_init\nllm_open_stream "$MESSAGES" | llm_sse_content "$TEST_DIR/status"\n'
+''' + setup + '\nllm_web_init\nllm_open_stream "$MESSAGES" | llm_sse_content "$TEST_DIR/status"\n' + after
         encoded = ','.join(json.dumps(m, ensure_ascii=False) for m in (messages or self.messages))
         run = subprocess.run((shell or ['sh']) + ['-c', code], capture_output=True, text=True, timeout=8,
                              env={**os.environ, 'PATH': str(self.directory) + os.pathsep + os.environ['PATH'],
@@ -134,6 +135,85 @@ curl() {
         run = subprocess.run([sys.executable, 'scripts/embed_native_web.py', '--check'], cwd=ROOT,
                              capture_output=True, text=True)
         self.assertEqual(run.returncode, 0, run.stderr)
+
+    def test_search_marks_use_s3_format_and_cover_retry_budget(self):
+        run = self.run_web(plan('search', query='新闻'), plan_seq='10 0',
+                           advance_ms=100, setup='LLM_WEB_RETRY_BACKOFF_MS=500')
+        marks = [line.split() for line in (self.directory / 'marks').read_text().splitlines()]
+        self.assertEqual(marks, [['web_plan_start', '10000'], ['web_filler', '10100'],
+                                 ['web_plan_end', '10700'], ['web_tool_start', '10700'],
+                                 ['web_tool_end', '10800']])
+        self.assertIn('results=1', run.stderr)
+        self.assertIn('plan_ms=700', run.stderr)
+        self.assertEqual(run.stdout.count('搜索中，请稍等。'), 1)
+
+    def test_marks_delegate_to_s3_and_honor_disabled_trace(self):
+        self.run_web(plan('search', query='新闻'), setup='''
+latency_mark() { printf '%s %s\\n' "$1" "$(monotonic_ms)" >> "$TEST_DIR/delegated"; }
+''')
+        self.assertFalse((self.directory / 'marks').exists())
+        self.assertEqual(len((self.directory / 'delegated').read_text().splitlines()), 5)
+        self.run_web(plan('search', query='新闻'), setup='LATENCY_TRACE_ENABLED=0')
+        self.assertFalse((self.directory / 'marks').exists())
+
+    def test_answer_off_and_failed_requests_have_only_applicable_marks(self):
+        for mode, decision, seq, expected in (
+                ('off', plan(), '0', []),
+                ('auto', plan(), '0', ['web_plan_start', 'web_plan_end']),
+                ('auto', plan(), '12', ['web_plan_start', 'web_plan_end']),
+                ('auto', plan('search', query='新闻'), '0',
+                 ['web_plan_start', 'web_plan_end', 'web_filler', 'web_tool_start', 'web_tool_end'])):
+            with self.subTest(mode=mode, seq=seq):
+                run = self.run_web(decision, mode=mode, plan_seq=seq, tool_seq='12')
+                path = self.directory / 'marks'
+                self.assertEqual([line.split()[0] for line in path.read_text().splitlines()] if path.exists() else [], expected)
+                self.assertIn('results=0', run.stderr)
+
+    def test_planning_timestamp_is_final_line_minute_precision_and_keeps_json_shape(self):
+        self.run_web(setup='''
+date() {
+    [ "$1" = '+%Y-%m-%d %H:%M %z' ] || return 1
+    printf '2026-11-05 12:34 +0800\\n'
+}
+''')
+        request = json.loads((self.directory / 'planner-request').read_text())
+        prompt = request['messages'][0]['content']
+        self.assertEqual(prompt.splitlines()[-1], '当前时间：2026-11-05 12:34 +0800')
+        self.assertEqual(prompt.count('当前时间'), 1)
+        self.assertEqual(set(request), {'model', 'stream', 'thinking', 'response_format', 'max_tokens', 'messages'})
+        self.assertEqual(json.loads(request['messages'][1]['content']), self.messages)
+
+    def test_real_s3_report_reads_search_marks_with_no_extra_summary(self):
+        from tests.test_latency_trace import HELPERS, functions
+        helpers = functions(*HELPERS).replace('/tmp/native_first_latency.log', str(self.directory / 'latency.log'))
+        run = self.run_web(plan('search', query='新闻'), advance_ms=100, setup=helpers + '''
+LATENCY_TRACE_ENABLED=1; LATENCY_LOG_MAX_LINES=200
+LATENCY_MARK_DIR="$TEST_DIR"; LLM_PIPELINE=native; TTS_ENGINE=device; DEVICE_TTS_STREAM=1; DEVICE_TTS_PCM_RATE=24000
+latency_mark llm_req 10000
+''', after='''
+printf search > "$TEST_DIR/latency_web_action"
+latency_report "$TEST_DIR" >&2
+''')
+        self.assertEqual(run.stderr.count('[LATENCY]'), 1)
+        for field in ('web=search', 'plan=0.100', 'search=0.100', 'filler=0.100'):
+            self.assertIn(field, run.stderr)
+        self.assertEqual(len((self.directory / 'latency.log').read_text().splitlines()), 1)
+
+    def test_nonstream_never_queues_cached_filler(self):
+        (self.directory / 'cached-pcm').write_bytes(b'P'*1024)
+        run = self.run_web(plan('search', query='新闻'), setup='''
+LLM_WEB_FILLER_CACHE=1; LLM_WEB_FILLER_ALLOWED=0
+llm_web_filler_cache_path() { printf '%s/cached-pcm\\n' "$TEST_DIR"; }
+''')
+        self.assertNotIn('搜索中', run.stdout)
+        self.assertFalse((self.directory / 'web_filler').exists())
+        self.assertFalse((self.directory / '0000.rdy').exists())
+
+    def test_cache_invalid_setting_warns_once_and_uses_disabled_default(self):
+        run = self.run_web(plan('search', query='新闻'), setup='LLM_WEB_FILLER_CACHE=bad; llm_web_init; llm_web_init')
+        self.assertEqual(run.stderr.count('invalid LLM_WEB_FILLER_CACHE'), 1)
+        self.assertTrue(run.stdout.startswith('搜索中，请稍等。'))
+        self.assertFalse((self.directory / '0000.rdy').exists())
 
     def test_ordinary_answer_uses_classifier_but_no_search(self):
         run = self.run_web()

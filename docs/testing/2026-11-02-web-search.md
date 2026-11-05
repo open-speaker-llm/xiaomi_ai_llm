@@ -1,6 +1,6 @@
 # 联网搜索实际测试
 
-适用源码：在 `1e55891229ca4041385016f746c65e977bf95567` 基线上增加 native DeepSeek 搜索的版本。C1（2026-11-04）后的失败、重试与默认 4 秒规划规则见[重试验收说明](2026-11-04-web-search-retry.md)，下列历史测试数字与设备摘要仅对应原版本。语义规则、参数及费用边界见[联网搜索参考](../reference/native-web-search.md)。只对 `LLM_PIPELINE=native`、`BACKEND=deepseek` 生效；可选 server 链路不包含此能力。
+适用源码：在 `1e55891229ca4041385016f746c65e977bf95567` 基线上增加 native DeepSeek 搜索的版本。C1（2026-11-04）后的失败、重试与默认 4 秒规划规则见[重试验收说明](2026-11-04-web-search-retry.md)，C3（2026-11-05）的搜索计时及可选 PCM 缓存见[执行步骤](2026-11-05-web-search-latency-cache.md)；下列历史测试数字与设备摘要仅对应原版本。语义规则、参数及费用边界见[联网搜索参考](../reference/native-web-search.md)。只对 `LLM_PIPELINE=native`、`BACKEND=deepseek` 生效；可选 server 链路不包含此能力。
 
 ## 开发机验证
 
