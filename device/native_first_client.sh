@@ -199,6 +199,9 @@ TTS_PREWARM_DIR=""
 # 实验：同一会话多句/追问复用连接，优先于首段预连接；默认关闭。
 DEVICE_TTS_PERSISTENT="${DEVICE_TTS_PERSISTENT:-0}"
 ETTSC_IDLE_SECS="${ETTSC_IDLE_SECS:-20}"
+# 实验：唤醒预连接、路由时预合成垫话、提前启动播放器；依赖 PERSISTENT。
+DEVICE_TTS_EARLY_START="${DEVICE_TTS_EARLY_START:-0}"
+TTS_EARLY_FILLER_JOB=""
 TTS_PERSISTENT_PID=""
 TTS_PERSISTENT_DIR=""
 TTS_PERSISTENT_SESSION=""
@@ -345,7 +348,7 @@ latency_mark() {
     [ -d "$dir" ] || return 0
     case "$name" in *[!a-z0-9_]*) return 0 ;; esac
     case "$name" in
-        wake|native_result|route_llm|freeze_done|llm_req|llm_first_token|fifo_commit1|llm_done|play_done|web_plan_start|web_plan_end|web_tool_start|web_tool_end|web_filler) ;;
+        wake|native_result|route_llm|freeze_done|llm_req|llm_first_token|fifo_commit1|llm_done|play_done|web_plan_start|web_plan_end|web_tool_start|web_tool_end|web_filler|player_start|player_fifo_open|filler_commit|answer_commit) ;;
         sent[0-9]*_split|sent[0-9]*_tts_start|sent[0-9]*_tts_end|sent[0-9]*_pcm_bytes|sent[0-9]*_retries) ;;
         *) return 0 ;;
     esac
@@ -388,6 +391,8 @@ latency_report() {
                 delta("wake","fifo_commit1"), length_s("sent1_pcm_bytes"), segs, retries, web, \
                 delta("web_plan_start","web_plan_end"), delta("web_tool_start","web_tool_end"), \
                 delta("llm_req","web_filler"), delta("llm_req","llm_done"), delta("llm_req","play_done")
+            if ("player_start" in m) printf " player_open=%s wake→filler_commit=%s wake→answer_commit=%s", \
+                delta("player_start","player_fifo_open"), delta("wake","filler_commit"), delta("wake","answer_commit")
         }
     ' "$dir/marks" 2>/dev/null) || return 0
     log "$line"
@@ -2611,6 +2616,13 @@ llm_web_filler() {
     [ ! -f "$LLM_WEB_MARK_DIR/web_filler" ] || return 0
     : > "$LLM_WEB_MARK_DIR/web_filler"
     llm_web_mark web_filler
+    if [ -f "$LLM_WEB_MARK_DIR/early_filler" ]; then
+        # The private player publishes this pre-submitted turn independently of
+        # the SSE stream. No filler text enters answer/history or its splitter.
+        llm_web_now_ms | awk '{printf "%.3f\n", $1/1000}' > "$LLM_WEB_MARK_DIR/filler_t"
+        : > "$LLM_WEB_MARK_DIR/web_filler_direct"
+        return 0
+    fi
     if [ "${LLM_WEB_FILLER_CACHE:-0}" = 1 ]; then
         local cache
         cache=$(llm_web_filler_cache_path) || cache=''
@@ -3074,6 +3086,9 @@ llm_direct_answer() {
 }
 
 tts_persistent_init() {
+    case "${DEVICE_TTS_EARLY_START:-0}" in 0|1) :;; *)
+        DEVICE_TTS_EARLY_START=0; log '[TTS] warning invalid DEVICE_TTS_EARLY_START; using 0';;
+    esac
     case "$DEVICE_TTS_PERSISTENT" in 0|1) :;; *)
         DEVICE_TTS_PERSISTENT=0; log '[TTS] warning invalid DEVICE_TTS_PERSISTENT; using 0';;
     esac
@@ -3097,6 +3112,7 @@ tts_persistent_stop() {
     case "$TTS_PERSISTENT_DIR" in /tmp/native_first_tts.*) rm -rf "$TTS_PERSISTENT_DIR" 2>/dev/null;; esac
     TTS_PERSISTENT_PID=""; TTS_PERSISTENT_DIR=""
     TTS_PERSISTENT_SESSION=""; TTS_PERSISTENT_SETTINGS=""
+    TTS_EARLY_FILLER_JOB=""
     return 0
 }
 
@@ -3132,9 +3148,76 @@ tts_persistent_ensure() {
     return 0
 }
 
+# Speculate silently: only llm_web_filler authorizes playback after search/retry.
+tts_early_filler_start() {
+    [ "${DEVICE_TTS_EARLY_START:-0}" = 1 ] && [ "${DEVICE_TTS_PERSISTENT:-0}" = 1 ] || return 0
+    [ -n "${LLM_API_KEY:-}" ] || return 0
+    tts_persistent_ensure "$1"
+    [ -n "${TTS_PERSISTENT_DIR:-}" ] && [ -z "${TTS_EARLY_FILLER_JOB:-}" ] || return 0
+    [ "${LLM_WEB_SEARCH:-off}" = auto ] && [ "${BACKEND:-deepseek}" = deepseek ] &&
+        [ -n "${LLM_WEB_FILLER:-}" ] && [ ! -f "$TTS_PERSISTENT_DIR/busy" ] || return 0
+    local job
+    job=$(umask 077; mktemp -d "$TTS_PERSISTENT_DIR/job.XXXXXX" 2>/dev/null) || return 0
+    if ! { printf '%s' "$LLM_WEB_FILLER" > "$job/request" &&
+        printf '%s' "$DEVICE_TTS_VOICE" > "$job/voice" && monotonic_ms > "$job/started"; }; then
+        rm -rf "$job"; return 0
+    fi
+    : > "$TTS_PERSISTENT_DIR/busy"
+    : > "$job/queued"
+    TTS_EARLY_FILLER_JOB="$job"
+    log '[TTS] early filler queued'
+}
+
+# One budget from submission, shared by publisher and answer synthesis.
+tts_early_filler_pending() {
+    local job="${TTS_EARLY_FILLER_JOB:-}" started seconds="${DEVICE_TTS_TIMEOUT:-30}"
+    [ -d "$job" ] && [ ! -f "$job/done" ] && [ ! -f "$job/cancel" ] &&
+        [ ! -f "$TTS_PERSISTENT_DIR/exited" ] || return 1
+    kill -0 "$TTS_PERSISTENT_PID" 2>/dev/null || return 1
+    started=$(cat "$job/started" 2>/dev/null)
+    case "$started" in ''|*[!0-9]*) return 1;; esac
+    case "$seconds" in ''|*[!0-9]*) seconds=30;; esac
+    if ! { [ "${#seconds}" -le 3 ] && [ "$seconds" -ge 1 ] && [ "$seconds" -le 300 ]; }; then seconds=30; fi
+    seconds=$(awk -v n="$seconds" 'BEGIN {printf "%d", n}')
+    [ "$(( $(monotonic_ms) - started ))" -lt "$((seconds * 1000))" ]
+}
+
+# Called only by the independent player, never by the web/LLM producer.
+tts_early_filler_publish() {
+    local wd="$1" job="${TTS_EARLY_FILLER_JOB:-}" started
+    [ -f "$wd/web_filler_direct" ] && [ ! -f "$wd/0000.rdy" ] || return 0
+    tts_early_filler_pending && return 0
+    started=""
+    [ -z "$job" ] || started=$(cat "$job/started" 2>/dev/null)
+    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark sent0_tts_start "$started"
+    if [ -n "$job" ] && [ "$(cat "$job/done" 2>/dev/null)" = 0 ] &&
+        llm_web_filler_pcm_valid "$job/audio.pcm" && ! grep -q '\[!\]' "$job/worker.log" &&
+        cp "$job/audio.pcm" "$wd/0000.pcm" && cp "$job/worker.log" "$wd/0000.attempt-1.log"; then
+        echo x >> "$wd/segs"
+        if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
+            latency_mark sent0_pcm_bytes "$(wc -c < "$wd/0000.pcm" | tr -d ' ')"
+            latency_mark sent0_retries 0
+        fi
+        llm_web_filler_cache_save "$wd/0000.pcm"
+        log '[TTS] early filler hit'
+    else
+        # The pending job may still be in socket IO. Isolate it and use the
+        # existing one-shot/retry/native fallback path, without a second submit.
+        [ -z "$job" ] || ( : > "$job/cancel" ) 2>/dev/null || :
+        local DEVICE_TTS_PERSISTENT=0 DEVICE_TTS_PREWARM=0
+        log '[TTS] early filler unavailable; using ordinary synthesis'
+        stream_synthesize_sentence "$wd" 0000 "$LLM_WEB_FILLER"
+    fi
+    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark sent0_tts_end
+    : > "$wd/0000.rdy"
+}
+
 tts_persistent_take() {
     local wd="$1" n="$2" sentence="$3" job ticks=0 limit=600 seconds="${DEVICE_TTS_TIMEOUT:-30}"
     [ -n "${TTS_PERSISTENT_PID:-}" ] && [ -d "${TTS_PERSISTENT_DIR:-}" ] || return 1
+    if [ "${DEVICE_TTS_EARLY_START:-0}" = 1 ] && [ -n "${TTS_EARLY_FILLER_JOB:-}" ]; then
+        while [ -f "$TTS_PERSISTENT_DIR/busy" ] && tts_early_filler_pending; do sleep 0.05; done
+    fi
     [ ! -f "$TTS_PERSISTENT_DIR/exited" ] && [ ! -f "$TTS_PERSISTENT_DIR/busy" ] || return 1
     kill -0 "$TTS_PERSISTENT_PID" 2>/dev/null || return 1
     job=$(umask 077; mktemp -d "$TTS_PERSISTENT_DIR/job.XXXXXX" 2>/dev/null) || return 1
@@ -3315,10 +3398,18 @@ stream_play_worker() {
     local wd="$1"
     local fifo="$wd/play.fifo"
     local idx=1 n ap="" sentence rc
-    [ "${LLM_WEB_FILLER_CACHE:-0}" != 1 ] || idx=0
+    [ "${LLM_WEB_FILLER_CACHE:-0}" != 1 ] && [ ! -f "$wd/early_filler" ] || idx=0
     rm -f "$fifo"
     mkfifo "$fifo" 2>/dev/null || mknod "$fifo" p 2>/dev/null
+    if [ -f "$wd/early_player" ]; then
+        [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark player_start
+        llm_aplay -r "$DEVICE_TTS_PCM_RATE" -f S16_LE -c 1 "$fifo" >/dev/null &
+        ap=$!
+        exec 8>"$fifo"
+        [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark player_fifo_open
+    fi
     while :; do
+        [ ! -f "$wd/early_filler" ] || tts_early_filler_publish "$wd"
         n=$(printf "%04d" "$idx")
         if [ -f "$wd/$n.rdy" ]; then
             if [ -s "$wd/$n.native" ] || [ -f "$wd/$n.failed" ]; then
@@ -3352,6 +3443,12 @@ stream_play_worker() {
                     ap=$!
                     exec 8>"$fifo"
                 fi
+                if [ "${DEVICE_TTS_EARLY_START:-0}" = 1 ] && [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
+                    if [ "$idx" = 0 ]; then latency_mark filler_commit
+                    elif [ ! -f "$wd/answer_first" ]; then
+                        : > "$wd/answer_first"; latency_mark answer_commit
+                    fi
+                fi
                 if [ ! -f "$wd/first" ]; then
                     monotonic_ms > "$wd/first"
                     [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark fifo_commit1 "$(cat "$wd/first")"
@@ -3371,11 +3468,11 @@ stream_play_worker() {
             continue
         fi
         # No cached filler this round: the first normal segment resolves slot 0.
-        if [ "$idx" = 0 ] && { [ -f "$wd/0001.rdy" ] || [ -f "$wd/done" ]; }; then
+        if [ "$idx" = 0 ] && [ ! -f "$wd/web_filler_direct" ] && { [ -f "$wd/0001.rdy" ] || [ -f "$wd/done" ]; }; then
             idx=1
             continue
         fi
-        [ -f "$wd/done" ] && break
+        if [ -f "$wd/done" ] && { [ "$idx" != 0 ] || [ ! -f "$wd/web_filler_direct" ]; }; then break; fi
         sleep 0.05
     done
     if [ -n "$ap" ]; then
@@ -3412,6 +3509,12 @@ llm_stream_answer_and_play() {
         [ ! -s "${LATENCY_MARK_DIR:-}/marks" ] || cat "$LATENCY_MARK_DIR/marks" > "$wd/marks" 2>/dev/null
         latency_discard
         LATENCY_MARK_DIR="$wd"
+    fi
+    if [ "${DEVICE_TTS_EARLY_START:-0}" = 1 ] && [ "${DEVICE_TTS_PERSISTENT:-0}" = 1 ] &&
+        [ "$LLM_PIPELINE" = native ] && [ "$TTS_ENGINE" = device ] && [ "$DEVICE_TTS_STREAM" = 1 ]; then
+        tts_early_filler_start "$sid"
+        [ -z "${TTS_EARLY_FILLER_JOB:-}" ] || : > "$wd/early_filler"
+        : > "$wd/early_player"
     fi
     export LLM_WEB_MARK_DIR="$wd" LLM_WEB_FILLER_ALLOWED=1
     : > "$wd/segs"
@@ -3481,6 +3584,11 @@ llm_stream_answer_and_play() {
     : > "$wd/done"
     wait "$play_pid"
     play_rc=$?
+    if [ -n "${TTS_EARLY_FILLER_JOB:-}" ]; then
+        ( : > "$TTS_EARLY_FILLER_JOB/cancel" ) 2>/dev/null || :
+        [ ! -f "$TTS_EARLY_FILLER_JOB/done" ] || rm -rf "$TTS_EARLY_FILLER_JOB"
+        TTS_EARLY_FILLER_JOB=""
+    fi
     transport_rc=$(cat "$wd/transport" 2>/dev/null)
     stream_status=$(cat "$wd/status" 2>/dev/null)
     if [ "$transport_rc" != 0 ] || [ "$stream_status" != complete ]; then
@@ -3493,7 +3601,7 @@ llm_stream_answer_and_play() {
     fi
 
     LLM_DIRECT_ANSWER=$(tr -d '\n' < "$wd/raw" 2>/dev/null)
-    if [ -f "$wd/web_filler" ] && [ ! -f "$wd/web_filler_cached" ]; then
+    if [ -f "$wd/web_filler" ] && [ ! -f "$wd/web_filler_cached" ] && [ ! -f "$wd/web_filler_direct" ]; then
         LLM_DIRECT_ANSWER=${LLM_DIRECT_ANSWER#"$LLM_WEB_FILLER"}
     fi
     if [ -s "$wd/genend" ]; then
@@ -3549,6 +3657,7 @@ send_text_native() {
     log "[LLM-NATIVE] direct → model=$LLM_MODEL text=$text"
     set_state "LLM_SPEAKING"
     record_llm_query "$text"
+    [ "${DEVICE_TTS_EARLY_START:-0}" != 1 ] || tts_early_filler_start "$session_id"
     set_busy "llm_playing"
     apply_llm_master_volume
     freeze_native_player
@@ -4201,6 +4310,9 @@ handle_wakeup() {
     local wake_ts="$1"
     new_llm_session_id
     local session_id="$NEW_LLM_SESSION_ID"
+    if [ "${DEVICE_TTS_EARLY_START:-0}" = 1 ] && [ "${DEVICE_TTS_PERSISTENT:-0}" = 1 ]; then
+        tts_persistent_ensure "$session_id"
+    fi
     local waited_ticks=0
     local max_ticks
     local wait_seconds
@@ -4240,6 +4352,7 @@ handle_wakeup() {
                 set_state "NATIVE_HANDLED"
                 resume_native_player 1
                 led_off
+                [ "${DEVICE_TTS_EARLY_START:-0}" != 1 ] || tts_persistent_stop
                 set_state "IDLE"
                 return 0
             fi
@@ -4247,6 +4360,7 @@ handle_wakeup() {
             if is_unsupported_result; then
                 log "[NATIVE] unsupported，停止原生播报并转 LLM"
                 [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark route_llm
+                [ "${DEVICE_TTS_EARLY_START:-0}" != 1 ] || tts_early_filler_start "$session_id"
                 set_state "NATIVE_FALLBACK"
                 [ "$FOLLOWUP_ENABLED" = "1" ] && [ "$FOLLOWUP_MODE" = "native_multirounds" ] && native_followup_mark_multirounds
                 freeze_native_player
@@ -4259,11 +4373,13 @@ handle_wakeup() {
                 set_state "NATIVE_HANDLED"
                 handle_native_success_speak
                 led_off
+                [ "${DEVICE_TTS_EARLY_START:-0}" != 1 ] || tts_persistent_stop
                 set_state "IDLE"
                 return 0
             else
                 log "[NATIVE] non-success-domain，立即 fallback LLM"
                 [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark route_llm
+                [ "${DEVICE_TTS_EARLY_START:-0}" != 1 ] || tts_early_filler_start "$session_id"
                 set_state "NATIVE_FALLBACK"
                 [ "$FOLLOWUP_ENABLED" = "1" ] && [ "$FOLLOWUP_MODE" = "native_multirounds" ] && native_followup_mark_multirounds
                 freeze_native_player
@@ -4279,6 +4395,7 @@ handle_wakeup() {
         resume_native_player 0
         log "[NATIVE] handled by Xiaomi"
         led_off
+        [ "${DEVICE_TTS_EARLY_START:-0}" != 1 ] || tts_persistent_stop
         set_state "IDLE"
         return 0
     fi
@@ -4286,6 +4403,7 @@ handle_wakeup() {
     if [ -n "$fallback_query" ]; then
         log "[NATIVE] 无明确成功结果，fallback LLM query=$fallback_query"
         [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark route_llm
+        [ "${DEVICE_TTS_EARLY_START:-0}" != 1 ] || tts_early_filler_start "$session_id"
         set_state "NATIVE_FALLBACK"
         [ "$FOLLOWUP_ENABLED" = "1" ] && [ "$FOLLOWUP_MODE" = "native_multirounds" ] && native_followup_mark_multirounds
         freeze_native_player
@@ -4296,6 +4414,7 @@ handle_wakeup() {
     resume_native_player 0
     led_off
     log "[NATIVE] ${wait_seconds}s 未拿到新结果，暂不 fallback"
+    [ "${DEVICE_TTS_EARLY_START:-0}" != 1 ] || tts_persistent_stop
     set_state "IDLE"
     return 1
 }

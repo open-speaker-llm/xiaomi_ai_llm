@@ -85,6 +85,7 @@ DeepSeek 默认 `LLM_THINKING=disabled`，GLM 使用 `LLM_REASONING_EFFORT=low`�
 | 配置 | 默认值 | 含义 |
 |---|---|---|
 | `DEVICE_TTS_PERSISTENT` | `0` | `0/1`；同会话多句与追问复用一个 ettsc worker 和 WebSocket，优先于 `DEVICE_TTS_PREWARM` |
+| `DEVICE_TTS_EARLY_START` | `0` | `0/1`；依赖 `DEVICE_TTS_PERSISTENT=1`，唤醒预连接、LLM 路由时静默预合成搜索垫话、提前启动等待 PCM 的播放器 |
 | `ETTSC_IDLE_SECS` | `20` | 空闲秒数，允许 1–120；非法值告警后使用 20，前导零按十进制处理 |
 
 仅作用于 native + device 句级流式链路。开启后，在本轮 LLM 请求开始前建立连接；后续句子复用，连续追问同 session 继续保留。换会话、音色/增益等合成配置改变时回收旧 worker。正常对话结束、换话题、新唤醒和客户端退出均清理自己的进程和私有任务目录，不关闭其它进程。关闭时保持旧行为；非法开关告警并使用 0。
@@ -92,6 +93,18 @@ DeepSeek 默认 `LLM_THINKING=disabled`，GLM 使用 `LLM_REASONING_EFFORT=low`�
 IPC 使用 `/tmp/native_first_tts.*` 私有目录。每句独立任务目录先写文本与音色，再发布 `queued`；完整 turn 结束并解码成功后发布 PCM 和 `done`。同一时刻仅一个任务，超时任务标记取消并隔离，不能被下一句误用。连接失败时丢弃未完成连接并最多重建一次；仍失败或 worker 不可用时回到原一次性合成、原重试及原生兜底。单句等待最多沿用 `DEVICE_TTS_TIMEOUT`，故障回退可能增加等待。
 
 没有任务时达到空闲阈值会关闭连接并退出 worker；下一轮按需重建。模型仍在生成的轮次有 `round_active` 标记：空闲连接照常释放，worker 等待本轮任务并按需重新建链，轮末移除标记；因此慢回答的后续句子仍能复用。需要配套升级支持 `serve` 的 ettsc，真实生产和声学验收见[实际测试说明](../testing/2026-11-05-tts-persistent.md)。
+
+### TTS 提前准备（实验）
+
+`DEVICE_TTS_EARLY_START=0` 默认关闭；非法值告警一次并使用 0。仅在 `DEVICE_TTS_PERSISTENT=1` 且 native + device 句级流式路径生效，不需要更换已有支持 `serve` 的 ettsc 二进制。
+
+启用后，首轮唤醒创建会话时异步建立连接，与原生识别并行；原生成功、忽略或无结果时只回收连接，不合成、不播放垫话。确定转 LLM 时、冻结原生播放器之前，若联网模式为 auto 且后端为 DeepSeek，则向同一个 worker 静默提交固定垫话任务；追问在提交 LLM 之前按轮提交。仍由原联网流程确认需要搜索、抓取或失败重试时授权播放；普通 answer、搜索关闭或空垫话均不播放预备垫话。未使用 PCM 随轮次/会话清理，不写历史。默认不开启 PCM 持久缓存；缓存开关为 1 时，仅实际使用的完整垫话按原规则保存。
+
+播放器在 LLM 流开始前异步启动、等待 FIFO 数据；这不会提前发声。授权后的垫话使用独立 0000 槽，PCM 就绪即按序发布播放，不经过正文 SSE/切句管道，因此可在正文首 token 之前播放。正文仍从 0001 开始，不改变切句规则或与垫话混入历史。连接保持单任务顺序：正文如果遇到尚未完成的垫话合成，只等待从垫话提交算起的 `DEVICE_TTS_TIMEOUT` 原预算；故障沿用一次性合成、原重试和原生兜底，可能增加等待。预合成也会用于最终走普通 answer 的轮次，产生一小段未播放的合成请求，并可能短暂占用连接。
+
+原消费者本来就不要求正文首 token 到达才播放；此前合成完成到 FIFO 提交的等待，不能直接归因于等待正文。新增计时在提前准备生效时追加 `player_open`（启动播放器到 FIFO 打开）、`wake→filler_commit`、`wake→answer_commit`。`sent0_*` 对应提前准备垫话，`sent1_*` 对应第一段正文；`sent0_tts_end` 为播放器检测并发布预备结果的时刻，可能晚于 worker 实际合成结束，不应用于精确服务耗时。TCP/TLS 和服务端音频耗时继续查看各句 `[T]`。原有 `[LATENCY]` 键名保持，`tts1`/`pcm1` 对应首段正文，而 `wake→commit1` 仍是首个音频段（可能是垫话）的 FIFO 提交，不等于声学出声。垫话先于正文合成完成时，旧 `commit1` 因先后顺序不成立显示 `-`；应看新增的垫话/正文独立提交字段。
+
+恢复原时序：设 `DEVICE_TTS_EARLY_START=0` 后按原维护流程在空闲时重启；仍可保留会话内复用。验证步骤与尚未执行的真人验收见[提前准备测试说明](../testing/2026-11-06-tts-early-start.md)。
 
 ## M03 延迟观测
 

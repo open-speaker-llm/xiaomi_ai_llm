@@ -79,6 +79,14 @@ latency_report
         total = sum(float(fields[k]) for k in ('wake→route', 'route→req', 'ttft', 'split1', 'tts1', 'commit1'))
         self.assertAlmostEqual(total, float(fields['wake→commit1']), places=3)
 
+    def test_early_player_filler_and_answer_commit_fields(self):
+        marks = MARKS + ('player_start 1700\nplayer_fifo_open 2000\n'
+                         'filler_commit 2500\nanswer_commit 3900\n')
+        out, _, _ = self.run_shell('latency_report', marks)
+        self.assertIn('player_open=0.300', out)
+        self.assertIn('wake→filler_commit=1.500', out)
+        self.assertIn('wake→answer_commit=2.900', out)
+
     def test_missing_reversed_and_duplicate_marks(self):
         out, _, _ = self.run_shell('latency_report', 'llm_req 1000\nllm_first_token 900\nllm_req 500\n')
         for field in ('wake→route=-', 'ttft=-', 'tts1=-', 'pcm1=-', 'plan=-', 'search=-', 'filler=-', 'web=off'):

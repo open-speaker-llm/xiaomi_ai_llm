@@ -175,6 +175,13 @@ llm_web_filler() {
     [ ! -f "$LLM_WEB_MARK_DIR/web_filler" ] || return 0
     : > "$LLM_WEB_MARK_DIR/web_filler"
     llm_web_mark web_filler
+    if [ -f "$LLM_WEB_MARK_DIR/early_filler" ]; then
+        # The private player publishes this pre-submitted turn independently of
+        # the SSE stream. No filler text enters answer/history or its splitter.
+        llm_web_now_ms | awk '{printf "%.3f\n", $1/1000}' > "$LLM_WEB_MARK_DIR/filler_t"
+        : > "$LLM_WEB_MARK_DIR/web_filler_direct"
+        return 0
+    fi
     if [ "${LLM_WEB_FILLER_CACHE:-0}" = 1 ]; then
         local cache
         cache=$(llm_web_filler_cache_path) || cache=''
