@@ -192,6 +192,10 @@ DEVICE_TTS_UA="${DEVICE_TTS_UA:-}"            # 留空用 ettsc 内置默认
 DEVICE_TTS_ORIGIN="${DEVICE_TTS_ORIGIN:-}"    # 留空用 ettsc 内置默认
 # 句级流式：1=LLM 边流式输出边按句合成播放（首句即开声，LLM 慢时收益大）；0=整段收完再合成播放。
 DEVICE_TTS_STREAM="${DEVICE_TTS_STREAM:-1}"
+# 实验：LLM 生成期间提前握手，首段复用一次；默认关闭。
+DEVICE_TTS_PREWARM="${DEVICE_TTS_PREWARM:-0}"
+TTS_PREWARM_PID=""
+TTS_PREWARM_DIR=""
 # M03 脱敏分段计时；只观测 native + device 流式，不改变播放策略。
 LATENCY_TRACE_ENABLED="${LATENCY_TRACE_ENABLED:-1}"
 LATENCY_LOG_MAX_LINES="${LATENCY_LOG_MAX_LINES:-200}"
@@ -3062,24 +3066,105 @@ llm_direct_answer() {
     return 0
 }
 
+tts_prewarm_init() {
+    case "$DEVICE_TTS_PREWARM" in
+        0|1) :;;
+        *) DEVICE_TTS_PREWARM=0; log '[TTS] warning invalid DEVICE_TTS_PREWARM; using 0';;
+    esac
+}
+
+tts_prewarm_stop() {
+    [ -n "${TTS_PREWARM_PID:-}" ] || return 0
+    [ ! -d "${TTS_PREWARM_DIR:-}" ] || : > "$TTS_PREWARM_DIR/cancel"
+    # This PID is our directly spawned, still-owned child, never discovered by name.
+    kill "$TTS_PREWARM_PID" 2>/dev/null || :
+    wait "$TTS_PREWARM_PID" 2>/dev/null || :
+    case "$TTS_PREWARM_DIR" in
+        /tmp/native_first_stream/prewarm.*) rm -rf "$TTS_PREWARM_DIR" 2>/dev/null;;
+    esac
+    TTS_PREWARM_PID=""
+    TTS_PREWARM_DIR=""
+    return 0
+}
+
+tts_prewarm_start() {
+    [ "${LLM_PIPELINE:-native}" = native ] && [ "${TTS_ENGINE:-device}" = device ] &&
+        [ "${DEVICE_TTS_STREAM:-1}" = 1 ] || return 0
+    local wd="$1"
+    TTS_PREWARM_DIR=$(umask 077; mktemp -d "$wd/prewarm.XXXXXX" 2>/dev/null) || {
+        TTS_PREWARM_DIR=""; return 0;
+    }
+    (
+        export ETTSC_GEC_VERSION="$DEVICE_TTS_GEC_VERSION"
+        export ETTSC_UA="$DEVICE_TTS_UA" ETTSC_ORIGIN="$DEVICE_TTS_ORIGIN"
+        export ETTSC_PCM=1 ETTSC_GAIN="$DEVICE_TTS_GAIN" ETTSC_TIMING="${ETTSC_TIMING:-0}"
+        exec "$DEVICE_TTS_BIN" prewarm "$TTS_PREWARM_DIR" "$DEVICE_TTS_VOICE"
+    ) > "$TTS_PREWARM_DIR/worker.log" 2>&1 &
+    TTS_PREWARM_PID=$!
+    log '[TTS] prewarm started'
+    return 0
+}
+
+tts_prewarm_take() {
+    local wd="$1" n="$2" sentence="$3" ticks=0 limit=600 seconds="${DEVICE_TTS_TIMEOUT:-30}"
+    [ -d "${TTS_PREWARM_DIR:-}" ] && [ -n "${TTS_PREWARM_PID:-}" ] || return 1
+    [ ! -f "$TTS_PREWARM_DIR/claimed" ] || return 1
+    : > "$TTS_PREWARM_DIR/claimed"
+    # Publish text atomically; it can arrive while the worker is still handshaking.
+    printf '%s' "$sentence" > "$TTS_PREWARM_DIR/request.part" &&
+        mv "$TTS_PREWARM_DIR/request.part" "$TTS_PREWARM_DIR/request" || return 1
+    case "$seconds" in ''|*[!0-9]*) seconds=30;; esac
+    if [ "${#seconds}" -le 3 ] && [ "$seconds" -ge 1 ] && [ "$seconds" -le 300 ]; then
+        limit=$(awk -v n="$seconds" 'BEGIN { printf "%d", n * 20 }')
+    fi
+    while [ "$ticks" -lt "$limit" ]; do
+        [ ! -f "$TTS_PREWARM_DIR/done" ] || break
+        kill -0 "$TTS_PREWARM_PID" 2>/dev/null || break
+        sleep 0.05
+        ticks=$((ticks + 1))
+    done
+    if [ "$(cat "$TTS_PREWARM_DIR/done" 2>/dev/null)" = 0 ] &&
+        [ -s "$TTS_PREWARM_DIR/audio.pcm" ] &&
+        ! grep -q '\[!\]' "$TTS_PREWARM_DIR/worker.log"; then
+        if cp "$TTS_PREWARM_DIR/audio.pcm" "$wd/$n.prewarm" &&
+            cp "$TTS_PREWARM_DIR/worker.log" "$wd/$n.attempt-1.log"; then
+            log '[TTS] prewarm hit'
+            return 0
+        fi
+        rm -f "$wd/$n.prewarm"
+    fi
+    : > "$TTS_PREWARM_DIR/cancel"
+    log '[TTS] prewarm unavailable; using ordinary synthesis'
+    return 1
+}
+
 # 单句合成只发布完整成功的 PCM；失败重试后发布原生补播任务。
 stream_synthesize_sentence() {
     local wd="$1" n="$2" sentence="$3"
     local mark_n="$n"
     while [ "${mark_n#0}" != "$mark_n" ]; do mark_n=${mark_n#0}; done
-    local attempt=0 retries="${DEVICE_TTS_STREAM_RETRIES:-2}" rc
+    local attempt=0 retries="${DEVICE_TTS_STREAM_RETRIES:-2}" rc prewarmed=0
     case "$retries" in ''|*[!0-9]*) retries=2 ;; esac
     # 配置错误也不能导致无限重试。
     [ "$retries" -le 5 ] 2>/dev/null || retries=5
+    if [ "${DEVICE_TTS_PREWARM:-0}" = 1 ] && tts_prewarm_take "$wd" "$n" "$sentence"; then
+        prewarmed=1
+    fi
     while [ "$attempt" -le "$retries" ]; do
         attempt=$((attempt + 1))
         rm -f "$wd/$n.pcm" "$wd/$n.part"
-        ETTSC_GEC_VERSION="$DEVICE_TTS_GEC_VERSION" \
-        ETTSC_UA="$DEVICE_TTS_UA" ETTSC_ORIGIN="$DEVICE_TTS_ORIGIN" \
-        ETTSC_PCM=1 ETTSC_GAIN="$DEVICE_TTS_GAIN" ETTSC_TIMING="${ETTSC_TIMING:-0}" \
-            timeout -t "$DEVICE_TTS_TIMEOUT" "$DEVICE_TTS_BIN" "$sentence" "$wd/$n.part" "$DEVICE_TTS_VOICE" \
-            >"$wd/$n.attempt-$attempt.log" 2>&1
-        rc=$?
+        if [ "$prewarmed" = 1 ]; then
+            prewarmed=0
+            mv "$wd/$n.prewarm" "$wd/$n.part"
+            rc=$?
+        else
+            ETTSC_GEC_VERSION="$DEVICE_TTS_GEC_VERSION" \
+            ETTSC_UA="$DEVICE_TTS_UA" ETTSC_ORIGIN="$DEVICE_TTS_ORIGIN" \
+            ETTSC_PCM=1 ETTSC_GAIN="$DEVICE_TTS_GAIN" ETTSC_TIMING="${ETTSC_TIMING:-0}" \
+                timeout -t "$DEVICE_TTS_TIMEOUT" "$DEVICE_TTS_BIN" "$sentence" "$wd/$n.part" "$DEVICE_TTS_VOICE" \
+                >"$wd/$n.attempt-$attempt.log" 2>&1
+            rc=$?
+        fi
         # ettsc 的旧版在读流失败后也可能返回 0 并留下部分音频，不能只检查文件大小。
         if [ "$rc" = "0" ] && [ -s "$wd/$n.part" ] && \
             ! grep -q '\[!\]' "$wd/$n.attempt-$attempt.log"; then
@@ -3216,6 +3301,7 @@ llm_stream_answer_and_play() {
         log "[LLM-NATIVE] 缺少 LLM_API_KEY（在 /data/native_first.env 配对应后端的 API key）"
         return 1
     fi
+    [ -z "${TTS_PREWARM_PID:-}" ] || tts_prewarm_stop
     rm -rf "$wd" 2>/dev/null
     (umask 077; mkdir -p "$wd") || return 1
     if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ] && latency_active; then
@@ -3234,6 +3320,7 @@ llm_stream_answer_and_play() {
     t_req=$(monotonic_ms)
     [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark llm_req "$t_req"
 
+    [ "${DEVICE_TTS_PREWARM:-0}" != 1 ] || tts_prewarm_start "$wd"
     stream_play_worker "$wd" &
     play_pid=$!
 
@@ -3280,6 +3367,7 @@ llm_stream_answer_and_play() {
             : > "$wd/$n.rdy"
         done
 
+    [ -z "${TTS_PREWARM_PID:-}" ] || tts_prewarm_stop
     : > "$wd/done"
     wait "$play_pid"
     play_rc=$?
@@ -4098,6 +4186,7 @@ handle_wakeup() {
 }
 
 cleanup() {
+    [ -z "${TTS_PREWARM_PID:-}" ] || tts_prewarm_stop
     [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_discard
     stop_native_endpoint
     end_native_queue_drain
@@ -4175,6 +4264,7 @@ log "Server: $SERVER"
 log "Backend: $BACKEND"
 llm_web_init
 latency_init
+tts_prewarm_init
 log "Web search: mode=$LLM_WEB_SEARCH pipeline=$LLM_PIPELINE planner_timeout=${LLM_WEB_PLAN_TIMEOUT}s tool_timeout=${LLM_WEB_TIMEOUT}s retries=$LLM_WEB_RETRIES budget=${LLM_WEB_TOTAL_BUDGET}s fallback=$LLM_WEB_FALLBACK"
 log "LLM_VOLUME: $LLM_VOLUME"
 log "LLM_MASTER_VOLUME: $LLM_MASTER_VOLUME"

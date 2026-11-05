@@ -50,6 +50,20 @@ miplayer --file /tmp/out.mp3 2>/dev/null
 /data/ettsc probe
 ```
 
+## 首段预连接实验
+
+客户端开关 `DEVICE_TTS_PREWARM=0` 默认关闭。启用后，客户端在 LLM 生成期间启动：
+
+```sh
+/data/ettsc prewarm /tmp/本轮私有任务目录 zh-CN-YunjianNeural
+```
+
+目录由客户端使用 `mktemp` 创建。程序先完成真实握手，写 `ready`，并保留同一连接；客户端将首段文本写入 `request.part` 后原子改名为 `request`。程序只处理一个合成 turn，收到 `turn.end` 且解码成功后发布 `audio.pcm`，计时日志完成后写 `done=0`；错误为 `done=1`，不发布残缺音频。始终输出裸 PCM。首段使用完即退出，不支持单连接多句复用。
+
+没有文本时，握手成功后空闲 20 秒退出。`cancel` 文件可取消等待；客户端在轮末/中断时终止并回收自己启动的进程。候选握手采用 5 秒 TCP 建链预算和 socket 读写超时，首段整体等待还受客户端 `DEVICE_TTS_TIMEOUT` 限制。默认的一次性与 `probe` 模式保持原行为；`probe` 是握手后断开，不能供后续进程复用。
+
+上线前需要构建匹配架构的新二进制，并按[实际测试说明](../../docs/testing/2026-11-05-tts-prewarm.md)核验。关闭客户端开关即可回到一次性链路。2026-11-05 的握手基线 P50 785 ms、P90 1165 ms（20 次成功）；这是握手数据，不能代替声学首声验收。
+
 ## 维护：版本过期（403）怎么办
 
 当前实现支持 `Sec-MS-GEC` v2，输出 `16 位 CS64-64 位 SHA256` 十六进制组合，并按上游握手方式发送随机 MUID Cookie。算法与 [edge-tts 固定提交](https://github.com/rany2/edge-tts/tree/bd44c1d1aaebdc1db7f47456ee12431b42ec7cac) 核对；默认男声仍为 `zh-CN-YunjianNeural`，音频格式、MP3 解码与 PCM 增益行为保持。

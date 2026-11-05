@@ -10,6 +10,7 @@ use std::net::TcpStream;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tungstenite::Message;
 mod gec_v2;
+mod prewarm;
 
 const TRUSTED: &str = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
 const HOST: &str = "speech.platform.bing.com";
@@ -169,6 +170,21 @@ fn connect(timing: &mut Timing) -> tungstenite::WebSocket<tungstenite::stream::M
     ws
 }
 
+fn speech_messages(text: &str, voice: &str) -> (String, String) {
+    let date = chrono::Utc::now()
+        .format("%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)")
+        .to_string();
+    let fmt = env_or("ETTSC_FORMAT", DEFAULT_FORMAT);
+    let cfg = format!(
+        "X-Timestamp:{date}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n{{\"context\":{{\"synthesis\":{{\"audio\":{{\"metadataoptions\":{{\"sentenceBoundaryEnabled\":\"false\",\"wordBoundaryEnabled\":\"false\"}},\"outputFormat\":\"{fmt}\"}}}}}}}}"
+    );
+    let ssml = format!(
+        "X-RequestId:{}\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:{date}Z\r\nPath:ssml\r\n\r\n<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='zh-CN'><voice name='{voice}'><prosody pitch='+0Hz' rate='+0%' volume='+0%'>{text}</prosody></voice></speak>",
+        hexid()
+    );
+    (cfg, ssml)
+}
+
 fn main() {
     let enabled = match env_or("ETTSC_TIMING", "0").as_str() {
         "1" => true,
@@ -177,6 +193,22 @@ fn main() {
     };
     let mut timing = Timing { enabled, ..Timing::default() };
     let a: Vec<String> = std::env::args().collect();
+
+    if a.get(1).map(|s| s == "prewarm").unwrap_or(false) {
+        let Some(dir) = a.get(2) else {
+            eprintln!("[!] prewarm requires a private job directory");
+            std::process::exit(2);
+        };
+        let voice = a.get(3).map(String::as_str).unwrap_or("zh-CN-YunjianNeural");
+        let rc = prewarm::run(std::path::Path::new(dir), voice, &mut timing);
+        timing.report();
+        let status = if rc.is_ok() { b"0" } else { b"1" };
+        if std::fs::write(std::path::Path::new(dir).join("done"), status).is_err() {
+            std::process::exit(2);
+        }
+        if rc.is_err() { std::process::exit(2); }
+        return;
+    }
 
     if a.get(1).map(|s| s == "probe").unwrap_or(false) {
         eprintln!("[*] probe ...");
@@ -193,18 +225,8 @@ fn main() {
     eprintln!("[*] connecting ...");
     let mut ws = connect(&mut timing);
 
-    let date = chrono::Utc::now()
-        .format("%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)")
-        .to_string();
-    let fmt = env_or("ETTSC_FORMAT", DEFAULT_FORMAT);
-    let cfg = format!(
-        "X-Timestamp:{date}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n{{\"context\":{{\"synthesis\":{{\"audio\":{{\"metadataoptions\":{{\"sentenceBoundaryEnabled\":\"false\",\"wordBoundaryEnabled\":\"false\"}},\"outputFormat\":\"{fmt}\"}}}}}}}}"
-    );
+    let (cfg, ssml) = speech_messages(&text, &voice);
     ws.send(Message::Text(cfg)).unwrap();
-    let ssml = format!(
-        "X-RequestId:{}\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:{date}Z\r\nPath:ssml\r\n\r\n<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='zh-CN'><voice name='{voice}'><prosody pitch='+0Hz' rate='+0%' volume='+0%'>{text}</prosody></voice></speak>",
-        hexid()
-    );
     ws.send(Message::Text(ssml)).unwrap();
     eprintln!("[*] sent config+ssml, receiving ...");
 

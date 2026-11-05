@@ -74,6 +74,12 @@ DeepSeek 默认 `LLM_THINKING=disabled`，GLM 使用 `LLM_REASONING_EFFORT=low`�
 
 本机现有的 Dirac 播放适配、音量恢复与参考通道各有固件限制；音效的构建和验证见 [Dirac 组件](../../device/dirac/README.md)，出现音量异常从[排障](../runbooks/troubleshooting.md#7-llm-音量忽大忽小)进入。
 
+### TTS 首段预连接（实验）
+
+`DEVICE_TTS_PREWARM=0` 默认关闭，允许 `0/1`；非法值启动告警一次并使用 `0`。仅作用于 native + device 句级流式路径。开启后，在 LLM 请求开始前异步启动同一 `ettsc` 二进制的 `prewarm` 模式：提前完成 TCP/TLS/WebSocket 握手，保留连接等待首个待合成段，使用该连接合成一次后退出。首段可能是未命中 PCM 缓存的搜索垫话；缓存已命中时用于答案首段。后续段继续使用原一次性模式。
+
+必须配套支持 `prewarm` 的新 ettsc。设备旧配置无需增加此项。握手、空闲退出、未完成音频或超时等故障回到普通合成，原有重试和原生兜底预算保持；预连接等待最多 `DEVICE_TTS_TIMEOUT`，失败回退会额外花时间。连接建立后无文本空闲 20 秒退出；回答结束或客户端中断时回收本轮子进程并删除其私有任务目录。IPC、音频及日志仅写私有 `/tmp` 轮次目录，不改私有 env，不新增常驻系统服务。启用和恢复步骤见[实际测试说明](../testing/2026-11-05-tts-prewarm.md)。
+
 ## M03 延迟观测
 
 仅 `LLM_PIPELINE=native`、`TTS_ENGINE=device`、`DEVICE_TTS_STREAM=1` 的轮次生成分段数据。计时不改变切句、播放顺序、超时、重试次数或间隔；旧配置文件无需增加参数。
