@@ -1,5 +1,5 @@
 //! One connection, one synthesis turn. No background synthesis or multi-turn reuse.
-use super::{decode_mp3_to_pcm, env_or, speech_messages, Timing, HOST};
+use super::{decode_mp3_checked, env_or, speech_messages, Timing, HOST};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -13,7 +13,7 @@ const MAX_AUDIO: usize = 16 * 1024 * 1024;
 
 // Only the experimental mode changes connection timeouts. Errors are deliberately
 // static: HTTP errors can contain cookies or authentication query parameters.
-fn connect(timing: &mut Timing) -> Result<WebSocket<MaybeTlsStream<TcpStream>>, ()> {
+pub(super) fn connect(timing: &mut Timing) -> Result<WebSocket<MaybeTlsStream<TcpStream>>, ()> {
     let tcp_start = timing.start();
     let deadline = Instant::now() + Duration::from_secs(5);
     let addresses = (HOST, 443).to_socket_addrs().map_err(|_| ())?;
@@ -51,7 +51,7 @@ fn request(dir: &Path, idle: Duration) -> Result<String, ()> {
     }
 }
 
-fn synthesize<S: Read + Write>(ws: &mut WebSocket<S>, dir: &Path, voice: &str,
+pub(super) fn synthesize<S: Read + Write>(ws: &mut WebSocket<S>, dir: &Path, voice: &str,
                               text: &str, timing: &mut Timing) -> Result<(), ()> {
     let (config, ssml) = speech_messages(text, voice);
     ws.send(Message::Text(config)).map_err(|_| ())?;
@@ -81,8 +81,8 @@ fn synthesize<S: Read + Write>(ws: &mut WebSocket<S>, dir: &Path, voice: &str,
     }
     if audio.is_empty() { return Err(()); }
     let gain = env_or("ETTSC_GAIN", "1.0").parse().unwrap_or(1.0);
-    let pcm = decode_mp3_to_pcm(&audio, gain);
-    if pcm.is_empty() || dir.join("cancel").exists() { return Err(()); }
+    let (pcm, decoded) = decode_mp3_checked(&audio, gain);
+    if !decoded || pcm.is_empty() || dir.join("cancel").exists() { return Err(()); }
     fs::write(dir.join("audio.part"), pcm).map_err(|_| ())?;
     fs::rename(dir.join("audio.part"), dir.join("audio.pcm")).map_err(|_| ())
 }

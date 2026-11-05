@@ -11,6 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tungstenite::Message;
 mod gec_v2;
 mod prewarm;
+mod persistent;
 
 const TRUSTED: &str = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
 const HOST: &str = "speech.platform.bing.com";
@@ -194,6 +195,18 @@ fn main() {
     let mut timing = Timing { enabled, ..Timing::default() };
     let a: Vec<String> = std::env::args().collect();
 
+    if a.get(1).map(|s| s == "serve").unwrap_or(false) {
+        let Some(dir) = a.get(2) else {
+            eprintln!("[!] serve requires a private directory");
+            std::process::exit(2);
+        };
+        let result = persistent::run(std::path::Path::new(dir));
+        let status = if result.is_ok() { b"0" } else { b"1" };
+        let _ = std::fs::write(std::path::Path::new(dir).join("exited"), status);
+        if result.is_err() { std::process::exit(2); }
+        return;
+    }
+
     if a.get(1).map(|s| s == "prewarm").unwrap_or(false) {
         let Some(dir) = a.get(2) else {
             eprintln!("[!] prewarm requires a private job directory");
@@ -287,10 +300,15 @@ fn main() {
 // mp3 → 裸 PCM(S16LE 交织)。EdgeTTS 输出为单声道 24kHz，故 PCM 也是 24kHz/mono。
 // gain：数字增益（>1 放大），超出 i16 范围则削顶（clamp），避免溢出。
 fn decode_mp3_to_pcm(mp3: &[u8], gain: f32) -> Vec<u8> {
+    decode_mp3_checked(mp3, gain).0
+}
+
+fn decode_mp3_checked(mp3: &[u8], gain: f32) -> (Vec<u8>, bool) {
     let mut dec = minimp3::Decoder::new(mp3);
     let mut out: Vec<u8> = Vec::new();
     let apply = (gain - 1.0).abs() > 0.001;
     let mut peak: i32 = 0;
+    let mut complete = true;
     loop {
         match dec.next_frame() {
             Ok(minimp3::Frame { data, .. }) => {
@@ -310,11 +328,12 @@ fn decode_mp3_to_pcm(mp3: &[u8], gain: f32) -> Vec<u8> {
             Err(minimp3::Error::Eof) => break,
             Err(e) => {
                 eprintln!("[!] mp3 decode err: {e:?}");
+                complete = false;
                 break;
             }
         }
     }
     let headroom = if peak > 0 { 32767.0 / peak as f32 } else { 0.0 };
     eprintln!("[*] pcm peak={peak}/32767 ({:.0}%), 无削顶最大增益≈{headroom:.2}x", peak as f32 / 32767.0 * 100.0);
-    out
+    (out, complete)
 }

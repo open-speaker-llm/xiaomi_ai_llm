@@ -196,6 +196,13 @@ DEVICE_TTS_STREAM="${DEVICE_TTS_STREAM:-1}"
 DEVICE_TTS_PREWARM="${DEVICE_TTS_PREWARM:-0}"
 TTS_PREWARM_PID=""
 TTS_PREWARM_DIR=""
+# 实验：同一会话多句/追问复用连接，优先于首段预连接；默认关闭。
+DEVICE_TTS_PERSISTENT="${DEVICE_TTS_PERSISTENT:-0}"
+ETTSC_IDLE_SECS="${ETTSC_IDLE_SECS:-20}"
+TTS_PERSISTENT_PID=""
+TTS_PERSISTENT_DIR=""
+TTS_PERSISTENT_SESSION=""
+TTS_PERSISTENT_SETTINGS=""
 # M03 脱敏分段计时；只观测 native + device 流式，不改变播放策略。
 LATENCY_TRACE_ENABLED="${LATENCY_TRACE_ENABLED:-1}"
 LATENCY_LOG_MAX_LINES="${LATENCY_LOG_MAX_LINES:-200}"
@@ -3066,6 +3073,101 @@ llm_direct_answer() {
     return 0
 }
 
+tts_persistent_init() {
+    case "$DEVICE_TTS_PERSISTENT" in 0|1) :;; *)
+        DEVICE_TTS_PERSISTENT=0; log '[TTS] warning invalid DEVICE_TTS_PERSISTENT; using 0';;
+    esac
+    local valid=1
+    case "$ETTSC_IDLE_SECS" in ''|*[!0-9]*) valid=0;; esac
+    if [ "$valid" = 1 ]; then
+        [ "${#ETTSC_IDLE_SECS}" -le 3 ] && [ "$ETTSC_IDLE_SECS" -ge 1 ] &&
+            [ "$ETTSC_IDLE_SECS" -le 120 ] || valid=0
+    fi
+    if [ "$valid" = 0 ]; then
+        ETTSC_IDLE_SECS=20; log '[TTS] warning invalid ETTSC_IDLE_SECS; using 20'
+    else
+        ETTSC_IDLE_SECS=$(awk -v n="$ETTSC_IDLE_SECS" 'BEGIN {printf "%d", n}')
+    fi
+}
+
+tts_persistent_stop() {
+    [ -n "${TTS_PERSISTENT_PID:-}" ] || return 0
+    kill "$TTS_PERSISTENT_PID" 2>/dev/null || :
+    wait "$TTS_PERSISTENT_PID" 2>/dev/null || :
+    case "$TTS_PERSISTENT_DIR" in /tmp/native_first_tts.*) rm -rf "$TTS_PERSISTENT_DIR" 2>/dev/null;; esac
+    TTS_PERSISTENT_PID=""; TTS_PERSISTENT_DIR=""
+    TTS_PERSISTENT_SESSION=""; TTS_PERSISTENT_SETTINGS=""
+    return 0
+}
+
+tts_persistent_ensure() {
+    local sid="$1" settings
+    [ "${LLM_PIPELINE:-native}" = native ] && [ "${TTS_ENGINE:-device}" = device ] &&
+        [ "${DEVICE_TTS_STREAM:-1}" = 1 ] || return 0
+    settings=$(printf '%s\n' "$DEVICE_TTS_BIN" "$DEVICE_TTS_VOICE" "$DEVICE_TTS_GAIN" \
+        "$DEVICE_TTS_PCM_RATE" "$DEVICE_TTS_GEC_VERSION" "$DEVICE_TTS_UA" "$DEVICE_TTS_ORIGIN" \
+        "$ETTSC_IDLE_SECS" "${ETTSC_TIMING:-0}" "${ETTSC_FORMAT:-}") || return 0
+    if [ -n "${TTS_PERSISTENT_PID:-}" ]; then
+        if [ "$sid" = "$TTS_PERSISTENT_SESSION" ] && [ "$settings" = "$TTS_PERSISTENT_SETTINGS" ] &&
+            [ ! -f "$TTS_PERSISTENT_DIR/exited" ] && kill -0 "$TTS_PERSISTENT_PID" 2>/dev/null; then
+            : > "$TTS_PERSISTENT_DIR/round_active"
+            return 0
+        fi
+        tts_persistent_stop
+    fi
+    TTS_PERSISTENT_DIR=$(umask 077; mktemp -d /tmp/native_first_tts.XXXXXX 2>/dev/null) || {
+        TTS_PERSISTENT_DIR=""; return 0;
+    }
+    : > "$TTS_PERSISTENT_DIR/round_active"
+    (
+        export ETTSC_GEC_VERSION="$DEVICE_TTS_GEC_VERSION"
+        export ETTSC_UA="$DEVICE_TTS_UA" ETTSC_ORIGIN="$DEVICE_TTS_ORIGIN"
+        export ETTSC_PCM=1 ETTSC_GAIN="$DEVICE_TTS_GAIN" ETTSC_TIMING="${ETTSC_TIMING:-0}"
+        export ETTSC_IDLE_SECS
+        exec "$DEVICE_TTS_BIN" serve "$TTS_PERSISTENT_DIR"
+    ) > /dev/null 2>&1 &
+    TTS_PERSISTENT_PID=$!
+    TTS_PERSISTENT_SESSION="$sid"; TTS_PERSISTENT_SETTINGS="$settings"
+    log '[TTS] persistent started'
+    return 0
+}
+
+tts_persistent_take() {
+    local wd="$1" n="$2" sentence="$3" job ticks=0 limit=600 seconds="${DEVICE_TTS_TIMEOUT:-30}"
+    [ -n "${TTS_PERSISTENT_PID:-}" ] && [ -d "${TTS_PERSISTENT_DIR:-}" ] || return 1
+    [ ! -f "$TTS_PERSISTENT_DIR/exited" ] && [ ! -f "$TTS_PERSISTENT_DIR/busy" ] || return 1
+    kill -0 "$TTS_PERSISTENT_PID" 2>/dev/null || return 1
+    job=$(umask 077; mktemp -d "$TTS_PERSISTENT_DIR/job.XXXXXX" 2>/dev/null) || return 1
+    if ! { printf '%s' "$sentence" > "$job/request" && printf '%s' "$DEVICE_TTS_VOICE" > "$job/voice"; }; then
+        rm -rf "$job"; return 1
+    fi
+    : > "$TTS_PERSISTENT_DIR/busy"
+    : > "$job/queued"
+    case "$seconds" in ''|*[!0-9]*) seconds=30;; esac
+    if [ "${#seconds}" -le 3 ] && [ "$seconds" -ge 1 ] && [ "$seconds" -le 300 ]; then
+        limit=$(awk -v n="$seconds" 'BEGIN {printf "%d", n*20}')
+    fi
+    while [ "$ticks" -lt "$limit" ]; do
+        [ ! -f "$job/done" ] && [ ! -f "$TTS_PERSISTENT_DIR/exited" ] || break
+        kill -0 "$TTS_PERSISTENT_PID" 2>/dev/null || break
+        sleep 0.05; ticks=$((ticks+1))
+    done
+    if [ "$(cat "$job/done" 2>/dev/null)" = 0 ] && [ -s "$job/audio.pcm" ] &&
+        ! grep -q '\[!\]' "$job/worker.log"; then
+        if cp "$job/audio.pcm" "$wd/$n.prewarm" && cp "$job/worker.log" "$wd/$n.attempt-1.log"; then
+            rm -rf "$job"
+            log '[TTS] persistent hit'
+            return 0
+        fi
+        rm -f "$wd/$n.prewarm"
+    fi
+    # A timed-out worker may still be in socket IO; never reuse this job path.
+    : > "$job/cancel"
+    [ ! -f "$job/done" ] || rm -rf "$job"
+    log '[TTS] persistent unavailable; using ordinary synthesis'
+    return 1
+}
+
 tts_prewarm_init() {
     case "$DEVICE_TTS_PREWARM" in
         0|1) :;;
@@ -3147,7 +3249,9 @@ stream_synthesize_sentence() {
     case "$retries" in ''|*[!0-9]*) retries=2 ;; esac
     # 配置错误也不能导致无限重试。
     [ "$retries" -le 5 ] 2>/dev/null || retries=5
-    if [ "${DEVICE_TTS_PREWARM:-0}" = 1 ] && tts_prewarm_take "$wd" "$n" "$sentence"; then
+    if [ "${DEVICE_TTS_PERSISTENT:-0}" = 1 ]; then
+        if tts_persistent_take "$wd" "$n" "$sentence"; then prewarmed=1; fi
+    elif [ "${DEVICE_TTS_PREWARM:-0}" = 1 ] && tts_prewarm_take "$wd" "$n" "$sentence"; then
         prewarmed=1
     fi
     while [ "$attempt" -le "$retries" ]; do
@@ -3320,7 +3424,12 @@ llm_stream_answer_and_play() {
     t_req=$(monotonic_ms)
     [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark llm_req "$t_req"
 
-    [ "${DEVICE_TTS_PREWARM:-0}" != 1 ] || tts_prewarm_start "$wd"
+    if [ "${DEVICE_TTS_PERSISTENT:-0}" = 1 ]; then
+        tts_persistent_ensure "$sid"
+    else
+        [ -z "${TTS_PERSISTENT_PID:-}" ] || tts_persistent_stop
+        [ "${DEVICE_TTS_PREWARM:-0}" != 1 ] || tts_prewarm_start "$wd"
+    fi
     stream_play_worker "$wd" &
     play_pid=$!
 
@@ -3368,6 +3477,7 @@ llm_stream_answer_and_play() {
         done
 
     [ -z "${TTS_PREWARM_PID:-}" ] || tts_prewarm_stop
+    [ -z "${TTS_PERSISTENT_DIR:-}" ] || rm -f "$TTS_PERSISTENT_DIR/round_active"
     : > "$wd/done"
     wait "$play_pid"
     play_rc=$?
@@ -3794,6 +3904,7 @@ is_followup_reset_command() {
 }
 
 new_llm_session_id() {
+    [ -z "${TTS_PERSISTENT_PID:-}" ] || tts_persistent_stop
     local backend
     case "$BACKEND" in deepseek|minimax|glm|kimi) backend="$BACKEND";; *) backend=custom;; esac
     LLM_SESSION_SERIAL=$((${LLM_SESSION_SERIAL:-0}+1))
@@ -3940,6 +4051,7 @@ handle_llm_dialog() {
         send_text_and_play "$session_id" "$first_text" normal
         led_off
         resume_native_asr
+        [ -z "${TTS_PERSISTENT_PID:-}" ] || tts_persistent_stop
         CURRENT_SESSION_ID=""
         set_state "IDLE"
         return 0
@@ -3985,6 +4097,7 @@ handle_llm_dialog() {
         finish_llm_playback
         led_off
         resume_native_asr
+        [ -z "${TTS_PERSISTENT_PID:-}" ] || tts_persistent_stop
         CURRENT_SESSION_ID=""
         set_state "IDLE"
         return 0
@@ -4021,6 +4134,7 @@ handle_llm_dialog() {
             led_off
             resume_native_asr
         fi
+        [ -z "${TTS_PERSISTENT_PID:-}" ] || tts_persistent_stop
         CURRENT_SESSION_ID=""
         set_state "IDLE"
         return 0
@@ -4074,6 +4188,7 @@ handle_llm_dialog() {
     finish_llm_playback
     led_off
     resume_native_asr
+    [ -z "${TTS_PERSISTENT_PID:-}" ] || tts_persistent_stop
     CURRENT_SESSION_ID=""
     set_state "IDLE"
 }
@@ -4186,6 +4301,7 @@ handle_wakeup() {
 }
 
 cleanup() {
+    [ -z "${TTS_PERSISTENT_PID:-}" ] || tts_persistent_stop
     [ -z "${TTS_PREWARM_PID:-}" ] || tts_prewarm_stop
     [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_discard
     stop_native_endpoint
@@ -4265,6 +4381,7 @@ log "Backend: $BACKEND"
 llm_web_init
 latency_init
 tts_prewarm_init
+tts_persistent_init
 log "Web search: mode=$LLM_WEB_SEARCH pipeline=$LLM_PIPELINE planner_timeout=${LLM_WEB_PLAN_TIMEOUT}s tool_timeout=${LLM_WEB_TIMEOUT}s retries=$LLM_WEB_RETRIES budget=${LLM_WEB_TOTAL_BUDGET}s fallback=$LLM_WEB_FALLBACK"
 log "LLM_VOLUME: $LLM_VOLUME"
 log "LLM_MASTER_VOLUME: $LLM_MASTER_VOLUME"
