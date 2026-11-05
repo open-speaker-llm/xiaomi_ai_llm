@@ -68,7 +68,7 @@ git diff --check
    ssh xiaomi 'wc -l /tmp/native_first_latency.log; sh /data/latency_summary.sh'
    ```
 
-   预期日志不超过 200 行，统计输出各字段有效样本数和 P50/P90/max。为验证默认上限，可继续累计超过 200 轮后检查；30 轮只能检查当前行数，不能单独证明截断正确。日志仅写 `/tmp`，重启会消失。纯追问 `wake→route` 与 `wake→commit1` 为 `-`，不能沿用上一轮唤醒。
+   预期日志不超过 200 行，统计输出各字段有效样本数和 P50/P90/max。为验证默认上限，可继续累计超过 200 轮后检查；30 轮只能检查当前行数，不能单独证明截断正确。日志仅写 `/tmp`，重启会消失。此处为 S3 原始口径。S27 起纯追问按本轮追问判定时刻计算，见 [S27 验收](2026-11-06-latency-followup.md)。
 
 3. 搜索关闭或无垫话的 5 轮检查阶段之和：`wake→route + route→req + ttft + split1 + tts1 + commit1` 与 `wake→commit1` 差不超过 50 ms。存在缺失字段、队首原生兜底、垫话时单列记录，不能使用此加和校验。默认 ttft 仍含规划/工具耗时；本步骤没有新增搜索打点，`plan/search/filler` 通常为 `-`。
 

@@ -90,6 +90,11 @@ cp "$TEST_DIR/stream/marks" "$TEST_DIR/marks2"
             self.assertIn('llm_first_token 1500', marks)
             self.assertIn('web_filler 1000', marks)
             self.assertEqual(marks.count('web_filler '), 1)
+            self.assertIn('filler_pcm_bytes 1024', marks)
+            self.assertEqual(marks.count('filler_commit '), 1)
+            self.assertEqual(marks.count('answer_commit '), 1)
+        self.assertIn('inline_filler 1', result['marks1'])
+        self.assertNotIn('inline_filler ', result['marks2'])
 
     def test_disabled_keeps_sse_synthesis_and_creates_no_persistent_pcm(self):
         result = self.pipeline(cache=0)

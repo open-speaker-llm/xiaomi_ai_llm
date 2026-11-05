@@ -23,7 +23,8 @@ class NativeAsrShellTest(unittest.TestCase):
     def test_native_followup_keeps_session_and_uses_no_recorder_or_mac(self):
         result = self.shell(self.functions('handle_llm_dialog') + '''
 FOLLOWUP_ENABLED=1; FOLLOWUP_MODE=local_record; FOLLOWUP_RECORD_MODE=native_live
-SUPPRESS_DUP_SECONDS=5; calls=0
+SUPPRESS_DUP_SECONDS=5; calls=0; LATENCY_TRACE_ENABLED=1
+latency_begin() { printf 'trace=%s\\n' "$1"; }
 is_system1_root() { return 0; }
 log() { :; }; set_state() { :; }; pause_native_asr() { :; }; resume_native_asr() { :; }
 led_feedback_llm_accept() { :; }; led_feedback_followup_asr_ok() { :; }; led_off() { :; }
@@ -41,7 +42,7 @@ echo "restored-dedup=$SUPPRESS_DUP_SECONDS"
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), [
             'same-session|first-question|defer|dedup=5',
-            'same-session|不要再讲了|defer|dedup=0', 'cleaned', 'restored-dedup=5'])
+            'trace=followup', 'same-session|不要再讲了|defer|dedup=0', 'cleaned', 'restored-dedup=5'])
 
     def test_llm_error_does_not_open_microphone(self):
         result = self.shell(self.functions('handle_llm_dialog') + '''

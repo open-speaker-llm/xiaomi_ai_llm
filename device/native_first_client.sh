@@ -339,6 +339,14 @@ latency_begin() {
     latency_active || return 0
     latency_discard
     LATENCY_MARK_DIR=$(mktemp -d /tmp/native_first_marks.XXXXXX 2>/dev/null) || LATENCY_MARK_DIR=""
+    if [ "${1:-}" = followup ]; then
+        local started
+        started=$(monotonic_ms)
+        if [ -n "$started" ]; then
+            latency_mark followup_start "$started"
+            latency_mark route_llm "$started"
+        fi
+    fi
     return 0
 }
 
@@ -348,7 +356,7 @@ latency_mark() {
     [ -d "$dir" ] || return 0
     case "$name" in *[!a-z0-9_]*) return 0 ;; esac
     case "$name" in
-        wake|native_result|route_llm|freeze_done|llm_req|llm_first_token|fifo_commit1|llm_done|play_done|web_plan_start|web_plan_end|web_tool_start|web_tool_end|web_filler|player_start|player_fifo_open|filler_commit|answer_commit) ;;
+        wake|followup_start|native_result|route_llm|freeze_done|llm_req|llm_first_token|fifo_commit1|llm_done|play_done|web_plan_start|web_plan_end|web_tool_start|web_tool_end|web_filler|player_start|player_fifo_open|filler_commit|filler_pcm_bytes|answer_commit) ;;
         sent[0-9]*_split|sent[0-9]*_tts_start|sent[0-9]*_tts_end|sent[0-9]*_pcm_bytes|sent[0-9]*_retries) ;;
         *) return 0 ;;
     esac
@@ -369,7 +377,7 @@ latency_report() {
         off) web=off ;; answer) web=answer ;; search) web=search ;; fetch) web=fetch ;;
     esac
     line=$(LC_ALL=C awk -v web="$web" -v rate="$DEVICE_TTS_PCM_RATE" '
-        NF == 2 && $2 ~ /^[0-9]+$/ && !($1 in m) { m[$1]=$2 }
+        NF == 2 && $2 ~ /^[0-9]+$/ && !($1 in m) { m[$1]=$2+0 }
         function delta(a,b) {
             if (!(a in m) || !(b in m) || m[b] < m[a]) return "-"
             return sprintf("%.3f", (m[b]-m[a])/1000)
@@ -384,15 +392,28 @@ latency_report() {
                 if (k ~ /^sent[0-9]+_tts_end$/) segs++
                 if (k ~ /^sent[0-9]+_retries$/) retries+=m[k]
             }
-            printf "[LATENCY] wake→route=%s route→req=%s ttft=%s split1=%s tts1=%s commit1=%s wake→commit1=%s pcm1=%s segs=%d retries=%d web=%s plan=%s search=%s filler=%s llm=%s play=%s", \
-                delta("wake","route_llm"), delta("route_llm","llm_req"), \
-                delta("llm_req","llm_first_token"), delta("llm_first_token","sent1_split"), \
-                delta("sent1_tts_start","sent1_tts_end"), delta("sent1_tts_end","fifo_commit1"), \
-                delta("wake","fifo_commit1"), length_s("sent1_pcm_bytes"), segs, retries, web, \
+            start="wake"; origin="wake"
+            if ("followup_start" in m) { start="followup"; origin="followup_start" }
+            else if (!("wake" in m)) start="-"
+            first=("inline_filler" in m) ? "sent2" : "sent1"
+            gap="-"; gap_kind="-"
+            if (("filler_commit" in m) && ("answer_commit" in m) &&
+                m["answer_commit"] >= m["filler_commit"] && m["filler_pcm_bytes"] > 0 &&
+                rate ~ /^[0-9]+$/ && rate+0 > 0) {
+                seconds=(m["answer_commit"]-m["filler_commit"])/1000-m["filler_pcm_bytes"]/(rate*2)
+                gap=sprintf("%.3f", seconds > 0 ? seconds : 0)
+                gap_kind="est"
+            }
+            printf "[LATENCY] start=%s wake→route=%s route→req=%s ttft=%s split1=%s tts1=%s commit1=%s wake→commit1=%s pcm1=%s segs=%d retries=%d web=%s plan=%s search=%s filler=%s llm=%s play=%s", \
+                start, delta(origin,"route_llm"), delta("route_llm","llm_req"), \
+                delta("llm_req","llm_first_token"), delta("llm_first_token",first "_split"), \
+                delta(first "_tts_start",first "_tts_end"), delta(first "_tts_end","answer_commit"), \
+                delta(origin,"fifo_commit1"), length_s(first "_pcm_bytes"), segs, retries, web, \
                 delta("web_plan_start","web_plan_end"), delta("web_tool_start","web_tool_end"), \
                 delta("llm_req","web_filler"), delta("llm_req","llm_done"), delta("llm_req","play_done")
-            if ("player_start" in m) printf " player_open=%s wake→filler_commit=%s wake→answer_commit=%s", \
-                delta("player_start","player_fifo_open"), delta("wake","filler_commit"), delta("wake","answer_commit")
+            if ("player_start" in m) printf " player_open=%s", delta("player_start","player_fifo_open")
+            printf " wake→filler_commit=%s wake→answer_commit=%s filler→answer_gap=%s filler→answer_gap_kind=%s", \
+                delta(origin,"filler_commit"), delta(origin,"answer_commit"), gap, gap_kind
         }
     ' "$dir/marks" 2>/dev/null) || return 0
     log "$line"
@@ -3397,7 +3418,7 @@ llm_aplay() {
 stream_play_worker() {
     local wd="$1"
     local fifo="$wd/play.fifo"
-    local idx=1 n ap="" sentence rc
+    local idx=1 n ap="" sentence rc answer_idx=1 pcm_commit
     [ "${LLM_WEB_FILLER_CACHE:-0}" != 1 ] && [ ! -f "$wd/early_filler" ] || idx=0
     rm -f "$fifo"
     mkfifo "$fifo" 2>/dev/null || mknod "$fifo" p 2>/dev/null
@@ -3412,6 +3433,11 @@ stream_play_worker() {
         [ ! -f "$wd/early_filler" ] || tts_early_filler_publish "$wd"
         n=$(printf "%04d" "$idx")
         if [ -f "$wd/$n.rdy" ]; then
+            # 内联垫话占第 1 段；缓存和直发垫话使用第 0 段。
+            if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ] && [ "$idx" = 1 ] && [ -s "$wd/filler_t" ] &&
+                [ ! -f "$wd/web_filler_cached" ] && [ ! -f "$wd/web_filler_direct" ]; then
+                answer_idx=2
+            fi
             if [ -s "$wd/$n.native" ] || [ -f "$wd/$n.failed" ]; then
                 # 必须等 PCM 真正排空、释放声卡后才允许原生播放器出声。
                 if [ -n "$ap" ]; then
@@ -3443,15 +3469,21 @@ stream_play_worker() {
                     ap=$!
                     exec 8>"$fifo"
                 fi
-                if [ "${DEVICE_TTS_EARLY_START:-0}" = 1 ] && [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
-                    if [ "$idx" = 0 ]; then latency_mark filler_commit
-                    elif [ ! -f "$wd/answer_first" ]; then
-                        : > "$wd/answer_first"; latency_mark answer_commit
-                    fi
-                fi
+                pcm_commit=""
                 if [ ! -f "$wd/first" ]; then
                     monotonic_ms > "$wd/first"
-                    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark fifo_commit1 "$(cat "$wd/first")"
+                    if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
+                        pcm_commit=$(cat "$wd/first")
+                        latency_mark fifo_commit1 "$pcm_commit"
+                    fi
+                fi
+                if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
+                    if [ "$idx" -lt "$answer_idx" ]; then
+                        latency_mark filler_commit "$pcm_commit"
+                        latency_mark filler_pcm_bytes "$(wc -c < "$wd/$n.pcm" | tr -d ' ')"
+                    elif [ "$idx" = "$answer_idx" ]; then
+                        latency_mark answer_commit "$pcm_commit"
+                    fi
                 fi
                 if ! cat "$wd/$n.pcm" >&8; then
                     exec 8>&-
@@ -3552,15 +3584,16 @@ llm_stream_answer_and_play() {
             NR == 1 && filler != "" && $0 == filler {
                 getline up < "/proc/uptime"; close("/proc/uptime"); split(up, a, " ");
                 print a[1] > (wd "/filler_t"); close(wd "/filler_t");
+                if (trace == 1) { print "inline_filler 1" >> (wd "/marks"); close(wd "/marks") }
                 print $0; fflush(); next
             }
             !first_answer { getline up < "/proc/uptime"; close("/proc/uptime"); split(up, a, " "); print a[1] > (wd "/ttft"); close(wd "/ttft");
-                if (trace == 1) { printf "llm_first_token %.0f\n", a[1]*1000 >> (wd "/marks"); close(wd "/marks") }
+                if (trace == 1) { printf "llm_first_token %d\n", a[1]*1000 >> (wd "/marks"); close(wd "/marks") }
                 first_answer=1 }
             { buf = buf $0
               do { p = nb(buf); if (p > 0) { s = substr(buf, 1, p); buf = substr(buf, p + 1); gsub(/^[ \t]+|[ \t]+$/, "", s); if (length(s) > 3) { print s; fflush() } } } while (p > 0) }
             END { getline ue < "/proc/uptime"; close("/proc/uptime"); split(ue, e, " "); print e[1] > (wd "/genend"); close(wd "/genend");
-                  if (trace == 1) { printf "llm_done %.0f\n", e[1]*1000 >> (wd "/marks"); close(wd "/marks") }
+                  if (trace == 1) { printf "llm_done %d\n", e[1]*1000 >> (wd "/marks"); close(wd "/marks") }
                   getline status < (wd "/status"); close(wd "/status");
                   gsub(/^[ \t]+|[ \t]+$/, "", buf); if (status == "complete" && length(buf) > 0) { print buf; fflush() } }
             function nb(t,   x, y, z, m) { x = index(t, "。"); y = index(t, "！"); z = index(t, "？"); m = 0; if (x > 0) m = x; if (y > 0 && (m == 0 || y < m)) m = y; if (z > 0 && (m == 0 || z < m)) m = z; if (m == 0) return 0; return m + 2 }
@@ -4196,6 +4229,7 @@ handle_llm_dialog() {
                 native_followup_mark_multirounds
                 continue
             fi
+            [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_begin followup
             led_feedback_followup_asr_ok
             log "[TURN $turn] 原生追问转 LLM: $FOLLOWUP_TEXT"
             native_followup_mark_multirounds
@@ -4222,6 +4256,9 @@ handle_llm_dialog() {
                 turn=0
             else
                 next_text="$NATIVE_DIALOG_TEXT"
+                if [ "$is_followup" = 1 ] && [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
+                    latency_begin followup
+                fi
                 if [ "$turn" -gt 1 ]; then
                     led_feedback_followup_asr_ok
                     log "[TURN $turn] native followup -> LLM: $next_text"
@@ -4287,6 +4324,7 @@ handle_llm_dialog() {
             turn=1
             continue
         fi
+        [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_begin followup
         led_feedback_followup_asr_ok
         log "[TURN $turn] 发送追问到 LLM: $FOLLOWUP_TEXT"
         send_text_and_play "$session_id" "$FOLLOWUP_TEXT" defer || break

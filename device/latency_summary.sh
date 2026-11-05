@@ -13,13 +13,13 @@ awk -v dir="$dir" '
         for (i=1; i<=NF; i++) {
             split($i,a,"=")
             # 固定白名单：原始日志和任意字段永不回显或用作文件名。
-            if (a[1] !~ /^(wake→route|route→req|ttft|split1|tts1|commit1|wake→commit1|pcm1|plan|search|filler|llm|play)$/) continue
+            if (a[1] !~ /^(wake→route|route→req|ttft|split1|tts1|commit1|wake→commit1|pcm1|wake→filler_commit|wake→answer_commit|filler→answer_gap|plan|search|filler|llm|play)$/) continue
             if (a[2] ~ /^[0-9]+([.][0-9]+)?$/) print a[2] > (dir "/" a[1])
         }
     }
 ' "$file"
 printf 'stage seconds: n P50 P90 max\n'
-for key in 'wake→route' 'route→req' ttft split1 tts1 commit1 'wake→commit1' pcm1 plan search filler llm play; do
+for key in 'wake→route' 'route→req' ttft split1 tts1 commit1 'wake→commit1' pcm1 'wake→filler_commit' 'wake→answer_commit' 'filler→answer_gap' plan search filler llm play; do
     [ -s "$dir/$key" ] || continue
     sort -n "$dir/$key" | awk -v key="$key" '
         { v[NR]=$1 }

@@ -139,25 +139,28 @@ native + 端侧流式在轮末输出一行 `[LATENCY]`，同步追加到 `/tmp/n
 所有时间字段单位为秒，保留三位小数；`-` 表示缺失或时序倒置，不算作零。示例：
 
 ```text
-[LATENCY] wake→route=0.600 route→req=0.100 ttft=1.100 split1=0.350 tts1=0.700 commit1=0.050 wake→commit1=2.900 pcm1=1.800 segs=2 retries=0 web=off plan=- search=- filler=- llm=1.700 play=5.000
+[LATENCY] start=wake wake→route=0.600 route→req=0.100 ttft=1.100 split1=0.350 tts1=0.700 commit1=0.050 wake→commit1=2.900 pcm1=1.800 segs=2 retries=0 web=off plan=- search=- filler=- llm=1.700 play=5.000 wake→filler_commit=- wake→answer_commit=2.900 filler→answer_gap=- filler→answer_gap_kind=-
 ```
 
 | 字段 | 口径 |
 |---|---|
-| `wake→route` | `handle_wakeup` 入口至决定转 LLM；不代表物理唤醒词结束 |
+| `start` | `wake` 为 `handle_wakeup` 入口，`followup` 为确认本次追问转 LLM 的时刻，`-` 为起点缺失。所有 `wake→*` 字段均从本轮起点计算 |
+| `wake→route` | 本轮起点至决定转 LLM。追问在同一时刻确认起点和路由，值为 `0.000` |
 | `route→req` | 路由决定至请求开始，包含原生冻结、暂停及请求准备 |
 | `ttft` | 请求开始至首个非垫话回答片段；包含联网规划和工具耗时 |
-| `split1` | 首个非垫话片段至消费第一播放段；沿用串行消费位置，可能包含管道缓冲等待 |
-| `tts1` | 第一播放段的整次合成调用，包含既有重试和 PCM 解码 |
-| `commit1` | 第一段合成结束至第一次 FIFO 写入前的时间戳；队首原生兜底或垫话时可能缺失/不对应第一段 PCM |
-| `wake→commit1` | 本轮唤醒入口至第一次 PCM FIFO 提交；不是声学首声 |
-| `pcm1` | 第一播放段 PCM 字节数 ÷（采样率 × 2），为单声道 S16LE 音频秒数 |
+| `split1` | 首个非垫话片段至消费正文首段；沿用串行消费位置，可能包含管道缓冲等待 |
+| `tts1` | 正文首段的整次合成调用，包含既有重试和 PCM 解码 |
+| `commit1` | 正文首段合成结束至该段 PCM 写入 FIFO 前；该段走原生兜底时为 `-` |
+| `wake→commit1` | 本轮起点至第一次 PCM FIFO 提交，可能是垫话 |
+| `pcm1` | 正文首段 PCM 字节数 ÷（采样率 × 2），为单声道 S16LE 音频秒数 |
 | `segs` / `retries` | 已结束合成调用的播放段数（含垫话/兜底）；所有句子的额外尝试总次数 |
 | `web` | 只读本轮已有 action：`off/answer/search/fetch`；状态不足为 `unknown`，不证明搜索成功 |
-| `plan` / `search` / `filler` | 若 marks 中有 `web_plan_start/end`、`web_tool_start/end`、`web_filler`，分别输出规划、工具耗时和请求至垫话的时间；本步骤不新增这些搜索打点，通常为 `-` |
+| `plan` / `search` / `filler` | 若 marks 中有 `web_plan_start/end`、`web_tool_start/end`、`web_filler`，分别输出规划、工具耗时和请求至垫话的时间 |
+| `wake→filler_commit` / `wake→answer_commit` | 本轮起点至垫话或正文首段 PCM 写入 FIFO 前 |
+| `filler→answer_gap` / `filler→answer_gap_kind` | 有垫话和正文首段 PCM 提交时，计算两次提交的间隔减去垫话 PCM 时长，最小为零，并标记 `est`。估算不含播放器缓冲及设备输出偏移；缺少任一提交或垫话 PCM 时长时均为 `-` |
 | `llm` / `play` | 请求开始至流结束、消费者结束（含失败退出） |
 
-每轮 marks 为 `name ms`，位于 `/tmp/native_first_stream/marks`（`sentN_pcm_bytes` 和 `sentN_retries` 为字节/次数），下一流式轮覆盖。唤醒阶段先用私有 `/tmp/native_first_marks.XXXXXX`，进入流式后合并并删除临时目录；未转 LLM 和客户端清理时也删除待合并目录。纯追问没有物理唤醒，相关字段为 `-`，不继承上轮数据。计时写入失败不会改变回答的成功/失败判断。
+每轮 marks 为 `name ms`，位于 `/tmp/native_first_stream/marks`（`sentN_pcm_bytes` 和 `sentN_retries` 为字节/次数），下一流式轮覆盖。唤醒阶段先用私有 `/tmp/native_first_marks.XXXXXX`，进入流式后合并并删除临时目录；未转 LLM 和客户端清理时也删除待合并目录。追问用新目录记录 `followup_start`，不继承上轮数据。计时写入失败不会改变回答的成功/失败判断。
 
 在开发机仓库根目录手动上传离线汇总脚本：
 

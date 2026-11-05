@@ -30,6 +30,7 @@ sent1_tts_end 3850
 sent1_pcm_bytes 86400
 sent1_retries 0
 fifo_commit1 3900
+answer_commit 3900
 sent2_tts_end 4200
 sent2_retries 2
 llm_done 3400
@@ -81,11 +82,32 @@ latency_report
 
     def test_early_player_filler_and_answer_commit_fields(self):
         marks = MARKS + ('player_start 1700\nplayer_fifo_open 2000\n'
-                         'filler_commit 2500\nanswer_commit 3900\n')
+                         'filler_commit 2500\nfiller_pcm_bytes 48000\n')
         out, _, _ = self.run_shell('latency_report', marks)
         self.assertIn('player_open=0.300', out)
         self.assertIn('wake→filler_commit=1.500', out)
         self.assertIn('wake→answer_commit=2.900', out)
+        self.assertIn('filler→answer_gap=0.400 filler→answer_gap_kind=est', out)
+
+    def test_inline_filler_uses_body_split_and_commit_in_summary(self):
+        marks = MARKS + '''inline_filler 1
+filler_commit 2200
+filler_pcm_bytes 96000
+sent2_split 3200
+sent2_tts_start 3200
+sent2_pcm_bytes 48000
+'''
+        marks = marks.replace('sent1_split 3150', 'sent1_split 2000')
+        marks = marks.replace('fifo_commit1 3900', 'fifo_commit1 2200').replace('answer_commit 3900', 'answer_commit 4250')
+        out, _, _ = self.run_shell('latency_report', marks)
+        for field in ('split1=0.400', 'tts1=1.000', 'commit1=0.050', 'pcm1=1.000',
+                      'wake→commit1=1.200', 'wake→answer_commit=3.250',
+                      'filler→answer_gap=0.050 filler→answer_gap_kind=est'):
+            self.assertIn(field, out)
+        out, _, _ = self.run_shell('latency_report', marks.replace('96000', '100800'))
+        self.assertIn('filler→answer_gap=0.000 filler→answer_gap_kind=est', out)
+        out, _, _ = self.run_shell('latency_report', marks.replace('filler_pcm_bytes 96000', ''))
+        self.assertIn('filler→answer_gap=- filler→answer_gap_kind=-', out)
 
     def test_missing_reversed_and_duplicate_marks(self):
         out, _, _ = self.run_shell('latency_report', 'llm_req 1000\nllm_first_token 900\nllm_req 500\n')
@@ -205,7 +227,8 @@ latency_mark native_result 700
 latency_mark route_llm 800
 send_text_native session '私有问题 sk-test' now
 printf 'RESULT=%s\n' "$?"
-# 第二轮没有物理唤醒，不得继承第一轮的 wake。
+# 第二轮没有物理唤醒，使用本轮追问判定时刻。
+latency_begin followup
 send_text_native session '第二个私有问题' now
 printf 'RESULT=%s\n' "$?"
 # 消费者提前失败时保留返回码，并在退出处记 play_done。
@@ -235,7 +258,10 @@ printf 'WORKER_RESULT=%s\n' "$?"
         lines = enabled[1].splitlines()
         self.assertEqual(len(lines), 2)
         self.assertIn('wake→route=0.300', lines[0])
-        self.assertIn('wake→route=-', lines[1])
+        self.assertIn('start=wake', lines[0])
+        self.assertIn('start=followup wake→route=0.000', lines[1])
+        self.assertIn('wake→commit1=0.000', lines[1])
+        self.assertIn('wake→answer_commit=0.000', lines[1])
         self.assertNotIn('wake ', enabled[4])
         self.assertIn('fifo_commit1 1000', enabled[4])
         self.assertIn('llm_first_token 1500', enabled[4])
@@ -256,10 +282,14 @@ class LatencySummaryTest(unittest.TestCase):
     def test_nearest_rank_percentiles_and_missing_samples(self):
         with tempfile.TemporaryDirectory() as temp:
             log = Path(temp, 'latency.log')
-            log.write_text('ignored secret\n' + ''.join('[LATENCY] ttft=%.3f tts1=- secret=100\n' % n for n in range(1, 11)))
+            log.write_text('ignored secret\n' +
+                           ''.join('[LATENCY] ttft=%.3f tts1=- secret=100\n' % n for n in range(1, 11)) +
+                           '[LATENCY] filler→answer_gap=0.200 filler→answer_gap_kind=est\n' +
+                           '[LATENCY] filler→answer_gap=-\n')
             run = subprocess.run(['sh', str(ROOT / 'device/latency_summary.sh'), str(log)], capture_output=True, text=True)
             self.assertEqual(run.returncode, 0, run.stderr)
             self.assertIn('ttft n=10 P50=5.000 P90=9.000 max=10.000', run.stdout)
+            self.assertIn('filler→answer_gap n=1 P50=0.200 P90=0.200 max=0.200', run.stdout)
             self.assertNotIn('tts1 n=', run.stdout)
             self.assertNotIn('secret', run.stdout)
 
