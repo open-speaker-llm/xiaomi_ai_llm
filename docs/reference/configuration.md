@@ -135,11 +135,14 @@ IPC 使用 `/tmp/native_first_tts.*` 私有目录。每句独立任务目录先�
 
 | 配置 | 默认值 | 含义 |
 |---|---|---|
-| `LLM_ROUTE_BEEP` | `1` | 物理唤醒确定转端侧句级流式 LLM 且原生播放器冻结后，播放两声提示音。设 `0` 恢复原 PCM 序列 |
+| `LLM_ROUTE_BEEP` | `1` | 物理唤醒确定转端侧句级流式 LLM 且原生失败语音已拦截或播放器已冻结时，播放两声提示音。设 `0` 恢复原 PCM 序列 |
 | `LLM_ROUTE_BEEP_FOLLOWUP` | `0` | 主开关开启时，设 `1` 也在追问转 LLM 后播放 |
-| `LLM_ROUTE_BEEP_FILE` | `builtin` | 内置提示音或自定义裸 PCM 绝对路径。要求 24 kHz、S16_LE、单声道，最长 300 ms |
+| `LLM_ROUTE_BEEP_FILE` | `builtin` | 内置提示音或自定义裸 PCM 绝对路径。要求 24 kHz、S16_LE、单声道，最长 350 ms |
+| `LLM_ROUTE_BEEP_GAIN` | `1.0` | 提示音的额外 PCM 增益，允许 0.5–2.0 |
 
-转 LLM 提示音与垫话、正文共用 PCM FIFO，顺序为提示音、垫话（若有）、正文。确认接管并冻结原生播放器后，提示音播放器与绿灯一起触发，模型请求和合成继续并行。原生成功、未取得原生结果、未确认冻结、非端侧句级流式和非 24 kHz 播放路径均无提示音。内置 PCM 随客户端分发，共 240 ms，峰值为满幅的 32%，沿用垫话播放通道及硬件音量。自定义 PCM 由调用方保证采样率、位深和声道，客户端检查文件大小、样本对齐和常见容器头；文件不可用时记告警并继续回答。开发机可用 `python3 scripts/embed_route_beep.py --pcm /tmp/route-beep.pcm` 导出同一份音频。
+提示音使用专用 FIFO，在唤醒后并行预热原有 Dirac aplay。确认原生失败语音已在分发前拦截时，确认转 LLM 即设置 LLM Master，并在同一处触发提示音和绿灯。其余轮次在原生播放器冻结后触发。主播放器在提示音排空后打开设备，模型请求和合成并行进行。原生成功、没有原生结果、非端侧句级流式或非 24 kHz 播放路径均无提示音。
+
+内置 PCM 长 330 ms，每声 120 ms，频率 2 kHz，首尾 8 ms 淡入淡出，中间间隔 90 ms。素材峰值 −3 dBFS，按默认 `DEVICE_TTS_GAIN=2.0` 的回答 PCM 校准。修改 `DEVICE_TTS_GAIN` 时提示音按比例跟随，双方沿用同一 LLM Master 和 Dirac。端侧句级流式使用 `DEVICE_TTS_GAIN`，`LLM_VOLUME` 用于服务端播放路径。自定义 PCM 由提供方保证采样率、位深和声道，文件不可用时记告警并继续回答。开发机可用 `python3 scripts/embed_route_beep.py --pcm /tmp/route-beep.pcm` 导出音频。
 
 ## M03 延迟观测
 

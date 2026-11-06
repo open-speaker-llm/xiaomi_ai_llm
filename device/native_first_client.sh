@@ -226,6 +226,9 @@ DEVICE_TTS_PCM_RATE="${DEVICE_TTS_PCM_RATE:-24000}"
 LLM_ROUTE_BEEP="${LLM_ROUTE_BEEP:-1}"
 LLM_ROUTE_BEEP_FOLLOWUP="${LLM_ROUTE_BEEP_FOLLOWUP:-0}"
 LLM_ROUTE_BEEP_FILE="${LLM_ROUTE_BEEP_FILE:-builtin}"
+LLM_ROUTE_BEEP_GAIN="${LLM_ROUTE_BEEP_GAIN:-1.0}"
+ROUTE_BEEP_DIR=""
+ROUTE_BEEP_PID=""
 LLM_DIRAC_ENABLED="${LLM_DIRAC_ENABLED:-1}"
 DIRAC_APLAY="${DIRAC_APLAY:-/data/dirac_aplay.sh}"
 DIRAC_PLAYBACK_LOG="${DIRAC_PLAYBACK_LOG:-/tmp/native_first_dirac.log}"
@@ -367,7 +370,7 @@ latency_mark() {
     [ -d "$dir" ] || return 0
     case "$name" in *[!a-z0-9_]*) return 0 ;; esac
     case "$name" in
-        wake|followup_start|native_result|route_llm|freeze_done|beep_start|beep_commit|beep_skipped|llm_req|llm_first_token|fifo_commit1|fifo_commit_slot|fifo_commit_live|llm_done|play_done|web_plan_start|web_plan_end|web_tool_start|web_tool_end|web_filler|player_start|player_fifo_open|filler_commit|filler_pcm_bytes|answer_commit|spec_start|spec_cancel|spec_used) ;;
+        wake|followup_start|native_result|route_llm|freeze_done|led_green|beep_start|beep_commit|beep_skipped|llm_req|llm_first_token|fifo_commit1|fifo_commit_slot|fifo_commit_live|llm_done|play_done|web_plan_start|web_plan_end|web_tool_start|web_tool_end|web_filler|player_start|player_fifo_open|filler_commit|filler_pcm_bytes|answer_commit|spec_start|spec_cancel|spec_used) ;;
         sent[0-9]*_split|sent[0-9]*_first_pcm|sent[0-9]*_tts_start|sent[0-9]*_tts_end|sent[0-9]*_pcm_bytes|sent[0-9]*_retries) ;;
         *) return 0 ;;
     esac
@@ -436,10 +439,10 @@ latency_report() {
             else if ("spec_cancel" in m) spec="cancelled"
             printf " spec=%s tts1_first=%s tts1_to_commit=%s player_prestart_wait=%s player_underrun=%d player_underrun_ms=%s", spec, \
                 delta(first "_tts_start",first "_first_pcm"), delta(first "_tts_start","answer_commit"), \
-                delta("player_fifo_open",("beep_commit" in m) ? "beep_commit" : "fifo_commit1"), underruns, \
+                delta("player_fifo_open","fifo_commit1"), underruns, \
                 underrun_unknown ? "-" : sprintf("%.3f", underrun_us/1000)
             beep=("beep_commit" in m) ? "played" : (("beep_skipped" in m) ? "skipped" : "off")
-            printf " wake→beep=%s beep=%s", delta(origin,"beep_commit"), beep
+            printf " wake→beep=%s beep=%s wake→led_green=%s", delta(origin,"beep_commit"), beep, delta(origin,"led_green")
             if ("player_start" in m) printf " player_open=%s", delta("player_start","player_fifo_open")
             printf " wake→filler_commit=%s wake→answer_commit=%s filler→answer_gap=%s filler→answer_gap_kind=%s", \
                 delta(origin,"filler_commit"), delta(origin,"answer_commit"), gap, gap_kind
@@ -2225,6 +2228,7 @@ end_native_queue_drain() {
 }
 
 finish_llm_playback() {
+    [ -z "${ROUTE_BEEP_DIR:-}" ] || route_beep_end
     begin_native_queue_drain
     resume_native_player 1
     restore_llm_master_volume
@@ -3585,12 +3589,13 @@ llm_aplay() {
     local playback_log="${DIRAC_PLAYBACK_LOG:-/tmp/native_first_dirac.log}" rc
     # One log per player, never store audio or grow a persistent log on /data.
     if [ -x "$helper" ]; then
-        LLM_DIRAC_ENABLED="${LLM_DIRAC_ENABLED:-1}" "$helper" "$@" \
-            2>"$playback_log"
+        set -- "$helper" "$@"
     else
         log '[DIRAC] helper unavailable; using ordinary aplay'
-        aplay "$@" 2>"$playback_log"
+        set -- aplay "$@"
     fi
+    [ -z "${LLM_APLAY_TIMEOUT:-}" ] || set -- timeout -t "$LLM_APLAY_TIMEOUT" "$@"
+    LLM_DIRAC_ENABLED="${LLM_DIRAC_ENABLED:-1}" "$@" 2>"$playback_log"
     rc=$?
     if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ] && [ -n "${STREAM_PLAY_MARK_DIR:-}" ] && latency_active; then
         # Read each completed aplay log before the next player can overwrite it.
@@ -3622,6 +3627,12 @@ route_beep_init() {
         0|1) ;;
         *) LLM_ROUTE_BEEP_FOLLOWUP=0; log '[WARN] LLM_ROUTE_BEEP_FOLLOWUP 无效，使用 0' ;;
     esac
+    if ! LC_ALL=C awk -v gain="$LLM_ROUTE_BEEP_GAIN" 'BEGIN {
+        exit !(gain ~ /^[0-9]+([.][0-9]+)?$/ && gain >= 0.5 && gain <= 2)
+    }'; then
+        LLM_ROUTE_BEEP_GAIN=1.0
+        log '[WARN] LLM_ROUTE_BEEP_GAIN 无效，使用 1.0'
+    fi
     case "$LLM_ROUTE_BEEP_FILE" in
         builtin|/*) ;;
         *) LLM_ROUTE_BEEP_FILE=builtin; log '[WARN] LLM_ROUTE_BEEP_FILE 须为绝对路径，使用内置提示音' ;;
@@ -3633,17 +3644,17 @@ route_beep_init() {
 route_beep_default_pcm() {
     local tone=0 block
     while [ "$tone" -lt 2 ]; do
-        printf '\000\000\000\000\004\000\013\000\031\000\053\000\101\000\125\000\143\000\146\000\131\000\070\000\000\000\262\377\122\377\346\376\167\376\023\376\305\375\232\375\240\375\336\375\131\376\021\377\000\000\030\001\110\002\170\003\216\004\157\005\000\006\052\006\336\005\024\005\314\003\023\002\000\000\264\375\126\373\026\371\042\367\250\365\321\364\274\364\172\365\020\367\156\371\170\374\000\000\314\003\227\007\032\013\014\016\055\020\107\021\063\021\342\017\130\015\264\011\051\005\000\000\220\372\071\365\142\360\151\354\243\351\121\350\235\350\224\352\043\356\034\363\062\371\000\000\022\007\351\015\006\024\363\030\114\034\307\035\070\035\232\032\014\026\321\017\115\010\000\000\171\367\121\357\035\350\146\342\232\336\012\335\337\335\026\341\202\346\315\355\177\366\000\000\253\011\324\022\324\032\030\041\052\045\272\046\243\045\360\041\334\033\315\023\114\012\000\000\236\365\337\353\160\343\353\334\305\330\113\327\233\330\240\334\025\343\211\353\147\365' || return 1
+        printf '\000\000\001\000\005\000\016\000\026\000\023\000\000\000\332\377\252\377\202\377\172\377\242\377\000\000\203\000\006\001\134\001\126\001\337\000\000\000\352\376\353\375\132\375\174\375\152\376\000\000\336\001\177\003\132\004\014\004\201\002\000\000\046\375\276\372\216\371\025\372\143\374\000\000\007\004\130\007\353\010\034\010\351\004\000\000\237\372\103\366\103\364\147\365\240\371\000\000\346\006\152\014\341\016\136\015\377\007\000\000\156\367\246\360\257\355\236\357\075\366\000\000\141\012\204\022\004\026\236\023\246\013\000\000\262\363\036\352\020\346\365\350\133\362\000\000\124\016\152\031\013\036\240\032\271\017\000\000\221\357\353\342\264\335\254\341\041\356\000\000\231\022\330\040\251\046\036\042\021\024\000\000\063\353\124\333\352\324\014\332\270\351\000\000\006\027\205\050\210\057\316\051\201\030\000\000\302\346\244\323\013\314\137\322\113\345\000\000\160\033\046\060\121\070\144\061\340\034\000\000\153\342\047\314\156\303\361\312\005\341\000\000\252\037\156\067\256\100\227\070\001\041\000\000\130\336\045\305\146\273\013\304\022\335\000\000\214\043\030\076\114\110\040\077\275\044\000\000\261\332\344\276\104\264\361\275\230\331\000\000\357\046\340\103\341\116\275\104\355\047\000\000\232\327\242\271\115\256\336\270\270\326\000\000\261\051\217\110\053\124\070\111\164\052\000\000\062\325\222\265\274\251\006\265\220\324\000\000\271\053\366\113\367\127\144\114\071\054\000\000\220\323\335\262\276\246\215\262\064\323\000\000\361\054\363\115\040\132\043\116\051\055\000\000\305\322\234\261\161\245\214\261\262\322\000\000\117\055\171\116\235\132\171\116\117\055\000\000\261\322\207\261\143\245\207\261\261\322\000\000\114\055\145\116\150\132\047\116\005\055\000\000\102\323\315\262\077\247\203\263\023\324\000\000\143\053\241\112\211\125\174\111\022\052\000\000\264\326\060\271\030\257\265\272\165\330\000\000\223\046\360\101\032\113\037\100\172\044\000\000\244\334\277\303\226\273\305\305\372\336\000\000\321\037\014\066\056\075\352\063\132\035\000\000\343\343\141\320\077\312\203\322\131\346\000\000\162\030\116\051\205\056\110\047\033\026\000\000\003\353\226\334\053\330\147\336\034\355\000\000\354\021\076\036\007\042\271\034\054\020\000\000\232\360\363\345\232\342\030\347\353\361\000\000\213\015\014\027\056\032\126\026\271\014\000\000\215\363\236\352\171\347\334\352\324\363' || return 1
         block=0
-        while [ "$block" -lt 7 ]; do
-            printf '\000\000\232\012\173\024\366\034\171\043\220\047\365\050\220\047\171\043\366\034\173\024\232\012\000\000\146\365\205\353\012\343\207\334\160\330\013\327\160\330\207\334\012\343\205\353\146\365\000\000\232\012\173\024\366\034\171\043\220\047\365\050\220\047\171\043\366\034\173\024\232\012\000\000\146\365\205\353\012\343\207\334\160\330\013\327\160\330\207\334\012\343\205\353\146\365\000\000\232\012\173\024\366\034\171\043\220\047\365\050\220\047\171\043\366\034\173\024\232\012\000\000\146\365\205\353\012\343\207\334\160\330\013\327\160\330\207\334\012\343\205\353\146\365\000\000\232\012\173\024\366\034\171\043\220\047\365\050\220\047\171\043\366\034\173\024\232\012\000\000\146\365\205\353\012\343\207\334\160\330\013\327\160\330\207\334\012\343\205\353\146\365\000\000\232\012\173\024\366\034\171\043\220\047\365\050\220\047\171\043\366\034\173\024\232\012\000\000\146\365\205\353\012\343\207\334\160\330\013\327\160\330\207\334\012\343\205\353\146\365\000\000\232\012\173\024\366\034\171\043\220\047\365\050\220\047\171\043\366\034\173\024\232\012\000\000\146\365\205\353\012\343\207\334\160\330\013\327\160\330\207\334\012\343\205\353\146\365\000\000\232\012\173\024\366\034\171\043\220\047\365\050\220\047\171\043\366\034\173\024\232\012\000\000\146\365\205\353\012\343\207\334\160\330\013\327\160\330\207\334\012\343\205\353\146\365\000\000\232\012\173\024\366\034\171\043\220\047\365\050\220\047\171\043\366\034\173\024\232\012\000\000\146\365\205\353\012\343\207\334\160\330\013\327\160\330\207\334\012\343\205\353\146\365\000\000\232\012\173\024\366\034\171\043\220\047\365\050\220\047\171\043\366\034\173\024\232\012\000\000\146\365\205\353\012\343\207\334\160\330\013\327\160\330\207\334\012\343\205\353\146\365\000\000\232\012\173\024\366\034\171\043\220\047\365\050\220\047\171\043\366\034\173\024\232\012\000\000\146\365\205\353\012\343\207\334\160\330\013\327\160\330\207\334\012\343\205\353\146\365' || return 1
+        while [ "$block" -lt 10 ]; do
+            printf '\000\000\051\014\020\025\122\030\020\025\051\014\000\000\327\363\360\352\256\347\360\352\327\363\000\000\051\014\020\025\122\030\020\025\051\014\000\000\327\363\360\352\256\347\360\352\327\363\000\000\051\014\020\025\122\030\020\025\051\014\000\000\327\363\360\352\256\347\360\352\327\363\000\000\051\014\020\025\122\030\020\025\051\014\000\000\327\363\360\352\256\347\360\352\327\363\000\000\051\014\020\025\122\030\020\025\051\014\000\000\327\363\360\352\256\347\360\352\327\363\000\000\051\014\020\025\122\030\020\025\051\014\000\000\327\363\360\352\256\347\360\352\327\363\000\000\051\014\020\025\122\030\020\025\051\014\000\000\327\363\360\352\256\347\360\352\327\363\000\000\051\014\020\025\122\030\020\025\051\014\000\000\327\363\360\352\256\347\360\352\327\363\000\000\051\014\020\025\122\030\020\025\051\014\000\000\327\363\360\352\256\347\360\352\327\363\000\000\051\014\020\025\122\030\020\025\051\014\000\000\327\363\360\352\256\347\360\352\327\363\000\000\051\014\020\025\122\030\020\025\051\014\000\000\327\363\360\352\256\347\360\352\327\363\000\000\051\014\020\025\122\030\020\025\051\014\000\000\327\363\360\352\256\347\360\352\327\363\000\000\051\014\020\025\122\030\020\025\051\014\000\000\327\363\360\352\256\347\360\352\327\363\000\000\051\014\020\025\122\030\020\025\051\014\000\000\327\363\360\352\256\347\360\352\327\363\000\000\051\014\020\025\122\030\020\025\051\014\000\000\327\363\360\352\256\347\360\352\327\363\000\000\051\014\020\025\122\030\020\025\051\014\000\000\327\363\360\352\256\347\360\352\327\363\000\000\051\014\020\025\122\030\020\025\051\014\000\000\327\363\360\352\256\347\360\352\327\363\000\000\051\014\020\025\122\030\020\025\051\014\000\000\327\363\360\352\256\347\360\352\327\363\000\000\051\014\020\025\122\030\020\025\051\014\000\000\327\363\360\352\256\347\360\352\327\363\000\000\051\014\020\025\122\030\020\025\051\014\000\000\327\363\360\352\256\347\360\352\327\363' || return 1
             block=$((block + 1))
         done
-        printf '\000\000\230\012\163\024\342\034\122\043\122\047\236\050\041\047\373\042\170\034\017\024\127\012\000\000\300\365\115\354\112\344\102\336\230\332\206\331\026\333\044\337\140\345\122\355\151\366\000\000\153\011\007\022\076\031\232\036\305\041\224\042\005\041\101\035\230\027\171\020\152\010\000\000\320\367\151\360\107\352\315\345\075\343\264\342\054\344\172\347\124\354\130\362\020\371\000\000\254\006\241\014\176\021\370\024\340\026\047\027\331\025\041\023\075\017\202\012\115\005\000\000\372\372\220\366\010\363\224\360\120\357\101\357\125\360\150\362\104\365\253\370\126\374\000\000\147\003\122\006\227\010\032\012\315\012\265\012\344\011\170\010\230\006\161\004\057\002\000\000\011\376\151\374\065\373\171\372\065\372\140\372\353\372\300\373\306\374\342\375\375\376\000\000\333\000\202\001\361\001\046\002\050\002\377\001\266\001\132\001\366\000\226\000\102\000\000\000\322\377\270\377\257\377\264\377\302\377\323\377\344\377\362\377\373\377\377\377\000\000' || return 1
+        printf '\000\000\050\014\014\025\113\030\007\025\041\014\000\000\344\363\016\353\330\347\034\353\365\363\000\000\000\014\277\024\350\027\250\024\346\013\000\000\052\364\216\353\166\350\255\353\116\364\000\000\236\013\015\024\021\027\346\023\161\013\000\000\250\364\160\354\204\351\236\354\335\364\000\000\006\013\375\022\316\025\307\022\310\012\000\000\131\365\253\355\367\352\347\355\237\365\000\000\074\012\232\021\055\024\130\021\360\011\000\000\070\366\062\357\302\354\172\357\213\366\000\000\112\011\362\017\075\022\245\017\362\010\000\000\073\367\370\360\322\356\110\361\230\367\000\000\071\010\024\016\021\020\300\015\330\007\000\000\131\370\351\362\024\361\077\363\274\370\000\000\022\007\023\014\277\015\274\013\255\006\000\000\206\371\364\364\161\363\114\365\354\371\000\000\342\005\004\012\135\013\254\011\174\005\000\000\267\372\004\367\322\365\133\367\033\373\000\000\263\004\371\007\003\011\244\007\121\004\000\000\340\373\004\371\040\370\127\371\077\374\000\000\222\003\007\006\310\006\270\005\067\003\000\000\366\374\342\372\103\372\055\373\114\375\000\000\212\002\102\004\302\004\374\003\071\002\000\000\356\375\213\374\047\374\313\374\070\376\000\000\244\001\272\002\004\003\200\002\141\001\000\000\276\376\355\375\271\375\041\376\372\376\000\000\353\000\200\001\241\001\123\001\270\000\000\000\137\377\375\376\353\376\042\377\212\377\000\000\144\000\236\000\245\000\201\000\103\000\000\000\313\377\257\377\257\377\303\377\342\377\000\000\025\000\035\000\033\000\022\000\007\000\000\000\375\377\375\377\376\377\000\000\000\000' || return 1
         tone=$((tone + 1))
         [ "$tone" -lt 2 ] || break
         block=0
-        while [ "$block" -lt 8 ]; do
+        while [ "$block" -lt 9 ]; do
             printf '\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000' || return 1
             block=$((block + 1))
         done
@@ -3659,9 +3670,9 @@ route_beep_prepare() {
         return $?
     fi
     [ -f "$source" ] && [ -r "$source" ] || return 1
-    head -c 14401 "$source" > "$out" || return 1
+    head -c 16801 "$source" > "$out" || return 1
     bytes=$(wc -c < "$out") || return 1
-    [ "$bytes" -ge 2 ] && [ "$bytes" -le 14400 ] && [ "$((bytes % 2))" = 0 ] || return 1
+    [ "$bytes" -ge 2 ] && [ "$bytes" -le 16800 ] && [ "$((bytes % 2))" = 0 ] || return 1
     if command -v hexdump >/dev/null 2>&1; then
         magic=$(hexdump -n 4 -v -e '1/1 "%02x"' "$out") || return 1
     else
@@ -3674,50 +3685,168 @@ route_beep_prepare() {
     return 0
 }
 
+route_beep_scale() {
+    local pcm="$1" gain chunk
+    # 内置音按已通过默认 DEVICE_TTS_GAIN=2.0 的 TTS PCM 校准。
+    gain=$(LC_ALL=C awk -v cue="${LLM_ROUTE_BEEP_GAIN:-1.0}" -v tts="${DEVICE_TTS_GAIN:-2.0}" 'BEGIN {
+        if (tts !~ /^[0-9]+([.][0-9]+)?$/ || tts <= 0) tts=2
+        printf "%.6f", cue * tts / 2
+    }')
+    [ "$gain" != 1.000000 ] || return 0
+    (
+        if command -v hexdump >/dev/null 2>&1; then
+            hexdump -v -e '1/1 "%u\n"' "$pcm"
+        else
+            od -An -v -t u1 "$pcm"
+        fi
+    ) | LC_ALL=C awk -v gain="$gain" '
+        {
+            for (i=1; i<=NF; i++) {
+                if (!have_low) { low=$i; have_low=1; continue }
+                have_low=0
+                v=low+256*$i
+                if (v >= 32768) v-=65536
+                v=int(v*gain)
+                if (v > 32767) v=32767
+                if (v < -32768) v=-32768
+                if (v < 0) v+=65536
+                printf "\\0%03o\\0%03o", v%256, int(v/256)
+                if (++samples%64 == 0) printf "\n"
+            }
+        }
+        END { if (samples%64) printf "\n" }
+    ' | while IFS= read -r chunk; do
+        printf '%b' "$chunk"
+    done > "$pcm.scaled"
+    [ "$(wc -c < "$pcm.scaled")" = "$(wc -c < "$pcm")" ] && mv "$pcm.scaled" "$pcm"
+}
+
+route_beep_worker() {
+    local dir="$1" pcm="$1/cue.pcm" fifo="$1/cue.fifo" ap writer polls=0 rc=1 started
+    trap ": > '$dir/done'" EXIT
+    if ! route_beep_prepare "$pcm" 2>/dev/null || ! route_beep_scale "$pcm" || ! mkfifo "$fifo"; then
+        log '[WARN] 转 LLM 提示音 PCM 不可用，已跳过'
+        return 1
+    fi
+    # 打开读端时用双向 fd 作锚点。aplay 只继承只读 stdin，取消时关闭
+    # 写端即可收到 EOF，即使 Dirac 仍在启动也不会卡在 open。
+    exec 7<>"$fifo"
+    exec 6<"$fifo"
+    (
+        # ash 会为函数调用的临时重定向保留原 fd，必须在子进程中永久关闭写端。
+        exec 0<&6 6<&- 7>&-
+        STREAM_PLAY_MARK_DIR="" DIRAC_PLAYBACK_LOG="$dir/play.log" LLM_APLAY_TIMEOUT=30 \
+            llm_aplay -t raw -r "$DEVICE_TTS_PCM_RATE" -f S16_LE -c 1
+    ) >/dev/null &
+    ap=$!
+    exec 6<&-
+    while [ ! -f "$dir/trigger" ] && [ ! -f "$dir/cancel" ] && kill -0 "$ap" 2>/dev/null; do
+        sleep 0.02
+    done
+    if [ -f "$dir/trigger" ] && [ ! -f "$dir/cancel" ]; then
+        started=$(monotonic_ms)
+        (exec cat "$pcm" >&7) &
+        writer=$!
+        exec 7>&-
+        # 在父进程计时，避免 timeout 的看门进程继承 FIFO 写端而延迟 EOF。
+        while [ "$polls" -lt 100 ] && kill -0 "$writer" 2>/dev/null && kill -0 "$ap" 2>/dev/null; do
+            polls=$((polls + 1))
+            sleep 0.02
+        done
+        if kill -0 "$writer" 2>/dev/null; then kill "$writer" 2>/dev/null || :; fi
+        wait "$writer" && rc=0
+    else
+        exec 7>&-
+    fi
+    if wait "$ap" && [ "$rc" = 0 ]; then
+        if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ] && [ -n "$started" ]; then
+            printf 'beep_commit %s\n' "$started" > "$dir/marks"
+        fi
+    fi
+}
+
+route_beep_allowed() {
+    [ "${LLM_ROUTE_BEEP:-0}" = 1 ] && [ "$LLM_PIPELINE" = native ] &&
+        [ "$TTS_ENGINE" = device ] && [ "$DEVICE_TTS_STREAM" = 1 ] &&
+        [ "$DEVICE_TTS_PCM_RATE" = 24000 ] && [ -n "$LLM_API_KEY" ] &&
+        { [ "${route_beep_turn:-}" = wake ] ||
+          { [ "${route_beep_turn:-}" = followup ] && [ "${LLM_ROUTE_BEEP_FOLLOWUP:-0}" = 1 ]; }; }
+}
+
+route_beep_begin() {
+    if [ -n "${ROUTE_BEEP_DIR:-}" ]; then
+        [ -f "$ROUTE_BEEP_DIR/cancel" ] || return 0
+        route_beep_end
+    fi
+    ROUTE_BEEP_DIR=$(mktemp -d /tmp/native_first_beep.XXXXXX) || return 1
+    route_beep_worker "$ROUTE_BEEP_DIR" &
+    ROUTE_BEEP_PID=$!
+}
+
+route_beep_fire() {
+    route_beep_allowed && route_beep_begin || return 1
+    [ ! -f "$ROUTE_BEEP_DIR/trigger" ] || return 0
+    if [ "${1:-}" != master-ready ] && ! apply_llm_master_volume; then
+        log '[WARN] LLM Master 设置失败，跳过转 LLM 提示音'
+        [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark beep_skipped
+        return 1
+    fi
+    if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
+        latency_mark beep_start
+        [ "$route_beep_turn" != wake ] || latency_mark led_green
+    fi
+    : > "$ROUTE_BEEP_DIR/trigger"
+    [ "$route_beep_turn" != wake ] || led_feedback_llm_accept
+    return 0
+}
+
+route_beep_wait() {
+    local dir="${ROUTE_BEEP_DIR:-}"
+    [ -n "$dir" ] || return 0
+    [ -f "$dir/trigger" ] || : > "$dir/cancel"
+    while [ ! -f "$dir/done" ] && kill -0 "$ROUTE_BEEP_PID" 2>/dev/null; do sleep 0.02; done
+}
+
+route_beep_end() {
+    local dir="${ROUTE_BEEP_DIR:-}" marks="${LATENCY_MARK_DIR:-}"
+    [ -n "$dir" ] || return 0
+    [ -f "$dir/trigger" ] || : > "$dir/cancel"
+    wait "$ROUTE_BEEP_PID" 2>/dev/null || :
+    if [ -f "$dir/trigger" ] && [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
+        if [ -s "$dir/marks" ] && [ -d "$marks" ]; then
+            cat "$dir/marks" >> "$marks/marks"
+        else
+            latency_mark beep_skipped
+        fi
+    fi
+    rm -rf "$dir"
+    ROUTE_BEEP_DIR=""
+    ROUTE_BEEP_PID=""
+}
+
 # PCM 常驻 FIFO 连播；遇到原生补播任务先排空并关闭 aplay，补播结束后续接 PCM。
 stream_play_worker() {
     local wd="$1"
     local fifo="$wd/play.fifo" STREAM_PLAY_MARK_DIR="$wd"
     local idx=1 n ap="" sentence rc answer_idx=1 pcm_commit
-    local threshold=0 sent=0 size bytes aborted=0 beep_pcm="" beep_ms
+    local threshold=0 sent=0 size bytes aborted=0
     if [ "${DEVICE_TTS_STREAM_COMMIT:-0}" = 1 ] && [ "$DEVICE_TTS_PCM_RATE" = 24000 ]; then
         threshold=$((48 * ${DEVICE_TTS_STREAM_MIN_MS:-300}))
     fi
     [ "${LLM_WEB_FILLER_CACHE:-0}" != 1 ] && [ ! -f "$wd/early_filler" ] || idx=0
     rm -f "$fifo"
     mkfifo "$fifo" 2>/dev/null || mknod "$fifo" p 2>/dev/null
-    if [ "${route_beep_ready:-0}" = 1 ]; then
-        if route_beep_prepare "$wd/route_beep.pcm" 2>/dev/null; then
-            beep_pcm="$wd/route_beep.pcm"
-            [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark beep_start
-        else
-            log '[WARN] 转 LLM 提示音 PCM 缺失或格式不符，已跳过'
-            [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark beep_skipped
-        fi
-    fi
-    if [ -n "$beep_pcm" ] || [ -f "$wd/early_player" ]; then
+    if [ -f "$wd/early_player" ]; then
         [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark player_start
-        if [ -n "$beep_pcm" ]; then
-            llm_aplay -t raw -r "$DEVICE_TTS_PCM_RATE" -f S16_LE -c 1 "$fifo" >/dev/null &
-        else
-            llm_aplay -r "$DEVICE_TTS_PCM_RATE" -f S16_LE -c 1 "$fifo" >/dev/null &
-        fi
+        (
+            [ -z "${ROUTE_BEEP_DIR:-}" ] || route_beep_wait
+            llm_aplay -r "$DEVICE_TTS_PCM_RATE" -f S16_LE -c 1 "$fifo"
+        ) >/dev/null &
         ap=$!
         exec 8>"$fifo"
         [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark player_fifo_open
-    fi
-    # 独立前置槽。与垫话/正文共用 FIFO，按字节顺序播放，不等待物理播放完成。
-    if [ -n "$beep_pcm" ]; then
-        if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then beep_ms=$(monotonic_ms); fi
-        if cat "$beep_pcm" >&8; then
-            [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark beep_commit "${beep_ms:-}"
-        else
-            exec 8>&-
-            wait "$ap" 2>/dev/null
-            ap=""
-            log '[WARN] 转 LLM 提示音提交失败，继续本轮回答'
-            [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark beep_skipped
-        fi
+    else
+        [ -z "${ROUTE_BEEP_DIR:-}" ] || route_beep_wait
     fi
     while :; do
         [ ! -f "$wd/early_filler" ] || tts_early_filler_publish "$wd"
@@ -3909,11 +4038,9 @@ llm_stream_answer_and_play() {
     : > "$wd/segs"
     : > "$wd/native_segs"
 
-    if [ "${route_beep_ready:-0}" = 1 ]; then
+    if [ -n "${ROUTE_BEEP_DIR:-}" ] && [ -f "$ROUTE_BEEP_DIR/trigger" ]; then
         stream_play_worker "$wd" &
         play_pid=$!
-        # 确认接管后并行启动提示音和绿灯，灯效不阻塞播放器启动。
-        [ "${route_beep_turn:-}" != wake ] || led_feedback_llm_playing
     fi
     messages=$(llm_build_messages "$sid" "$user") || {
         if [ -n "$play_pid" ]; then
@@ -4037,6 +4164,7 @@ llm_stream_answer_and_play() {
     : > "$wd/done"
     wait "$play_pid"
     play_rc=$?
+    [ -z "${ROUTE_BEEP_DIR:-}" ] || route_beep_end
     if [ "$early" = 1 ] && [ ! -f "$wd/no_history" ]; then
         first_pcm="$wd/0001.pcm"
         if [ -s "$wd/filler_t" ] && [ ! -f "$wd/web_filler_cached" ] && [ ! -f "$wd/web_filler_direct" ]; then
@@ -4111,7 +4239,7 @@ send_text_native() {
     local session_id="$1"
     local text="$2"
     local cleanup_mode="${3:-now}"
-    local t0 t2 first_sound web_raw web_transport route_beep_ready=0 NATIVE_PLAYER_STOP_OK=0
+    local t0 t2 first_sound web_raw web_transport NATIVE_PLAYER_STOP_OK=0 beep_master_ready=0
 
     if [ -z "$text" ]; then
         log "[LLM-NATIVE] 无 query，跳过"
@@ -4128,7 +4256,9 @@ send_text_native() {
     record_llm_query "$text"
     [ "${DEVICE_TTS_EARLY_START:-0}" != 1 ] || tts_early_filler_start "$session_id"
     set_busy "llm_playing"
-    apply_llm_master_volume
+    if [ -z "${ROUTE_BEEP_DIR:-}" ] || [ ! -f "$ROUTE_BEEP_DIR/trigger" ]; then
+        apply_llm_master_volume && beep_master_ready=1
+    fi
     freeze_native_player
     if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ] && latency_active; then
         if [ ! -d "${LATENCY_MARK_DIR:-}" ]; then
@@ -4143,23 +4273,24 @@ send_text_native() {
 
     # 句级流式：仅端侧 EdgeTTS 且开关打开时启用（边生成边按句播，降首声延迟）。
     if [ "$TTS_ENGINE" = "device" ] && [ "$DEVICE_TTS_STREAM" = "1" ]; then
-        if [ "${LLM_ROUTE_BEEP:-1}" = 1 ] &&
-            { [ "${route_beep_turn:-}" = wake ] ||
-              { [ "${route_beep_turn:-}" = followup ] && [ "${LLM_ROUTE_BEEP_FOLLOWUP:-0}" = 1 ]; }; }; then
-            if [ "$NATIVE_PLAYER_STOP_OK" = 1 ]; then
-                route_beep_ready=1
-            else
-                log '[WARN] 原生播放器未确认冻结，跳过转 LLM 提示音'
-                [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark beep_skipped
+        if [ "${LLM_ROUTE_BEEP:-0}" = 1 ] && route_beep_allowed; then
+            if [ -z "${ROUTE_BEEP_DIR:-}" ] || [ ! -f "$ROUTE_BEEP_DIR/trigger" ]; then
+                if [ "$NATIVE_PLAYER_STOP_OK" = 1 ] && [ "$beep_master_ready" = 1 ]; then
+                    route_beep_fire master-ready || :
+                else
+                    log '[WARN] 原生播放器未确认冻结或 LLM Master 设置失败，跳过转 LLM 提示音'
+                    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark beep_skipped
+                fi
             fi
         fi
-        if [ "$route_beep_ready" != 1 ] || [ "${route_beep_turn:-}" != wake ]; then
+        if [ -z "${ROUTE_BEEP_DIR:-}" ] || [ ! -f "$ROUTE_BEEP_DIR/trigger" ] || [ "${route_beep_turn:-}" != wake ]; then
             led_feedback_llm_playing
         fi
         if [ "$cleanup_mode" = "defer" ]; then
             start_followup_vad_prearm
         fi
         if ! llm_stream_answer_and_play "$session_id" "$text" "$t0"; then
+            [ -z "${ROUTE_BEEP_DIR:-}" ] || route_beep_end
             if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
                 latency_report
                 latency_discard
@@ -4800,6 +4931,7 @@ handle_wakeup() {
         latency_mark wake
     fi
     local wake_ts="$1" route_beep_turn=wake
+    if [ "${LLM_ROUTE_BEEP:-0}" = 1 ] && route_beep_allowed; then route_beep_begin || :; fi
     new_llm_session_id
     local session_id="$NEW_LLM_SESSION_ID"
     if [ "${DEVICE_TTS_EARLY_START:-0}" = 1 ] && [ "${DEVICE_TTS_PERSISTENT:-0}" = 1 ]; then
@@ -4852,6 +4984,10 @@ handle_wakeup() {
             if is_unsupported_result; then
                 log "[NATIVE] unsupported，停止原生播报并转 LLM"
                 [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark route_llm
+                if [ "${LLM_ROUTE_BEEP:-0}" = 1 ] && [ "$RESULT_SOURCE" = aivs_lab_early_failure ] &&
+                    [ "$RESULT_SPEAK" = '[failure Speak suppressed before dispatch]' ]; then
+                    route_beep_fire || :
+                fi
                 [ "${DEVICE_TTS_EARLY_START:-0}" != 1 ] || tts_early_filler_start "$session_id"
                 set_state "NATIVE_FALLBACK"
                 [ "$FOLLOWUP_ENABLED" = "1" ] && [ "$FOLLOWUP_MODE" = "native_multirounds" ] && native_followup_mark_multirounds
@@ -4871,6 +5007,10 @@ handle_wakeup() {
             else
                 log "[NATIVE] non-success-domain，立即 fallback LLM"
                 [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark route_llm
+                if [ "${LLM_ROUTE_BEEP:-0}" = 1 ] && [ "$RESULT_SOURCE" = aivs_lab_early_failure ] &&
+                    [ "$RESULT_SPEAK" = '[failure Speak suppressed before dispatch]' ]; then
+                    route_beep_fire || :
+                fi
                 [ "${DEVICE_TTS_EARLY_START:-0}" != 1 ] || tts_early_filler_start "$session_id"
                 set_state "NATIVE_FALLBACK"
                 [ "$FOLLOWUP_ENABLED" = "1" ] && [ "$FOLLOWUP_MODE" = "native_multirounds" ] && native_followup_mark_multirounds
@@ -4912,6 +5052,7 @@ handle_wakeup() {
 }
 
 cleanup() {
+    [ -z "${ROUTE_BEEP_DIR:-}" ] || route_beep_end
     [ -z "${TTS_PERSISTENT_PID:-}" ] || tts_persistent_stop
     [ -z "${TTS_PREWARM_PID:-}" ] || tts_prewarm_stop
     [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_discard
@@ -5060,6 +5201,7 @@ while true; do
         continue
     fi
     handle_wakeup "$ts"
+    [ -z "${ROUTE_BEEP_DIR:-}" ] || route_beep_end
     [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_discard
     rm -f "$AIVS_GUARD_ARMED"
     log "[IDLE] 等待原生唤醒词：小爱同学"
