@@ -24,6 +24,8 @@
 
 脚本优先使用项目 `.venv/bin/python`，也可通过 `PYTHON=/path/to/python sh scripts/run_tests.sh` 指定环境。先检查纯协议源码与客户端内嵌产物一致，再运行回归与 Shell 语法检查。部分测试调用本机 C 编译器；Linux CPU 限额信号测试在 macOS 跳过，必须单列，不能记作通过。
 
+提交前运行这套检查。`tests/test_route_beep.py` 回放三条 DeepSeek 新闻问法的原生指令，并检查已开口的原生否定回复、原生域和等待期间的新唤醒。
+
 | 领域 | 主要覆盖 |
 |---|---|
 | 服务端 | ASR 质量门控、LLM/TTS 流式分句、旧追问识别服务；WAV 数据块解析、TTS 首包与中途失败；调试上传下载的目录边界；full/tts-only 模式、禁用接口、依赖隔离与配置优先级 |

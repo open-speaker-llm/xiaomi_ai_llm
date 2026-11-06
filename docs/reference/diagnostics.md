@@ -168,6 +168,8 @@ native + 端侧流式在轮末输出一行 `[LATENCY]`，同步追加到 `/tmp/n
 | `filler→answer_gap` / `filler→answer_gap_kind` | 有垫话和正文首段 PCM 提交时，计算两次提交的间隔减去垫话 PCM 时长，最小为零，并标记 `est`。估算不含播放器缓冲及设备输出偏移；缺少任一提交或垫话 PCM 时长时均为 `-` |
 | `llm` / `play` | 请求开始至流结束、消费者结束（含失败退出） |
 
+对已下发的原生播报，`[HANDOFF] forced reason=timeout` 表示明确调用 DeepSeek 的轮次在 4 秒交接期限后发起停止并接管。`[HANDOFF] cancelled reason=new_wake` 表示旧交接被新的物理唤醒取消。
+
 每轮 marks 为 `name ms`，位于 `/tmp/native_first_stream/marks`（另有段号、字节数、次数及欠载微秒等数值），下一流式轮覆盖。唤醒阶段先用私有 `/tmp/native_first_marks.XXXXXX`，进入流式后合并并删除临时目录；未转 LLM 和客户端清理时也删除待合并目录。追问用新目录记录 `followup_start`，不继承上轮数据。计时写入失败不会改变回答的成功/失败判断。
 
 在开发机仓库根目录手动上传离线汇总脚本：

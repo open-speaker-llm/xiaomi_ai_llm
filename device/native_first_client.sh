@@ -5465,43 +5465,66 @@ handle_llm_dialog() {
 }
 
 native_route_wait_quiet() {
-    local status now start limit start_limit seen=0 idle=0
+    local status now start remaining wake_pid wake_ms seen=0 idle=0
     # A dispatched Speak can still be queued when the first status is idle.
-    # Confirm an observed playback has ended before transferring audio ownership.
+    # Bound this handoff separately from native TTS playback (up to 120 s).
     start=$(monotonic_ms)
-    [ -n "$start" ] || return 1
-    start_limit=$((start + 1000 * TTS_NATIVE_STATUS_START_TIMEOUT_SECONDS))
-    limit=$((start + 1000 * TTS_NATIVE_STATUS_MAX_SECONDS))
+    [ -n "$start" ] || return 2
     while :; do
-        status=$(native_tts_player_status)
         now=$(monotonic_ms)
-        [ -n "$now" ] || return 1
-        case "$status" in
-            1) seen=1; idle=0 ;;
-            0) if [ "$seen" = 1 ]; then
-                   idle=$((idle + 1))
-                   [ "$idle" -lt "$TTS_NATIVE_STATUS_IDLE_HITS" ] || return 0
-               fi ;;
-            *) idle=0 ;;
-        esac
-        if [ "$now" -ge "$limit" ] || { [ "$seen" = 0 ] && [ "$now" -ge "$start_limit" ]; }; then
-            return 1
+        [ -n "$now" ] || return 2
+        if IFS=' ' read -r wake_pid wake_ms 2>/dev/null < /tmp/native_followup/physical-wake; then
+            case "$wake_pid:$wake_ms" in
+                :*|*:|*[!0-9:]*) ;;
+                *) [ "$wake_ms" -le "$start" ] || return 3 ;;
+            esac
         fi
-        sleep "$TTS_NATIVE_STATUS_POLL_SECONDS"
+        remaining=$((start + 4000 - now))
+        [ "$remaining" -gt 0 ] || return 1
+        [ "$idle" -lt "$TTS_NATIVE_STATUS_IDLE_HITS" ] || return 0
+        # A ubus query can take up to one second. Do not start one that
+        # could run past the handoff deadline.
+        if [ "$remaining" -ge 1000 ]; then
+            status=$(native_tts_player_status)
+            now=$(monotonic_ms)
+            [ -n "$now" ] || return 2
+            remaining=$((start + 4000 - now))
+            [ "$remaining" -gt 0 ] || continue
+            case "$status" in
+                1) seen=1; idle=0 ;;
+                0) if [ "$seen" = 1 ]; then
+                       idle=$((idle + 1))
+                       [ "$idle" -lt "$TTS_NATIVE_STATUS_IDLE_HITS" ] || continue
+                   fi ;;
+                *) idle=0 ;;
+            esac
+        fi
+        [ "$remaining" -le 200 ] || remaining=200
+        sleep "$(printf '0.%03d' "$remaining")"
     done
 }
 
 native_route_beep_gate() {
+    local rc
     case "$RESULT_SOURCE:$RESULT_SPEAK" in
         'aivs_lab_early_failure:[failure Speak suppressed before dispatch]')
             route_beep_fire || :
             ;;
         aivs_lab_instruction:?*)
-            if ! native_route_wait_quiet; then
-                log '[ROUTE] native output completion unconfirmed; keep native dialog'
-                return 1
+            native_route_wait_quiet
+            rc=$?
+            case "$rc" in
+                0) route_beep_quiet=1; return 0 ;;
+                3) log '[HANDOFF] cancelled reason=new_wake'; return 1 ;;
+            esac
+            if [ "$rc" = 1 ] && ! is_native_success_domain &&
+                printf '%s\n' "$RESULT_QUERY" | grep -Eq "$DIRECT_LLM_QUERY_PATTERNS"; then
+                log '[HANDOFF] forced reason=timeout'
+                if ! is_native_player_frozen; then stop_native_playback 1; fi
+                return 0
             fi
-            route_beep_quiet=1
+            log '[ROUTE] native output completion unconfirmed; keep native dialog'
+            return 1
             ;;
         *)
             [ "$(native_tts_player_status)" != 0 ] || route_beep_quiet=1
@@ -5578,7 +5601,7 @@ handle_wakeup() {
                 return 0
             fi
 
-            if is_unsupported_result; then
+            if is_unsupported_result && ! is_native_success_domain; then
                 log "[NATIVE] unsupported，停止原生播报并转 LLM"
                 [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark route_llm
                 if [ "${LLM_ROUTE_BEEP:-0}" = 1 ] && route_beep_allowed && ! native_route_beep_gate; then
