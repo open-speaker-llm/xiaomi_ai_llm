@@ -140,7 +140,7 @@ IPC 使用 `/tmp/native_first_tts.*` 私有目录。每句独立任务目录先�
 | `LLM_ROUTE_BEEP_FILE` | `dongdong_523.pcm` | 内置提示音（兼容 `builtin`）或自定义裸 PCM 绝对路径。要求 24 kHz、S16_LE、单声道，最长 1.30 秒 |
 | `LLM_ROUTE_BEEP_GAIN` | `0.5` | 提示音的额外 PCM 增益，允许 0.5–2.0。已有显式配置继续生效 |
 
-唤醒后预备提示音 PCM。确认转 LLM 并达到安全接管条件时启动一个 Dirac aplay，提示音和正文共用该播放器，提示音有独立 PCM 槽。原生失败语音已经拦截时，在设置 LLM Master 后触发提示音和绿灯。已分发的原生播报先等确认结束，再冻结并接管。首段语音就绪时，最多取 100 ms 未提交的提示音混入语音开头并淡出，其余提示音丢弃。模型请求和合成与播放并行。
+唤醒后预备提示音 PCM，并预先启动一个读取 raw stdin 的 Dirac aplay。确认转 LLM 并达到安全接管条件后才写入提示音，随后启动语音消费者，将垫话与正文接入同一个 aplay。原生失败语音已经拦截时，在设置 LLM Master 后触发提示音和绿灯。已分发的原生播报先等确认结束，再冻结并接管。首段语音就绪时，最多取 100 ms 未提交的提示音混入语音开头并淡出，其余提示音丢弃。模型请求和合成与播放并行。
 
 内置 PCM 长 1.30 秒，基频 523 Hz，两声各长 750 ms，第二声在 550 ms 处开始。素材峰值 −1 dBFS，默认以 0.5 倍 PCM 增益对齐 `DEVICE_TTS_GAIN=2.0` 的参考回答。修改 `DEVICE_TTS_GAIN` 时提示音按比例跟随，双方沿用同一 LLM Master 和 Dirac。端侧句级流式使用 `DEVICE_TTS_GAIN`，`LLM_VOLUME` 用于服务端播放路径。自定义 PCM 由提供方保证采样率、位深和声道，文件不可用时记告警并继续回答。开发机可用 `python3 scripts/generate_dongdong.py` 重新生成仓库中的 WAV 和裸 PCM。
 

@@ -23,7 +23,7 @@ class RouteBeepTest(unittest.TestCase):
                      'llm_stream_answer_and_play', 'stream_play_worker', 'freeze_native_player',
                      'native_route_beep_gate', 'native_route_wait_quiet')
             beep = ('init', 'prepare', 'default_pcm', 'gain', 'scale', 'worker', 'allowed',
-                    'begin', 'fire', 'end', 'mark_end', 'step', 'mix', 'write_voice')
+                    'begin', 'fire', 'end', 'prewarm', 'mark_end', 'step', 'mix', 'write_voice')
             code = functions(*HELPERS, *names, *('route_beep_' + name for name in beep))
             for src, dst in (('/tmp/native_first_stream', '/stream'),
                              ('/tmp/native_first_latency.log', '/latency'),
@@ -76,6 +76,9 @@ new_llm_session_id() { NEW_LLM_SESSION_ID=stub; }
 select_native_result_source() { echo stub; }
 get_native_result() {
     [ "$MODE" != no_result ] || return 1
+    if [ "$MODE" = cold_start ]; then
+        until [ -f "$TEST_DIR/transport_ready" ]; do sleep 0.01; done
+    fi
     RESULT_TS=1; RESULT_DOMAIN=stub; RESULT_QUERY=fixture
     if [ "$MODE" = early_failure ]; then
         RESULT_SOURCE=aivs_lab_early_failure
@@ -131,16 +134,26 @@ stream_synthesize_sentence() {
 llm_aplay() {
     local fifo arg
     for arg do fifo="$arg"; done
-    [ -f "$TEST_DIR/master" ] || : > "$TEST_DIR/early"
-    if [ "$MODE" != early_failure ]; then
-        [ -f "$PLAYER_FROZEN_MARKER" ] || : > "$TEST_DIR/early"
+    if [ "$1" = -t ]; then
+        exec 9<&0
+        if [ "$MODE" = cold_start ]; then
+            sleep 0.35
+            [ ! -f "$TEST_DIR/master" ] || : > "$TEST_DIR/early"
+            : > "$TEST_DIR/transport_ready"
+        fi
+    else
+        exec 9<"$fifo"
     fi
     printf '%s\n' open >> "$TEST_DIR/players"
-    exec 9<"$fifo"
     if [ "$MODE" = builtin_pacing ]; then
         head -c 62400 <&9 >> "$TEST_DIR/played"
     else
         dd bs=2 count=1 <&9 >> "$TEST_DIR/played" 2>/dev/null
+    fi
+    [ -s "$TEST_DIR/played" ] || return 0
+    [ -f "$TEST_DIR/master" ] || : > "$TEST_DIR/early"
+    if [ "$MODE" != early_failure ]; then
+        [ -f "$PLAYER_FROZEN_MARKER" ] || : > "$TEST_DIR/early"
     fi
     : > "$TEST_DIR/cue_received"
     cat <&9 >> "$TEST_DIR/played"
@@ -169,6 +182,11 @@ exit 0
             led = (root / 'led').read_text().splitlines() if (root / 'led').exists() else []
             if mode in ('overlap', 'overlap_answer'):
                 self.assertEqual((root / 'players').read_text().splitlines(), ['open'])
+            if mode == 'cold_start':
+                marks = [line.split()[0] for line in (root / 'stream/marks').read_text().splitlines()]
+                expected = ['beep_commit', 'player_spawn', 'player_fifo_open', 'fifo_commit1']
+                self.assertEqual([mark for mark in marks if mark in expected], expected)
+                self.assertEqual((root / 'players').read_text().splitlines(), ['open'])
             return played, result.stdout, led
 
     def test_wake_beep_precedes_ready_filler_and_answer(self):
@@ -177,6 +195,11 @@ exit 0
         self.assertEqual(led, ['accept'])
         self.assertIn('wake→led_green=0.000', log)
         self.assertIn('wake→beep=0.000 beep=played', log)
+
+    def test_cold_player_is_prewarmed_before_route_and_hands_off_after_beep(self):
+        audio, log, _ = self.run_round('cold_start')
+        self.assertEqual(audio, b'BBFFAA')
+        self.assertIn('beep_start→commit=0.000 beep_commit→player_spawn=0.000', log)
 
     def test_builtin_matches_generator_and_uses_default_switches(self):
         root = Path(__file__).resolve().parents[1]

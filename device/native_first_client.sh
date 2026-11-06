@@ -372,7 +372,7 @@ latency_mark() {
     [ -d "$dir" ] || return 0
     case "$name" in *[!a-z0-9_]*) return 0 ;; esac
     case "$name" in
-        wake|followup_start|native_result|route_llm|freeze_done|freeze_first|led_green|beep_start|beep_commit|beep_drain|beep_end|beep_overlap|beep_skipped|llm_req|llm_first_token|fifo_commit1|fifo_commit_slot|fifo_commit_live|llm_done|play_done|web_plan_start|web_plan_end|web_tool_start|web_tool_end|web_filler|player_start|player_spawn|player_fifo_open|player_drain_start|filler_commit|filler_pcm_bytes|answer_commit|spec_start|spec_cancel|spec_used) ;;
+        wake|followup_start|native_result|route_llm|freeze_done|freeze_first|led_green|beep_start|beep_commit|beep_drain|beep_end|beep_overlap|beep_skipped|beep_device_spawn|beep_device_ready|llm_req|llm_first_token|fifo_commit1|fifo_commit_slot|fifo_commit_live|llm_done|play_done|web_plan_start|web_plan_end|web_tool_start|web_tool_end|web_filler|player_start|player_spawn|player_fifo_open|player_drain_start|filler_commit|filler_pcm_bytes|answer_commit|spec_start|spec_cancel|spec_used) ;;
         sent[0-9]*_split|sent[0-9]*_first_pcm|sent[0-9]*_tts_start|sent[0-9]*_tts_end|sent[0-9]*_pcm_bytes|sent[0-9]*_retries) ;;
         *) return 0 ;;
     esac
@@ -393,6 +393,11 @@ latency_report() {
         off) web=off ;; answer) web=answer ;; search) web=search ;; fetch) web=fetch ;;
     esac
     line=$(LC_ALL=C awk -v web="$web" -v rate="$DEVICE_TTS_PCM_RATE" '
+        NF == 3 && $1 == "player_underrun_at" && $2 ~ /^[0-9]+$/ {
+            underrun_times[++observed]=$2+0
+            underrun_duration[observed]=$3
+            if (!($1 in m)) m[$1]=$2+0
+        }
         NF == 2 && $2 ~ /^[0-9]+$/ {
             if ($1 == "player_underrun_count") underruns+=$2
             if ($1 == "player_underrun_us") underrun_us+=$2
@@ -411,6 +416,30 @@ latency_report() {
         function length_s(k) {
             if (!(k in m) || rate !~ /^[0-9]+$/ || rate+0 <= 0) return "-"
             return sprintf("%.3f", m[k]/(rate*2))
+        }
+        function near_wait(us, start,   idle,tolerance,diff) {
+            idle=m["fifo_commit1"]-start
+            if (idle<=0 || us<=0) return 0
+            tolerance=idle/4 > 100 ? idle/4 : 100
+            diff=us/1000-idle
+            return diff>=-tolerance && diff<=tolerance
+        }
+        function underrun_phase(at, us,   i,player_phase) {
+            for (i=1; i<=player_events; i++) {
+                if (player_times[i]<=at) player_phase=player_phases[i]
+            }
+            if (player_phase=="tail") return "tail"
+            if (!("fifo_commit1" in m) || at<m["fifo_commit1"]) return "prestart"
+            if (at<=m["fifo_commit1"]+100 && us ~ /^[0-9]+$/ &&
+                (("player_fifo_open" in m) && near_wait(us,m["player_fifo_open"]) ||
+                 ("beep_end" in m) && near_wait(us,m["beep_end"]))) return "prestart"
+            if (("answer_commit" in m) && at>=m["answer_commit"]) return "answer"
+            if (("filler_commit" in m) && at>=m["filler_commit"]) {
+                if (rate>0 && m["filler_pcm_bytes"]>0 &&
+                    at>=m["filler_commit"]+1000*m["filler_pcm_bytes"]/(rate*2)) return "gap"
+                return "filler"
+            }
+            return "answer"
         }
         END {
             segs=0; retries=0
@@ -444,32 +473,30 @@ latency_report() {
             spec="off"
             if ("spec_used" in m) spec="used"
             else if ("spec_cancel" in m) spec="cancelled"
+            phase="-"; prestart_us=0; prestart_unknown=0
+            for (i=1; i<=observed; i++) {
+                us=underrun_duration[i]
+                kind=underrun_phase(underrun_times[i],us)
+                if (i==1) phase=kind
+                if (kind=="prestart" && us!="") {
+                    underruns--
+                    if (us=="-") { underrun_unknown--; prestart_unknown++ }
+                    else { underrun_us-=us; prestart_us+=us }
+                }
+            }
             printf " spec=%s tts1_first=%s tts1_to_commit=%s player_prestart_wait=%s player_underrun=%d player_underrun_ms=%s", spec, \
                 delta(first "_tts_start",first "_first_pcm"), delta(first "_tts_start","answer_commit"), \
                 delta("player_fifo_open","fifo_commit1"), underruns, \
                 underrun_unknown ? "-" : sprintf("%.3f", underrun_us/1000)
+            printf " player_prestart_underrun_ms=%s", prestart_unknown ? "-" : sprintf("%.3f", prestart_us/1000)
             beep=("beep_commit" in m) ? "played" : (("beep_skipped" in m) ? "skipped" : "off")
             printf " wake→beep=%s beep=%s wake→led_green=%s", delta(origin,"beep_commit"), beep, delta(origin,"led_green")
             if ("player_spawn" in m) printf " player_open=%s", delta("player_spawn","player_fifo_open")
             else if ("player_start" in m) printf " player_open=%s", delta("player_start","player_fifo_open")
             if ("player_start" in m) printf " player_ready=%s", delta("player_start","player_fifo_open")
             printf " wake→beep_drain=%s wake→beep_end=%s beep_overlap=%d", delta(origin,"beep_drain"), delta(origin,"beep_end"), m["beep_overlap"]
-            phase="-"
-            if ("player_underrun_at" in m) {
-                at=m["player_underrun_at"]
-                player_phase=""
-                for (i=1; i<=player_events; i++) {
-                    if (player_times[i]<=at) player_phase=player_phases[i]
-                }
-                if (player_phase=="tail") phase="tail"
-                else if (("answer_commit" in m) && at>=m["answer_commit"]) phase="answer"
-                else if (("filler_commit" in m) && at>=m["filler_commit"]) {
-                    phase="filler"
-                    if (rate>0 && m["filler_pcm_bytes"]>0 &&
-                        at>=m["filler_commit"]+1000*m["filler_pcm_bytes"]/(rate*2)) phase="gap"
-                } else if (("fifo_commit1" in m) && at>=m["fifo_commit1"]) phase="answer"
-                else phase="prestart"
-            }
+            printf " beep_start→commit=%s beep_commit→player_spawn=%s", delta("beep_start","beep_commit"), delta("beep_commit","player_spawn")
+            printf " wake→beep_device_spawn=%s wake→beep_device_ready=%s", delta(origin,"beep_device_spawn"), delta(origin,"beep_device_ready")
             times=""
             if (origin in m) {
                 for (i=1; i<=observed; i++) {
@@ -3641,7 +3668,7 @@ stream_synthesize_sentence() {
 llm_aplay() {
     local helper="${DIRAC_APLAY:-/data/dirac_aplay.sh}"
     local playback_log="${DIRAC_PLAYBACK_LOG:-/tmp/native_first_dirac.log}" rc
-    local err_dir="" reader line observed
+    local err_dir="" reader line observed duration
     # One log per player, never store audio or grow a persistent log on /data.
     if [ -x "$helper" ]; then
         set -- "$helper" "$@"
@@ -3661,12 +3688,18 @@ llm_aplay() {
         (
             while IFS= read -r line || [ -n "$line" ]; do
                 case " $line " in
+                    *"Playing raw data 'stdin'"*)
+                        LATENCY_MARK_DIR="$STREAM_PLAY_MARK_DIR" latency_mark beep_device_ready ;;
                     *[[:space:]]underrun!!![[:space:]]*)
                         observed=$(monotonic_ms)
                         case "$observed" in
                             ''|*[!0-9]*) ;;
-                            *) printf 'player_underrun_at %s\n' "$observed" >> "$STREAM_PLAY_MARK_DIR/marks" ;;
-                        esac ;;
+                            *) duration=$(printf '%s\n' "$line" | LC_ALL=C awk '
+                                   match($0, /[0-9]+([.,][0-9]+)? ms/) {
+                                       ms=substr($0,RSTART,RLENGTH-3); sub(/,/,".",ms); printf "%.0f", ms*1000
+                                   }')
+                               printf 'player_underrun_at %s %s\n' "$observed" "${duration:--}" >> "$STREAM_PLAY_MARK_DIR/marks" ;;
+                    esac ;;
                 esac
                 printf '%s\n' "$line"
             done < "$err_dir/stderr"
@@ -4068,7 +4101,65 @@ route_beep_worker() {
         rm -f "$dir/cue.pcm"
         log '[WARN] 转 LLM 提示音 PCM 不可用，已跳过'
     fi
-    : > "$dir/prepared"
+}
+
+# Open one raw-stdin aplay during wake, as in S28b. The fd anchor is
+# private to this worker and keeps stdin open until the speech writer attaches.
+route_beep_prewarm() {
+    local dir="$1" fifo="$1/play.fifo" cue_pcm="$1/cue.pcm" LATENCY_MARK_DIR="$1"
+    local wd ap prepare_pid speech_pid rc=0 cue_offset=0 cue_bytes=0 cue_next=0 cue_base=0
+    mkfifo "$fifo" || return 1
+    route_beep_worker "$dir" &
+    prepare_pid=$!
+    exec 7<>"$fifo" 6<"$fifo"
+    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark beep_device_spawn
+    (
+        exec 0<&6 6<&- 7>&-
+        STREAM_PLAY_MARK_DIR="$dir" DIRAC_PLAYBACK_LOG="$dir/play.log" \
+            llm_aplay -t raw -r "$DEVICE_TTS_PCM_RATE" -f S16_LE -c 1
+        printf '%s\n' "$?" > "$dir/transport.done"
+    ) >/dev/null &
+    ap=$!
+    exec 6<&-
+    while [ ! -f "$dir/trigger" ] && [ ! -f "$dir/cancel" ]; do sleep 0.02; done
+    if [ -f "$dir/cancel" ]; then
+        exec 7>&-
+        wait "$ap" || :
+        wait "$prepare_pid" || :
+        return 0
+    fi
+    read -r wd < "$dir/trigger"
+    LATENCY_MARK_DIR="$wd"
+    wait "$prepare_pid" || :
+    if [ -s "$cue_pcm" ] && [ ! -f "$dir/transport.done" ]; then
+        cue_bytes=$(wc -c < "$cue_pcm")
+        exec 8>&7
+        route_beep_step || rc=1
+        exec 8>&-
+    fi
+    if [ "$rc" != 0 ] || [ -f "$dir/transport.done" ]; then
+        exec 7>&-
+        wait "$ap" || :
+        [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark beep_skipped
+        : > "$wd/early_player"
+        stream_play_worker "$wd"
+        return $?
+    fi
+    [ "$cue_bytes" -ne 0 ] || { [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark beep_skipped; }
+    if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
+        latency_mark player_start
+        latency_mark player_spawn
+    fi
+    (
+        exec 7>&-
+        stream_play_worker "$wd" "$dir" "$cue_bytes" "$cue_offset" "$cue_next" "$cue_base"
+    ) &
+    speech_pid=$!
+    while [ ! -f "$dir/handoff" ] && kill -0 "$speech_pid" 2>/dev/null; do sleep 0.02; done
+    exec 7>&-
+    wait "$speech_pid" || rc=$?
+    wait "$ap" || :
+    return "$rc"
 }
 
 route_beep_mark_end() {
@@ -4089,8 +4180,9 @@ route_beep_step() {
     [ "$bytes" -le 1920 ] || bytes=1920
     tail -c "+$((cue_offset + 1))" "$cue_pcm" | head -c "$bytes" >&8 || return 1
     if [ "$cue_offset" = 0 ]; then
-        cue_base=${now:-0}
-        [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark beep_commit "$now"
+        cue_base=$(monotonic_ms)
+        cue_base=${cue_base:-${now:-0}}
+        [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark beep_commit "$cue_base"
     fi
     cue_offset=$((cue_offset + bytes))
     cue_next=$((cue_base + cue_offset / 48 - 160))
@@ -4160,7 +4252,7 @@ route_beep_allowed() {
 route_beep_begin() {
     [ -z "${ROUTE_BEEP_DIR:-}" ] || return 0
     ROUTE_BEEP_DIR=$(mktemp -d /tmp/native_first_beep.XXXXXX) || return 1
-    route_beep_worker "$ROUTE_BEEP_DIR" &
+    route_beep_prewarm "$ROUTE_BEEP_DIR" &
     ROUTE_BEEP_PID=$!
 }
 
@@ -4183,8 +4275,10 @@ route_beep_fire() {
         [ "$route_beep_turn" != wake ] || latency_mark led_green
     fi
     ROUTE_BEEP_WD="$wd"
-    stream_play_worker "$wd" "$ROUTE_BEEP_DIR" &
-    ROUTE_BEEP_PLAY_PID=$!
+    [ -p "$ROUTE_BEEP_DIR/play.fifo" ] || kill -0 "$ROUTE_BEEP_PID" 2>/dev/null || return 1
+    printf '%s\n' "$wd" > "$ROUTE_BEEP_DIR/trigger.next" &&
+        mv "$ROUTE_BEEP_DIR/trigger.next" "$ROUTE_BEEP_DIR/trigger" || return 1
+    ROUTE_BEEP_PLAY_PID=$ROUTE_BEEP_PID
     [ "$route_beep_turn" != wake ] || led_feedback_llm_accept
     return 0
 }
@@ -4194,9 +4288,13 @@ route_beep_end() {
     [ -n "$dir" ] || return 0
     if [ -n "${ROUTE_BEEP_PLAY_PID:-}" ]; then
         : > "$ROUTE_BEEP_WD/done"
-        wait "$ROUTE_BEEP_PLAY_PID" 2>/dev/null || :
+    else
+        : > "$dir/cancel"
     fi
     wait "$ROUTE_BEEP_PID" 2>/dev/null || :
+    if [ -n "${ROUTE_BEEP_WD:-}" ] && [ -s "$dir/marks" ]; then
+        cat "$dir/marks" >> "$ROUTE_BEEP_WD/marks"
+    fi
     rm -rf "$dir"
     ROUTE_BEEP_DIR=""
     ROUTE_BEEP_PID=""
@@ -4210,38 +4308,48 @@ stream_play_worker() {
     local fifo="$wd/play.fifo" STREAM_PLAY_MARK_DIR="$wd"
     local idx=1 n ap="" sentence rc answer_idx=1 pcm_commit
     local threshold=0 sent=0 size bytes aborted=0
-    local cue_pcm="" cue_offset=0 cue_bytes=0 cue_next=0 cue_base=0 stream_ready=1
+    local cue_pcm="" cue_bytes="${3:-0}" cue_offset="${4:-0}" cue_next="${5:-0}" cue_base="${6:-0}" stream_ready=1
+    stream_wait_player() {
+        [ "$1" = prewarmed ] || { wait "$1"; return $?; }
+        while [ ! -s "$cue_dir/transport.done" ]; do sleep 0.02; done
+        local status
+        read -r status < "$cue_dir/transport.done"
+        if [ -s "$cue_dir/marks" ]; then
+            cat "$cue_dir/marks" >> "$wd/marks"
+            rm -f "$cue_dir/marks"
+        fi
+        if [ -f "$cue_dir/play.log" ]; then
+            cat "$cue_dir/play.log" > "${DIRAC_PLAYBACK_LOG:-/tmp/native_first_dirac.log}" 2>/dev/null || :
+        fi
+        return "$status"
+    }
     if [ "${DEVICE_TTS_STREAM_COMMIT:-0}" = 1 ] && [ "$DEVICE_TTS_PCM_RATE" = 24000 ]; then
         threshold=$((48 * ${DEVICE_TTS_STREAM_MIN_MS:-300}))
     fi
     [ "${LLM_WEB_FILLER_CACHE:-0}" != 1 ] && [ ! -f "$wd/early_filler" ] || idx=0
     rm -f "$fifo"
     mkfifo "$fifo" 2>/dev/null || mknod "$fifo" p 2>/dev/null
-    if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ] && { [ -n "$cue_dir" ] || [ -f "$wd/early_player" ]; }; then
-        latency_mark player_start
-    fi
     if [ -n "$cue_dir" ]; then
         stream_ready=0
-        while [ ! -f "$cue_dir/prepared" ] && kill -0 "$ROUTE_BEEP_PID" 2>/dev/null; do sleep 0.02; done
         cue_pcm="$cue_dir/cue.pcm"
-        if [ -f "$cue_dir/prepared" ] && [ -s "$cue_pcm" ]; then
-            cue_bytes=$(wc -c < "$cue_pcm")
-        else
-            [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark beep_skipped
-        fi
-    fi
-    if [ -n "$cue_dir" ] || [ -f "$wd/early_player" ]; then
+        exec 8>"$cue_dir/play.fifo"
+        : > "$cue_dir/handoff"
+        ap=prewarmed
+        [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark player_fifo_open
+    elif [ -f "$wd/early_player" ]; then
+        [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark player_start
         [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark player_spawn
         llm_aplay -r "$DEVICE_TTS_PCM_RATE" -f S16_LE -c 1 "$fifo" >/dev/null &
         ap=$!
         exec 8>"$fifo"
         [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark player_fifo_open
+    fi
+    if [ -n "$ap" ]; then
         if [ -f "$wd/0000.rdy" ] || [ -f "$wd/0001.rdy" ] ||
             { [ "$threshold" -gt 0 ] && [ -s "$wd/0001.live" ] &&
                 [ "$(wc -c < "$wd/0001.live")" -ge "$threshold" ]; }; then
             log '[WARN] player_open_late first_pcm_ready=1'
         fi
-        [ "$cue_bytes" = 0 ] || route_beep_step || { exec 8>&-; wait "$ap"; return 1; }
     fi
     while :; do
         if [ "$stream_ready" = 0 ]; then
@@ -4249,7 +4357,7 @@ stream_play_worker() {
                 stream_ready=1
                 [ "${LLM_WEB_FILLER_CACHE:-0}" != 1 ] && [ ! -f "$wd/early_filler" ] || idx=0
             elif [ ! -f "$wd/done" ]; then
-                route_beep_step || { exec 8>&-; wait "$ap"; return 1; }
+                route_beep_step || { exec 8>&-; stream_wait_player "$ap"; return 1; }
                 sleep 0.02
                 continue
             fi
@@ -4266,7 +4374,7 @@ stream_play_worker() {
                 # Native TTS has no common PCM/text cursor. Do not replay an
                 # unverified prefix or claim a complete answer in history.
                 exec 8>&-
-                wait "$ap" 2>/dev/null
+                stream_wait_player "$ap" 2>/dev/null
                 [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark play_done
                 return 1
             fi
@@ -4284,7 +4392,7 @@ stream_play_worker() {
                     fi
                     [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark player_drain_start
                     exec 8>&-
-                    wait "$ap" || { [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark play_done; return 1; }
+                    stream_wait_player "$ap" || { [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark play_done; return 1; }
                     ap=""
                 fi
                 [ ! -f "$wd/$n.failed" ] || { [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark play_done; return 1; }
@@ -4336,12 +4444,12 @@ stream_play_worker() {
                     tail -c "+$((sent + 1))" "$wd/$n.pcm"
                 fi; } >&8; then
                     exec 8>&-
-                    wait "$ap" 2>/dev/null
+                    stream_wait_player "$ap" 2>/dev/null
                     [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark play_done
                     return 1
                 fi
             else
-                if [ -n "$ap" ]; then exec 8>&-; wait "$ap"; fi
+                if [ -n "$ap" ]; then exec 8>&-; stream_wait_player "$ap"; fi
                 [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark play_done
                 return 1
             fi
@@ -4380,7 +4488,7 @@ stream_play_worker() {
                     tail -c "+$((sent + 1))" "$wd/$n.live" | head -c "$bytes"
                 fi; } >&8; then
                     exec 8>&-
-                    wait "$ap" 2>/dev/null
+                    stream_wait_player "$ap" 2>/dev/null
                     [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark play_done
                     return 1
                 fi
@@ -4395,7 +4503,7 @@ stream_play_worker() {
             continue
         fi
         if [ "$cue_offset" -lt "$cue_bytes" ]; then
-            route_beep_step || { exec 8>&-; wait "$ap"; return 1; }
+            route_beep_step || { exec 8>&-; stream_wait_player "$ap"; return 1; }
             sleep 0.02
         elif [ -f "$wd/done" ] && { [ "$idx" != 0 ] || [ ! -f "$wd/web_filler_direct" ]; }; then
             break
@@ -4406,7 +4514,7 @@ stream_play_worker() {
     if [ -n "$ap" ]; then
         [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark player_drain_start
         exec 8>&-        # 关闭写端 → aplay 播完剩余 PCM 后 EOF 退出
-        wait "$ap"
+        stream_wait_player "$ap"
         rc=$?
         [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark play_done
         return "$rc"
@@ -4450,6 +4558,7 @@ llm_stream_answer_and_play() {
         wd="$ROUTE_BEEP_WD"
         play_pid="$ROUTE_BEEP_PLAY_PID"
     else
+        [ -z "${ROUTE_BEEP_DIR:-}" ] || route_beep_end
         rm -rf "$wd" 2>/dev/null
         (umask 077; mkdir -p "$wd") || return 1
         if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ] && latency_active; then

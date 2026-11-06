@@ -137,7 +137,7 @@ monotonic_ms() { echo 4300; }
 aplay() {
     echo 'underrun!!! (at least 12.500 ms long)' >&2
     i=0
-    until grep -q '^player_underrun_at 4300$' "$TEST_DIR/marks"; do
+    until grep -q '^player_underrun_at 4300 12500$' "$TEST_DIR/marks"; do
         i=$((i + 1))
         [ "$i" -lt 100 ] || return 9
         sleep 0.01
@@ -147,7 +147,7 @@ aplay() {
 llm_aplay fixture.pcm || exit "$?"
 latency_report
 ''')
-        self.assertEqual(marks.count('player_underrun_at 4300\n'), 2)
+        self.assertIn('player_underrun_at 4300 12500\nplayer_underrun_at 4300 500\n', marks)
         self.assertIn('player_underrun=2 player_underrun_ms=13.000', out)
         self.assertIn('player_underrun_at=3.300,3.300 player_underrun_first_at=3.300 player_underrun_phase=answer', out)
 
@@ -172,6 +172,25 @@ latency_report
         self.assertIn('rc=7', out)
         self.assertIn('player_underrun=3 player_underrun_ms=22.750', out)
         self.assertIn('player_underrun=4 player_underrun_ms=-', out)
+
+    def test_near_first_pcm_only_reclassifies_wait_sized_underruns(self):
+        for first, opened, observed, duration in ((5200, 2770, 5210, 1910695),
+                                                  (5170, 2780, 5190, 1874129)):
+            with self.subTest(first=first):
+                marks = f'''wake 1000
+player_fifo_open {opened}
+fifo_commit1 {first}
+answer_commit {first}
+player_underrun_at {observed} {duration}
+player_underrun_at {first + 20} 25000
+player_underrun_at {first + 101} {duration}
+player_underrun_count 3
+player_underrun_us {duration * 2 + 25000}
+'''
+                out, _, _ = self.run_shell('latency_report', marks)
+                self.assertIn('player_underrun=2', out)
+                self.assertIn(f'player_prestart_underrun_ms={duration / 1000:.3f}', out)
+                self.assertIn('player_underrun_phase=prestart', out)
 
     def test_missing_reversed_and_duplicate_marks(self):
         out, _, _ = self.run_shell('latency_report', 'llm_req 1000\nllm_first_token 900\nllm_req 500\n')
