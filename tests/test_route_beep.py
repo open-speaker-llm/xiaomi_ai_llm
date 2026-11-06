@@ -1,10 +1,12 @@
 """S30 cue and answer PCM slots with a single stubbed player."""
 import os
+import re
 import struct
 import subprocess
 import sys
 import tempfile
 import unittest
+import wave
 from pathlib import Path
 
 from tests.test_latency_trace import HELPERS, functions
@@ -20,8 +22,8 @@ class RouteBeepTest(unittest.TestCase):
             names = ('handle_wakeup', 'handle_llm_dialog', 'send_text_native',
                      'llm_stream_answer_and_play', 'stream_play_worker', 'freeze_native_player',
                      'native_route_beep_gate', 'native_route_wait_quiet')
-            beep = ('init', 'prepare', 'default_pcm', 'scale', 'worker', 'allowed',
-                    'begin', 'fire', 'end', 'step', 'mix', 'write_voice')
+            beep = ('init', 'prepare', 'default_pcm', 'gain', 'scale', 'worker', 'allowed',
+                    'begin', 'fire', 'end', 'mark_end', 'step', 'mix', 'write_voice')
             code = functions(*HELPERS, *names, *('route_beep_' + name for name in beep))
             for src, dst in (('/tmp/native_first_stream', '/stream'),
                              ('/tmp/native_first_latency.log', '/latency'),
@@ -109,13 +111,16 @@ led_feedback_llm_playing() { echo playing >> "$TEST_DIR/led"; }
 llm_build_messages() { echo stub; }
 llm_open_stream() {
     : > "$TEST_DIR/request"
-    [ "$MODE" != builtin_pacing ] || sleep 0.80
-    printf '%s\n' "$LLM_WEB_FILLER" '回答。'
+    if [ "$MODE" = builtin_pacing ]; then
+        until [ -f "$TEST_DIR/cue_received" ]; do sleep 0.01; done
+    fi
+    [ "$MODE" = overlap_answer ] || printf '%s\n' "$LLM_WEB_FILLER"
+    printf '%s\n' '回答。'
 }
 llm_sse_content() { cat; command sleep 0.15; printf complete > "$1"; }
 llm_history_commit() { :; }
 stream_synthesize_sentence() {
-    if [ "$MODE" = overlap ] && [ "$3" = "$LLM_WEB_FILLER" ]; then
+    if { [ "$MODE" = overlap ] && [ "$3" = "$LLM_WEB_FILLER" ]; } || [ "$MODE" = overlap_answer ]; then
         head -c 9600 /dev/zero > "$1/$2.pcm"
     elif [ "$3" = "$LLM_WEB_FILLER" ]; then
         printf FF > "$1/$2.pcm"
@@ -132,14 +137,19 @@ llm_aplay() {
     fi
     printf '%s\n' open >> "$TEST_DIR/players"
     exec 9<"$fifo"
-    dd bs=2 count=1 <&9 >> "$TEST_DIR/played" 2>/dev/null
+    if [ "$MODE" = builtin_pacing ]; then
+        head -c 62400 <&9 >> "$TEST_DIR/played"
+    else
+        dd bs=2 count=1 <&9 >> "$TEST_DIR/played" 2>/dev/null
+    fi
     : > "$TEST_DIR/cue_received"
     cat <&9 >> "$TEST_DIR/played"
 }
 if command -v route_beep_init >/dev/null; then
     LLM_ROUTE_BEEP="${LLM_ROUTE_BEEP:-1}"
     LLM_ROUTE_BEEP_FOLLOWUP="${LLM_ROUTE_BEEP_FOLLOWUP:-0}"
-    LLM_ROUTE_BEEP_FILE="${LLM_ROUTE_BEEP_FILE:-builtin}"
+    LLM_ROUTE_BEEP_FILE="${LLM_ROUTE_BEEP_FILE:-dongdong_523.pcm}"
+    LLM_ROUTE_BEEP_GAIN="${LLM_ROUTE_BEEP_GAIN:-0.5}"
     route_beep_init
 fi
 handle_wakeup 1
@@ -147,7 +157,7 @@ route_beep_end
 exit 0
 '''
             result = subprocess.run(
-                ['sh', '-c', code], capture_output=True, text=True, timeout=10,
+                ['sh', '-s'], input=code, capture_output=True, text=True, timeout=10,
                 env={**os.environ, 'TEST_DIR': temp, 'MODE': mode, 'TRACE': trace,
                      'LLM_ROUTE_BEEP': enabled, 'LLM_ROUTE_BEEP_FOLLOWUP': followup,
                      'BUILTIN': str(int(builtin)), 'LLM_ROUTE_BEEP_FILE': '',
@@ -157,7 +167,7 @@ exit 0
             self.assertFalse((root / 'early').exists())
             played = (root / 'played').read_bytes() if (root / 'played').exists() else b''
             led = (root / 'led').read_text().splitlines() if (root / 'led').exists() else []
-            if mode == 'overlap':
+            if mode in ('overlap', 'overlap_answer'):
                 self.assertEqual((root / 'players').read_text().splitlines(), ['open'])
             return played, result.stdout, led
 
@@ -169,22 +179,33 @@ exit 0
         self.assertIn('wake→beep=0.000 beep=played', log)
 
     def test_builtin_matches_generator_and_uses_default_switches(self):
-        generator = Path(__file__).resolve().parents[1] / 'scripts/embed_route_beep.py'
+        root = Path(__file__).resolve().parents[1]
+        generator = root / 'scripts/embed_route_beep.py'
+        assets = root / 'asset/route-beep'
         with tempfile.TemporaryDirectory() as temp:
             generated = Path(temp) / 'default.pcm'
             subprocess.run([sys.executable, str(generator), '--pcm', str(generated)], check=True)
             pcm = generated.read_bytes()
-        self.assertEqual(len(pcm), 15840)
-        self.assertEqual(pcm[:5760], pcm[10080:])
-        self.assertEqual(pcm[5760:10080], bytes(4320))
-        peak = max(abs(sample) for (sample,) in struct.iter_unpack('<h', pcm))
-        self.assertAlmostEqual(difference_db(peak, 32767), -3, places=2)
+        self.assertEqual(pcm, (assets / 'dongdong_523.pcm').read_bytes())
+        with wave.open(str(assets / 'dongdong_523.wav'), 'rb') as wav:
+            self.assertEqual((wav.getframerate(), wav.getsampwidth(), wav.getnchannels()), (24000, 2, 1))
+            self.assertEqual(wav.getnframes(), 31200)
+            self.assertEqual(wav.readframes(wav.getnframes()), pcm)
+        samples = struct.unpack('<31200h', pcm)
+        self.assertAlmostEqual(difference_db(max(map(abs, samples)), 32767), -1, places=2)
+        # Away from the overlap, the two strikes have identical samples.
+        self.assertEqual(samples[4800:13200], samples[18000:26400])
         # RMS of two complete S28b reference answer segments at the existing
         # native TTS gain. Keep scalar measurements only, not the speech.
+        audio, log, _ = self.run_round('builtin_pacing', enabled='', followup='', builtin=True, gain='')
+        played_cue = audio[:-4]
+        self.assertEqual(audio[-4:], b'FFAA')
+        self.assertEqual(played_cue, struct.pack('<31200h', *(int(sample / 2) for sample in samples)))
         for reference in (4487.61, 4257.37):
-            self.assertLessEqual(abs(difference_db(rms(pcm), reference)), 3)
-        audio, _, _ = self.run_round('builtin_pacing', enabled='', followup='', builtin=True)
-        self.assertEqual(audio, pcm + b'FFAA')
+            self.assertLessEqual(abs(difference_db(rms(played_cue), reference)), 3)
+        start = float(re.search(r'wake→beep=([0-9.]+)', log)[1])
+        end = float(re.search(r'wake→beep_end=([0-9.]+) beep_overlap=0', log)[1])
+        self.assertAlmostEqual(end - start, 1.300, places=3)
 
     def test_off_preserves_pcm_sequence(self):
         audio, log, _ = self.run_round('wake', enabled='0')
@@ -228,11 +249,15 @@ exit 0
 
     def test_long_cue_fades_into_first_voice_without_opening_a_second_player(self):
         cue = struct.pack('<h', 1000) * 31200
-        audio, log, _ = self.run_round('overlap', asset=cue)
-        self.assertIn('beep_overlap=1', log)
-        self.assertLess(len(audio), len(cue) + 9602)
-        self.assertTrue(audio.endswith(bytes(4800) + b'AA'))
-        self.assertEqual(len(audio) % 2, 0)
+        fade = struct.pack('<2400h', *(1000 * frame // 2399 for frame in range(2399, -1, -1)))
+        for mode, answer in (('overlap', b'AA'), ('overlap_answer', b'')):
+            with self.subTest(mode=mode):
+                audio, log, _ = self.run_round(mode, asset=cue)
+                self.assertIn('beep_overlap=1', log)
+                self.assertNotIn('wake→beep_end=-', log)
+                self.assertLess(len(audio), len(cue) + 9600 + len(answer))
+                self.assertTrue(audio.endswith(fade + bytes(4800) + answer))
+                self.assertEqual(len(audio) % 2, 0)
 
     def test_failed_freeze_skips_beep(self):
         audio, log, _ = self.run_round('freeze_failed')

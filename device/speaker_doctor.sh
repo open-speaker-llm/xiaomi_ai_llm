@@ -114,8 +114,8 @@ if readable_file /data/native_first.env; then
             values[key]=(state[key]=="literal"?value:"");
         }
         else if(key=="LLM_ROUTE_BEEP_FILE") {
-            if(value!="" && value!="builtin" && value!~/^\//) state[key]="invalid";
-            values[key]=(state[key]!="literal"?"":(value=="builtin"?"builtin":"configured"));
+            if(value!="" && value!="builtin" && value!="dongdong_523.pcm" && value!~/^\//) state[key]="invalid";
+            values[key]=(state[key]!="literal"?"":(value=="builtin" || value=="dongdong_523.pcm"?"dongdong_523.pcm":"configured"));
         }
         else if(key=="LLM_WEB_FILLER") values[key]=(value==""?"":"configured");
         else if(key~/^(SERVER|TTS_SERVER|LLM_API_BASE)$/) values[key]=(value~/^https?:\/\/[^ \t]+$/?"configured":(value==""?"":"invalid"));
@@ -174,8 +174,8 @@ esac
 if [ "$MODE" = native-device ]; then
     ROUTE_BEEP=$(setting LLM_ROUTE_BEEP 1)
     ROUTE_BEEP_FOLLOWUP=$(setting LLM_ROUTE_BEEP_FOLLOWUP 0)
-    ROUTE_BEEP_FILE=$(setting LLM_ROUTE_BEEP_FILE builtin)
-    ROUTE_BEEP_GAIN=$(setting LLM_ROUTE_BEEP_GAIN 1.0)
+    ROUTE_BEEP_FILE=$(setting LLM_ROUTE_BEEP_FILE dongdong_523.pcm)
+    ROUTE_BEEP_GAIN=$(setting LLM_ROUTE_BEEP_GAIN 0.5)
     report INFO ROUTE_BEEP "转 LLM 提示音配置 wake=$ROUTE_BEEP followup=$ROUTE_BEEP_FOLLOWUP pcm=$ROUTE_BEEP_FILE gain=$ROUTE_BEEP_GAIN"
 fi
 if [ "$PIPELINE" = native ]; then
