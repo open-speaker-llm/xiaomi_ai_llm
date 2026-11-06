@@ -1,4 +1,4 @@
-"""S28b independent cue and answer playback with local hardware stubs."""
+"""S30 cue and answer PCM slots with a single stubbed player."""
 import os
 import struct
 import subprocess
@@ -18,9 +18,10 @@ class RouteBeepTest(unittest.TestCase):
             if asset is not None:
                 (root / 'beep.pcm').write_bytes(asset)
             names = ('handle_wakeup', 'handle_llm_dialog', 'send_text_native',
-                     'llm_stream_answer_and_play', 'stream_play_worker', 'freeze_native_player')
+                     'llm_stream_answer_and_play', 'stream_play_worker', 'freeze_native_player',
+                     'native_route_beep_gate', 'native_route_wait_quiet')
             beep = ('init', 'prepare', 'default_pcm', 'scale', 'worker', 'allowed',
-                    'begin', 'fire', 'wait', 'end')
+                    'begin', 'fire', 'end', 'step', 'mix', 'write_voice')
             code = functions(*HELPERS, *names, *('route_beep_' + name for name in beep))
             for src, dst in (('/tmp/native_first_stream', '/stream'),
                              ('/tmp/native_first_latency.log', '/latency'),
@@ -42,11 +43,33 @@ killall() {
     if [ "$MODE" = early_failure ] && [ ! -f "$TEST_DIR/frozen" ]; then
         until [ -f "$TEST_DIR/cue_received" ]; do sleep 0.01; done
     fi
+    if [ "$MODE" = native_speak ] && [ ! -f "$TEST_DIR/native_finished" ]; then
+        : > "$TEST_DIR/early"
+    fi
     [ "$MODE" != freeze_failed ]
+}
+TTS_NATIVE_STATUS_START_TIMEOUT_SECONDS=3; TTS_NATIVE_STATUS_MAX_SECONDS=8
+TTS_NATIVE_STATUS_IDLE_HITS=2; TTS_NATIVE_STATUS_POLL_SECONDS=0.01
+native_tts_player_status() {
+    if [ "$MODE" != native_speak ]; then echo 0; return; fi
+    if [ ! -f "$TEST_DIR/native_started" ]; then
+        : > "$TEST_DIR/native_started"
+        echo 1
+    else
+        : > "$TEST_DIR/native_finished"
+        echo 0
+    fi
 }
 timeout() { shift 2; "$@"; }
 apply_llm_master_volume() { : > "$TEST_DIR/master"; }
-monotonic_ms() { echo 1000; }; elapsed_s() { echo 0; }
+monotonic_ms() {
+    if [ "$MODE" = builtin_pacing ]; then
+        python3 -c 'import time; print(time.monotonic_ns() // 1000000)'
+        return
+    fi
+    echo 1000
+}
+elapsed_s() { echo 0; }
 new_llm_session_id() { NEW_LLM_SESSION_ID=stub; }
 select_native_result_source() { echo stub; }
 get_native_result() {
@@ -55,6 +78,9 @@ get_native_result() {
     if [ "$MODE" = early_failure ]; then
         RESULT_SOURCE=aivs_lab_early_failure
         RESULT_SPEAK='[failure Speak suppressed before dispatch]'
+    elif [ "$MODE" = native_speak ]; then
+        RESULT_SOURCE=aivs_lab_instruction
+        RESULT_SPEAK='fixture native speech'
     fi
 }
 is_system1_root() { return 1; }
@@ -83,33 +109,32 @@ led_feedback_llm_playing() { echo playing >> "$TEST_DIR/led"; }
 llm_build_messages() { echo stub; }
 llm_open_stream() {
     : > "$TEST_DIR/request"
+    [ "$MODE" != builtin_pacing ] || sleep 0.80
     printf '%s\n' "$LLM_WEB_FILLER" '回答。'
 }
 llm_sse_content() { cat; command sleep 0.15; printf complete > "$1"; }
 llm_history_commit() { :; }
 stream_synthesize_sentence() {
-    if [ "$3" = "$LLM_WEB_FILLER" ]; then printf FF; else printf AA; fi > "$1/$2.pcm"
+    if [ "$MODE" = overlap ] && [ "$3" = "$LLM_WEB_FILLER" ]; then
+        head -c 9600 /dev/zero > "$1/$2.pcm"
+    elif [ "$3" = "$LLM_WEB_FILLER" ]; then
+        printf FF > "$1/$2.pcm"
+    else
+        printf AA > "$1/$2.pcm"
+    fi
 }
 llm_aplay() {
-    local fifo arg cue="$TEST_DIR/cue-audio"
-    if [ -n "${LLM_APLAY_TIMEOUT:-}" ]; then
-        cat > "$cue"
-        if [ -s "$cue" ]; then
-            [ -f "$TEST_DIR/master" ] || : > "$TEST_DIR/early"
-            if [ "$MODE" != early_failure ]; then
-                [ -f "$PLAYER_FROZEN_MARKER" ] || : > "$TEST_DIR/early"
-            fi
-            cat "$cue" >> "$TEST_DIR/played"
-            : > "$TEST_DIR/cue_received"
-            # Hold the cue player until LLM and synthesis have progressed.
-            until [ -f "$TEST_DIR/stream/0001.rdy" ]; do sleep 0.01; done
-            : > "$TEST_DIR/cue_drained"
-        fi
-        return 0
-    fi
-    [ ! -f "$TEST_DIR/cue_received" ] || [ -f "$TEST_DIR/cue_drained" ] || : > "$TEST_DIR/early"
+    local fifo arg
     for arg do fifo="$arg"; done
-    cat "$fifo" >> "$TEST_DIR/played"
+    [ -f "$TEST_DIR/master" ] || : > "$TEST_DIR/early"
+    if [ "$MODE" != early_failure ]; then
+        [ -f "$PLAYER_FROZEN_MARKER" ] || : > "$TEST_DIR/early"
+    fi
+    printf '%s\n' open >> "$TEST_DIR/players"
+    exec 9<"$fifo"
+    dd bs=2 count=1 <&9 >> "$TEST_DIR/played" 2>/dev/null
+    : > "$TEST_DIR/cue_received"
+    cat <&9 >> "$TEST_DIR/played"
 }
 if command -v route_beep_init >/dev/null; then
     LLM_ROUTE_BEEP="${LLM_ROUTE_BEEP:-1}"
@@ -132,6 +157,8 @@ exit 0
             self.assertFalse((root / 'early').exists())
             played = (root / 'played').read_bytes() if (root / 'played').exists() else b''
             led = (root / 'led').read_text().splitlines() if (root / 'led').exists() else []
+            if mode == 'overlap':
+                self.assertEqual((root / 'players').read_text().splitlines(), ['open'])
             return played, result.stdout, led
 
     def test_wake_beep_precedes_ready_filler_and_answer(self):
@@ -156,7 +183,7 @@ exit 0
         # native TTS gain. Keep scalar measurements only, not the speech.
         for reference in (4487.61, 4257.37):
             self.assertLessEqual(abs(difference_db(rms(pcm), reference)), 3)
-        audio, _, _ = self.run_round('wake', enabled='', followup='', builtin=True)
+        audio, _, _ = self.run_round('builtin_pacing', enabled='', followup='', builtin=True)
         self.assertEqual(audio, pcm + b'FFAA')
 
     def test_off_preserves_pcm_sequence(self):
@@ -192,6 +219,20 @@ exit 0
     def test_gain_scales_pcm_without_changing_answer(self):
         audio, _, _ = self.run_round('wake', asset=b'\x00\x40', gain='0.5')
         self.assertEqual(audio, b'\x00\x20FFAA')
+
+    def test_dispatched_native_speech_finishes_before_first_freeze(self):
+        audio, log, led = self.run_round('native_speak')
+        self.assertEqual(audio, b'BBFFAA')
+        self.assertIn('beep=played', log)
+        self.assertEqual(led, ['accept'])
+
+    def test_long_cue_fades_into_first_voice_without_opening_a_second_player(self):
+        cue = struct.pack('<h', 1000) * 31200
+        audio, log, _ = self.run_round('overlap', asset=cue)
+        self.assertIn('beep_overlap=1', log)
+        self.assertLess(len(audio), len(cue) + 9602)
+        self.assertTrue(audio.endswith(bytes(4800) + b'AA'))
+        self.assertEqual(len(audio) % 2, 0)
 
     def test_failed_freeze_skips_beep(self):
         audio, log, _ = self.run_round('freeze_failed')

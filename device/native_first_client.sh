@@ -229,6 +229,8 @@ LLM_ROUTE_BEEP_FILE="${LLM_ROUTE_BEEP_FILE:-builtin}"
 LLM_ROUTE_BEEP_GAIN="${LLM_ROUTE_BEEP_GAIN:-1.0}"
 ROUTE_BEEP_DIR=""
 ROUTE_BEEP_PID=""
+ROUTE_BEEP_PLAY_PID=""
+ROUTE_BEEP_WD=""
 LLM_DIRAC_ENABLED="${LLM_DIRAC_ENABLED:-1}"
 DIRAC_APLAY="${DIRAC_APLAY:-/data/dirac_aplay.sh}"
 DIRAC_PLAYBACK_LOG="${DIRAC_PLAYBACK_LOG:-/tmp/native_first_dirac.log}"
@@ -370,7 +372,7 @@ latency_mark() {
     [ -d "$dir" ] || return 0
     case "$name" in *[!a-z0-9_]*) return 0 ;; esac
     case "$name" in
-        wake|followup_start|native_result|route_llm|freeze_done|led_green|beep_start|beep_commit|beep_skipped|llm_req|llm_first_token|fifo_commit1|fifo_commit_slot|fifo_commit_live|llm_done|play_done|web_plan_start|web_plan_end|web_tool_start|web_tool_end|web_filler|player_start|player_fifo_open|filler_commit|filler_pcm_bytes|answer_commit|spec_start|spec_cancel|spec_used) ;;
+        wake|followup_start|native_result|route_llm|freeze_done|freeze_first|led_green|beep_start|beep_commit|beep_drain|beep_overlap|beep_skipped|llm_req|llm_first_token|fifo_commit1|fifo_commit_slot|fifo_commit_live|llm_done|play_done|web_plan_start|web_plan_end|web_tool_start|web_tool_end|web_filler|player_start|player_spawn|player_fifo_open|player_drain_start|filler_commit|filler_pcm_bytes|answer_commit|spec_start|spec_cancel|spec_used) ;;
         sent[0-9]*_split|sent[0-9]*_first_pcm|sent[0-9]*_tts_start|sent[0-9]*_tts_end|sent[0-9]*_pcm_bytes|sent[0-9]*_retries) ;;
         *) return 0 ;;
     esac
@@ -394,6 +396,11 @@ latency_report() {
         NF == 2 && $2 ~ /^[0-9]+$/ {
             if ($1 == "player_underrun_count") underruns+=$2
             if ($1 == "player_underrun_us") underrun_us+=$2
+            if ($1 == "player_underrun_at") underrun_times[++observed]=$2+0
+            if ($1 == "player_spawn" || $1 == "player_drain_start") {
+                player_times[++player_events]=$2+0
+                player_phases[player_events]=($1 == "player_drain_start") ? "tail" : "playing"
+            }
             if ($1 == "player_underrun_unknown") underrun_unknown+=$2
             if (!($1 in m)) m[$1]=$2+0
         }
@@ -443,7 +450,37 @@ latency_report() {
                 underrun_unknown ? "-" : sprintf("%.3f", underrun_us/1000)
             beep=("beep_commit" in m) ? "played" : (("beep_skipped" in m) ? "skipped" : "off")
             printf " wake→beep=%s beep=%s wake→led_green=%s", delta(origin,"beep_commit"), beep, delta(origin,"led_green")
-            if ("player_start" in m) printf " player_open=%s", delta("player_start","player_fifo_open")
+            if ("player_spawn" in m) printf " player_open=%s", delta("player_spawn","player_fifo_open")
+            else if ("player_start" in m) printf " player_open=%s", delta("player_start","player_fifo_open")
+            if ("player_start" in m) printf " player_ready=%s", delta("player_start","player_fifo_open")
+            printf " wake→beep_drain=%s beep_overlap=%d", delta(origin,"beep_drain"), m["beep_overlap"]
+            phase="-"
+            if ("player_underrun_at" in m) {
+                at=m["player_underrun_at"]
+                player_phase=""
+                for (i=1; i<=player_events; i++) {
+                    if (player_times[i]<=at) player_phase=player_phases[i]
+                }
+                if (player_phase=="tail") phase="tail"
+                else if (("answer_commit" in m) && at>=m["answer_commit"]) phase="answer"
+                else if (("filler_commit" in m) && at>=m["filler_commit"]) {
+                    phase="filler"
+                    if (rate>0 && m["filler_pcm_bytes"]>0 &&
+                        at>=m["filler_commit"]+1000*m["filler_pcm_bytes"]/(rate*2)) phase="gap"
+                } else if (("fifo_commit1" in m) && at>=m["fifo_commit1"]) phase="answer"
+                else phase="prestart"
+            }
+            times=""
+            if (origin in m) {
+                for (i=1; i<=observed; i++) {
+                    if (underrun_times[i]>=m[origin]) {
+                        if (times!="") times=times ","
+                        times=times sprintf("%.3f",(underrun_times[i]-m[origin])/1000)
+                    }
+                }
+            }
+            printf " player_underrun_at=%s player_underrun_first_at=%s player_underrun_phase=%s", \
+                (times=="" ? "-" : times), delta(origin,"player_underrun_at"), phase
             printf " wake→filler_commit=%s wake→answer_commit=%s filler→answer_gap=%s filler→answer_gap_kind=%s", \
                 delta(origin,"filler_commit"), delta(origin,"answer_commit"), gap, gap_kind
         }
@@ -970,6 +1007,19 @@ log_ts() {
     echo "${base}.${ms:-000}"
 }
 
+# Snapshot physical wake evidence at hook entry, before phase and busy checks.
+if [ "$1" = think ]; then
+    event_ms=$(awk '{printf "%.0f", $1*1000; exit}' /proc/uptime 2>/dev/null)
+    physical_ms=-
+    if IFS=' ' read -r physical_pid observed_ms 2>/dev/null < /tmp/native_followup/physical-wake; then
+        case "$physical_pid:$observed_ms" in
+            *[!0-9:]*|:*|*:) ;;
+            *) if [ "$physical_pid" -gt 1 ] && kill -0 "$physical_pid" 2>/dev/null; then
+                   physical_ms="$observed_ms"
+               fi ;;
+        esac
+    fi
+fi
 echo "[$(log_ts)] wakeup.sh $*" >> "$EVENT_LOG"
 
 # This software followup owns its LEDs and has no wakeword prompt. Suppress the
@@ -1043,7 +1093,7 @@ case "$1" in
                 touch "$AIVS_GUARD_ARMED"
             fi
             if [ "$WAKE_ON_THINK_SYSTEM1" = "1" ] && [ "$root_dev" = "/dev/mtdblock5" ] && [ -p "$EVENT_FIFO" ]; then
-                ( echo "think $ts" > "$EVENT_FIFO" 2>/dev/null ) &
+                ( echo "think $ts ${event_ms:--} $physical_ms" > "$EVENT_FIFO" 2>/dev/null ) &
                 echo "[$(log_ts)] NATIVE_WAKE_EVENT_FROM_THINK root=$root_dev ts=$ts" >> "$EVENT_LOG"
             fi
             if [ "$root_dev" = "/dev/mtdblock5" ]; then
@@ -2122,6 +2172,9 @@ wait_native_live_asr() {
     set_state "FOLLOWUP_LISTENING"
     led_feedback_llm_followup_listening
     log "[FOLLOWUP] native live listening; cloud ASR-only; no wakeword required"
+    local listen_ms
+    listen_ms=$(monotonic_ms)
+    FOLLOWUP_TIMEOUT_START_MS=""
     "$NATIVE_ASR_CTL" listen "$$" "$NATIVE_ASR_LISTEN_TIMEOUT" > /tmp/native_followup_text
     ret=$?
     if [ "$ret" -eq 0 ]; then
@@ -2129,6 +2182,7 @@ wait_native_live_asr() {
         [ -n "$FOLLOWUP_TEXT" ] || ret=124
     fi
     rm -f /tmp/native_followup_text
+    [ "$ret" -ne 124 ] || FOLLOWUP_TIMEOUT_START_MS="$listen_ms"
     if [ "$ret" -eq 125 ]; then
         NATIVE_DIALOG_HANDED_OFF=1
         LLM_SESSION_MASTER_TARGET=""
@@ -3587,6 +3641,7 @@ stream_synthesize_sentence() {
 llm_aplay() {
     local helper="${DIRAC_APLAY:-/data/dirac_aplay.sh}"
     local playback_log="${DIRAC_PLAYBACK_LOG:-/tmp/native_first_dirac.log}" rc
+    local err_dir="" reader line observed
     # One log per player, never store audio or grow a persistent log on /data.
     if [ -x "$helper" ]; then
         set -- "$helper" "$@"
@@ -3595,12 +3650,39 @@ llm_aplay() {
         set -- aplay "$@"
     fi
     [ -z "${LLM_APLAY_TIMEOUT:-}" ] || set -- timeout -t "$LLM_APLAY_TIMEOUT" "$@"
-    LLM_DIRAC_ENABLED="${LLM_DIRAC_ENABLED:-1}" "$@" 2>"$playback_log"
-    rc=$?
     if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ] && [ -n "${STREAM_PLAY_MARK_DIR:-}" ] && latency_active; then
-        # Read each completed aplay log before the next player can overwrite it.
-        # ALSA reports underruns while writing or draining audio. FIFO wait before
-        # the first write is timed separately and produces no ALSA event.
+        err_dir=$(mktemp -d "$STREAM_PLAY_MARK_DIR/aplay.XXXXXX") || err_dir=""
+        if [ -n "$err_dir" ] && ! mkfifo "$err_dir/stderr"; then
+            rm -rf "$err_dir"
+            err_dir=""
+        fi
+    fi
+    if [ -n "$err_dir" ]; then
+        (
+            while IFS= read -r line || [ -n "$line" ]; do
+                case " $line " in
+                    *[[:space:]]underrun!!![[:space:]]*)
+                        observed=$(monotonic_ms)
+                        case "$observed" in
+                            ''|*[!0-9]*) ;;
+                            *) printf 'player_underrun_at %s\n' "$observed" >> "$STREAM_PLAY_MARK_DIR/marks" ;;
+                        esac ;;
+                esac
+                printf '%s\n' "$line"
+            done < "$err_dir/stderr"
+        ) > "$err_dir/captured" &
+        reader=$!
+        LLM_DIRAC_ENABLED="${LLM_DIRAC_ENABLED:-1}" "$@" 2>"$err_dir/stderr"
+        rc=$?
+        wait "$reader" || :
+        cat "$err_dir/captured" > "$playback_log" 2>/dev/null || :
+        rm -rf "$err_dir"
+    else
+        LLM_DIRAC_ENABLED="${LLM_DIRAC_ENABLED:-1}" "$@" 2>"$playback_log"
+        rc=$?
+    fi
+    if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ] && [ -n "${STREAM_PLAY_MARK_DIR:-}" ] && latency_active; then
+        # Keep count and duration tied to the same stderr lines as before.
         LC_ALL=C awk '
             /(^|[[:space:]])underrun!!!([[:space:]]|$)/ {
                 count++
@@ -3670,9 +3752,9 @@ route_beep_prepare() {
         return $?
     fi
     [ -f "$source" ] && [ -r "$source" ] || return 1
-    head -c 16801 "$source" > "$out" || return 1
+    head -c 62401 "$source" > "$out" || return 1
     bytes=$(wc -c < "$out") || return 1
-    [ "$bytes" -ge 2 ] && [ "$bytes" -le 16800 ] && [ "$((bytes % 2))" = 0 ] || return 1
+    [ "$bytes" -ge 2 ] && [ "$bytes" -le 62400 ] && [ "$((bytes % 2))" = 0 ] || return 1
     if command -v hexdump >/dev/null 2>&1; then
         magic=$(hexdump -n 4 -v -e '1/1 "%02x"' "$out") || return 1
     else
@@ -3722,47 +3804,82 @@ route_beep_scale() {
 }
 
 route_beep_worker() {
-    local dir="$1" pcm="$1/cue.pcm" fifo="$1/cue.fifo" ap writer polls=0 rc=1 started
-    trap ": > '$dir/done'" EXIT
-    if ! route_beep_prepare "$pcm" 2>/dev/null || ! route_beep_scale "$pcm" || ! mkfifo "$fifo"; then
+    local dir="$1"
+    if ! route_beep_prepare "$dir/cue.pcm" 2>/dev/null || ! route_beep_scale "$dir/cue.pcm"; then
+        rm -f "$dir/cue.pcm"
         log '[WARN] 转 LLM 提示音 PCM 不可用，已跳过'
-        return 1
     fi
-    # 打开读端时用双向 fd 作锚点。aplay 只继承只读 stdin，取消时关闭
-    # 写端即可收到 EOF，即使 Dirac 仍在启动也不会卡在 open。
-    exec 7<>"$fifo"
-    exec 6<"$fifo"
-    (
-        # ash 会为函数调用的临时重定向保留原 fd，必须在子进程中永久关闭写端。
-        exec 0<&6 6<&- 7>&-
-        STREAM_PLAY_MARK_DIR="" DIRAC_PLAYBACK_LOG="$dir/play.log" LLM_APLAY_TIMEOUT=30 \
-            llm_aplay -t raw -r "$DEVICE_TTS_PCM_RATE" -f S16_LE -c 1
-    ) >/dev/null &
-    ap=$!
-    exec 6<&-
-    while [ ! -f "$dir/trigger" ] && [ ! -f "$dir/cancel" ] && kill -0 "$ap" 2>/dev/null; do
-        sleep 0.02
+    : > "$dir/prepared"
+}
+
+# Called only by the sole PCM consumer. Keep a small lead for ALSA's period
+# without queuing the entire 1.3 s cue ahead of the first ready speech.
+route_beep_step() {
+    local now bytes
+    [ "$cue_offset" -lt "$cue_bytes" ] || return 0
+    now=$(monotonic_ms)
+    [ "${now:-0}" -ge "$cue_next" ] || return 0
+    bytes=$((cue_bytes - cue_offset))
+    [ "$bytes" -le 1920 ] || bytes=1920
+    if [ "$cue_offset" = 0 ]; then
+        cue_base=${now:-0}
+        [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark beep_commit "$now"
+    fi
+    tail -c "+$((cue_offset + 1))" "$cue_pcm" | head -c "$bytes" >&8 || return 1
+    cue_offset=$((cue_offset + bytes))
+    cue_next=$((cue_base + cue_offset / 48 - 160))
+    if [ "$cue_offset" = "$cue_bytes" ]; then
+        [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark beep_drain
+    fi
+}
+
+route_beep_mix() {
+    local speech="$1" offset="$2" count="$3" chunk part
+    # Work on a bounded prefix; the original speech PCM and the live retry
+    # cursor remain untouched. Both supported playback hosts are little-endian.
+    tail -c "+$((cue_offset + 1))" "$cue_pcm" | head -c "$count" > "$wd/cue-tail.pcm"
+    tail -c "+$((offset + 1))" "$speech" | head -c "$count" > "$wd/voice-head.pcm"
+    for part in cue-tail voice-head; do
+        if command -v hexdump >/dev/null 2>&1; then
+            hexdump -v -e '1/2 "%d\n"' "$wd/$part.pcm"
+        else
+            od -An -v -t d2 "$wd/$part.pcm" | awk '{for (i=1; i<=NF; i++) print $i}'
+        fi > "$wd/$part.samples" || return 1
     done
-    if [ -f "$dir/trigger" ] && [ ! -f "$dir/cancel" ]; then
-        started=$(monotonic_ms)
-        (exec cat "$pcm" >&7) &
-        writer=$!
-        exec 7>&-
-        # 在父进程计时，避免 timeout 的看门进程继承 FIFO 写端而延迟 EOF。
-        while [ "$polls" -lt 100 ] && kill -0 "$writer" 2>/dev/null && kill -0 "$ap" 2>/dev/null; do
-            polls=$((polls + 1))
-            sleep 0.02
-        done
-        if kill -0 "$writer" 2>/dev/null; then kill "$writer" 2>/dev/null || :; fi
-        wait "$writer" && rc=0
-    else
-        exec 7>&-
+    LC_ALL=C awk -v cue="$wd/cue-tail.samples" -v frames="$((count / 2))" '
+        {
+            if ((getline v < cue) != 1) exit 1
+            # Mix a fading cue, leaving the speech samples at their normal gain.
+            x=int($1+v*(frames-NR)/(frames>1 ? frames-1 : 1))
+            if (x>32767) x=32767
+            if (x< -32768) x=-32768
+            if (x<0) x+=65536
+            printf "\\0%03o\\0%03o", x%256, int(x/256)
+            if (NR%64==0) printf "\n"
+        }
+        END { if (NR%64) printf "\n" }
+    ' "$wd/voice-head.samples" | while IFS= read -r chunk; do
+        printf '%b' "$chunk"
+    done > "$wd/cue-mixed.pcm"
+    [ "$(wc -c < "$wd/cue-mixed.pcm")" -eq "$count" ]
+}
+
+route_beep_write_voice() {
+    local speech="$1" offset="$2" bytes="$3" count
+    [ -n "$bytes" ] || bytes=$(($(wc -c < "$speech") - offset))
+    count=$((cue_bytes - cue_offset))
+    [ "$count" -le 4800 ] || count=4800
+    [ "$count" -le "$bytes" ] || count="$bytes"
+    count=$((count - count % 2))
+    if [ "$count" -gt 0 ] && route_beep_mix "$speech" "$offset" "$count"; then
+        cat "$wd/cue-mixed.pcm" >&8 || return 1
+        offset=$((offset + count))
+        bytes=$((bytes - count))
+        [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark beep_overlap 1
     fi
-    if wait "$ap" && [ "$rc" = 0 ]; then
-        if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ] && [ -n "$started" ]; then
-            printf 'beep_commit %s\n' "$started" > "$dir/marks"
-        fi
-    fi
+    cue_offset=$cue_bytes
+    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark beep_drain
+    [ "$bytes" -le 0 ] || tail -c "+$((offset + 1))" "$speech" | head -c "$bytes" >&8
 }
 
 route_beep_allowed() {
@@ -3774,10 +3891,7 @@ route_beep_allowed() {
 }
 
 route_beep_begin() {
-    if [ -n "${ROUTE_BEEP_DIR:-}" ]; then
-        [ -f "$ROUTE_BEEP_DIR/cancel" ] || return 0
-        route_beep_end
-    fi
+    [ -z "${ROUTE_BEEP_DIR:-}" ] || return 0
     ROUTE_BEEP_DIR=$(mktemp -d /tmp/native_first_beep.XXXXXX) || return 1
     route_beep_worker "$ROUTE_BEEP_DIR" &
     ROUTE_BEEP_PID=$!
@@ -3785,70 +3899,94 @@ route_beep_begin() {
 
 route_beep_fire() {
     route_beep_allowed && route_beep_begin || return 1
-    [ ! -f "$ROUTE_BEEP_DIR/trigger" ] || return 0
+    [ -z "${ROUTE_BEEP_PLAY_PID:-}" ] || return 0
     if [ "${1:-}" != master-ready ] && ! apply_llm_master_volume; then
         log '[WARN] LLM Master 设置失败，跳过转 LLM 提示音'
         [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark beep_skipped
         return 1
     fi
-    if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
+    local wd=/tmp/native_first_stream
+    rm -rf "$wd" 2>/dev/null
+    (umask 077; mkdir -p "$wd") || return 1
+    if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ] && latency_active; then
+        [ ! -s "${LATENCY_MARK_DIR:-}/marks" ] || cat "$LATENCY_MARK_DIR/marks" > "$wd/marks"
+        latency_discard
+        LATENCY_MARK_DIR="$wd"
         latency_mark beep_start
         [ "$route_beep_turn" != wake ] || latency_mark led_green
     fi
-    : > "$ROUTE_BEEP_DIR/trigger"
+    ROUTE_BEEP_WD="$wd"
+    stream_play_worker "$wd" "$ROUTE_BEEP_DIR" &
+    ROUTE_BEEP_PLAY_PID=$!
     [ "$route_beep_turn" != wake ] || led_feedback_llm_accept
     return 0
 }
 
-route_beep_wait() {
+route_beep_end() {
     local dir="${ROUTE_BEEP_DIR:-}"
     [ -n "$dir" ] || return 0
-    [ -f "$dir/trigger" ] || : > "$dir/cancel"
-    while [ ! -f "$dir/done" ] && kill -0 "$ROUTE_BEEP_PID" 2>/dev/null; do sleep 0.02; done
-}
-
-route_beep_end() {
-    local dir="${ROUTE_BEEP_DIR:-}" marks="${LATENCY_MARK_DIR:-}"
-    [ -n "$dir" ] || return 0
-    [ -f "$dir/trigger" ] || : > "$dir/cancel"
-    wait "$ROUTE_BEEP_PID" 2>/dev/null || :
-    if [ -f "$dir/trigger" ] && [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
-        if [ -s "$dir/marks" ] && [ -d "$marks" ]; then
-            cat "$dir/marks" >> "$marks/marks"
-        else
-            latency_mark beep_skipped
-        fi
+    if [ -n "${ROUTE_BEEP_PLAY_PID:-}" ]; then
+        : > "$ROUTE_BEEP_WD/done"
+        wait "$ROUTE_BEEP_PLAY_PID" 2>/dev/null || :
     fi
+    wait "$ROUTE_BEEP_PID" 2>/dev/null || :
     rm -rf "$dir"
     ROUTE_BEEP_DIR=""
     ROUTE_BEEP_PID=""
+    ROUTE_BEEP_PLAY_PID=""
+    ROUTE_BEEP_WD=""
 }
 
 # PCM 常驻 FIFO 连播；遇到原生补播任务先排空并关闭 aplay，补播结束后续接 PCM。
 stream_play_worker() {
-    local wd="$1"
+    local wd="$1" cue_dir="${2:-}"
     local fifo="$wd/play.fifo" STREAM_PLAY_MARK_DIR="$wd"
     local idx=1 n ap="" sentence rc answer_idx=1 pcm_commit
     local threshold=0 sent=0 size bytes aborted=0
+    local cue_pcm="" cue_offset=0 cue_bytes=0 cue_next=0 cue_base=0 stream_ready=1
     if [ "${DEVICE_TTS_STREAM_COMMIT:-0}" = 1 ] && [ "$DEVICE_TTS_PCM_RATE" = 24000 ]; then
         threshold=$((48 * ${DEVICE_TTS_STREAM_MIN_MS:-300}))
     fi
     [ "${LLM_WEB_FILLER_CACHE:-0}" != 1 ] && [ ! -f "$wd/early_filler" ] || idx=0
     rm -f "$fifo"
     mkfifo "$fifo" 2>/dev/null || mknod "$fifo" p 2>/dev/null
-    if [ -f "$wd/early_player" ]; then
-        [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark player_start
-        (
-            [ -z "${ROUTE_BEEP_DIR:-}" ] || route_beep_wait
-            llm_aplay -r "$DEVICE_TTS_PCM_RATE" -f S16_LE -c 1 "$fifo"
-        ) >/dev/null &
+    if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ] && { [ -n "$cue_dir" ] || [ -f "$wd/early_player" ]; }; then
+        latency_mark player_start
+    fi
+    if [ -n "$cue_dir" ]; then
+        stream_ready=0
+        while [ ! -f "$cue_dir/prepared" ] && kill -0 "$ROUTE_BEEP_PID" 2>/dev/null; do sleep 0.02; done
+        cue_pcm="$cue_dir/cue.pcm"
+        if [ -f "$cue_dir/prepared" ] && [ -s "$cue_pcm" ]; then
+            cue_bytes=$(wc -c < "$cue_pcm")
+        else
+            [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark beep_skipped
+        fi
+    fi
+    if [ -n "$cue_dir" ] || [ -f "$wd/early_player" ]; then
+        [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark player_spawn
+        llm_aplay -r "$DEVICE_TTS_PCM_RATE" -f S16_LE -c 1 "$fifo" >/dev/null &
         ap=$!
         exec 8>"$fifo"
         [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark player_fifo_open
-    else
-        [ -z "${ROUTE_BEEP_DIR:-}" ] || route_beep_wait
+        if [ -f "$wd/0000.rdy" ] || [ -f "$wd/0001.rdy" ] ||
+            { [ "$threshold" -gt 0 ] && [ -s "$wd/0001.live" ] &&
+                [ "$(wc -c < "$wd/0001.live")" -ge "$threshold" ]; }; then
+            log '[WARN] player_open_late first_pcm_ready=1'
+        fi
+        [ "$cue_bytes" = 0 ] || route_beep_step || { exec 8>&-; wait "$ap"; return 1; }
     fi
     while :; do
+        if [ "$stream_ready" = 0 ]; then
+            if [ -f "$wd/stream_ready" ]; then
+                stream_ready=1
+                [ "${LLM_WEB_FILLER_CACHE:-0}" != 1 ] && [ ! -f "$wd/early_filler" ] || idx=0
+            elif [ ! -f "$wd/done" ]; then
+                route_beep_step || { exec 8>&-; wait "$ap"; return 1; }
+                sleep 0.02
+                continue
+            fi
+        fi
         [ ! -f "$wd/early_filler" ] || tts_early_filler_publish "$wd"
         n=$(printf "%04d" "$idx")
         if [ "$sent" -gt 0 ] && [ "$aborted" = 0 ] && [ -f "$wd/$n.stream_aborted" ]; then
@@ -3873,6 +4011,11 @@ stream_play_worker() {
             if [ -s "$wd/$n.native" ] || [ -f "$wd/$n.failed" ]; then
                 # 必须等 PCM 真正排空、释放声卡后才允许原生播放器出声。
                 if [ -n "$ap" ]; then
+                    if [ "$cue_offset" -lt "$cue_bytes" ]; then
+                        cue_offset=$cue_bytes
+                        [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark beep_drain
+                    fi
+                    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark player_drain_start
                     exec 8>&-
                     wait "$ap" || { [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark play_done; return 1; }
                     ap=""
@@ -3897,6 +4040,7 @@ stream_play_worker() {
                 log "[TTS] 单句原生兜底完成 $n"
             elif [ -s "$wd/$n.pcm" ]; then
                 if [ -z "$ap" ]; then
+                    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark player_spawn
                     llm_aplay -r "$DEVICE_TTS_PCM_RATE" -f S16_LE -c 1 "$fifo" >/dev/null &
                     ap=$!
                     exec 8>"$fifo"
@@ -3919,7 +4063,9 @@ stream_play_worker() {
                         latency_mark answer_commit "$pcm_commit"
                     fi
                 fi
-                if ! { if [ "$sent" = 0 ]; then cat "$wd/$n.pcm"; else
+                if ! { if [ "$cue_offset" -lt "$cue_bytes" ]; then
+                    route_beep_write_voice "$wd/$n.pcm" "$sent" ""
+                elif [ "$sent" = 0 ]; then cat "$wd/$n.pcm"; else
                     tail -c "+$((sent + 1))" "$wd/$n.pcm"
                 fi; } >&8; then
                     exec 8>&-
@@ -3942,6 +4088,7 @@ stream_play_worker() {
             bytes=$((size - sent))
             if [ "$bytes" -gt 0 ] && { [ "$sent" -gt 0 ] || [ "$size" -ge "$threshold" ]; }; then
                 if [ -z "$ap" ]; then
+                    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark player_spawn
                     llm_aplay -r "$DEVICE_TTS_PCM_RATE" -f S16_LE -c 1 "$fifo" >/dev/null &
                     ap=$!
                     exec 8>"$fifo"
@@ -3960,7 +4107,11 @@ stream_play_worker() {
                     [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark answer_commit "$pcm_commit"
                 fi
                 printf '%s\n' "$size" > "$wd/$n.stream_sent"
-                if ! tail -c "+$((sent + 1))" "$wd/$n.live" | head -c "$bytes" >&8; then
+                if ! { if [ "$cue_offset" -lt "$cue_bytes" ]; then
+                    route_beep_write_voice "$wd/$n.live" "$sent" "$bytes"
+                else
+                    tail -c "+$((sent + 1))" "$wd/$n.live" | head -c "$bytes"
+                fi; } >&8; then
                     exec 8>&-
                     wait "$ap" 2>/dev/null
                     [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark play_done
@@ -3976,10 +4127,17 @@ stream_play_worker() {
             idx=1
             continue
         fi
-        if [ -f "$wd/done" ] && { [ "$idx" != 0 ] || [ ! -f "$wd/web_filler_direct" ]; }; then break; fi
-        sleep 0.05
+        if [ "$cue_offset" -lt "$cue_bytes" ]; then
+            route_beep_step || { exec 8>&-; wait "$ap"; return 1; }
+            sleep 0.02
+        elif [ -f "$wd/done" ] && { [ "$idx" != 0 ] || [ ! -f "$wd/web_filler_direct" ]; }; then
+            break
+        else
+            sleep 0.05
+        fi
     done
     if [ -n "$ap" ]; then
+        [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark player_drain_start
         exec 8>&-        # 关闭写端 → aplay 播完剩余 PCM 后 EOF 退出
         wait "$ap"
         rc=$?
@@ -4021,12 +4179,17 @@ llm_stream_answer_and_play() {
         log '[WARN] 首段切分配置无效，使用默认值'
     fi
     [ -z "${TTS_PREWARM_PID:-}" ] || tts_prewarm_stop
-    rm -rf "$wd" 2>/dev/null
-    (umask 077; mkdir -p "$wd") || return 1
-    if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ] && latency_active; then
-        [ ! -s "${LATENCY_MARK_DIR:-}/marks" ] || cat "$LATENCY_MARK_DIR/marks" > "$wd/marks" 2>/dev/null
-        latency_discard
-        LATENCY_MARK_DIR="$wd"
+    if [ -n "${ROUTE_BEEP_PLAY_PID:-}" ]; then
+        wd="$ROUTE_BEEP_WD"
+        play_pid="$ROUTE_BEEP_PLAY_PID"
+    else
+        rm -rf "$wd" 2>/dev/null
+        (umask 077; mkdir -p "$wd") || return 1
+        if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ] && latency_active; then
+            [ ! -s "${LATENCY_MARK_DIR:-}/marks" ] || cat "$LATENCY_MARK_DIR/marks" > "$wd/marks" 2>/dev/null
+            latency_discard
+            LATENCY_MARK_DIR="$wd"
+        fi
     fi
     if [ "${DEVICE_TTS_EARLY_START:-0}" = 1 ] && [ "${DEVICE_TTS_PERSISTENT:-0}" = 1 ] &&
         [ "$LLM_PIPELINE" = native ] && [ "$TTS_ENGINE" = device ] && [ "$DEVICE_TTS_STREAM" = 1 ]; then
@@ -4038,14 +4201,12 @@ llm_stream_answer_and_play() {
     : > "$wd/segs"
     : > "$wd/native_segs"
 
-    if [ -n "${ROUTE_BEEP_DIR:-}" ] && [ -f "$ROUTE_BEEP_DIR/trigger" ]; then
-        stream_play_worker "$wd" &
-        play_pid=$!
-    fi
+    [ -z "$play_pid" ] || : > "$wd/stream_ready"
     messages=$(llm_build_messages "$sid" "$user") || {
         if [ -n "$play_pid" ]; then
             : > "$wd/done"
             wait "$play_pid" || :
+            ROUTE_BEEP_PLAY_PID=""
         fi
         log "[HISTORY] 配置、路径或历史格式不可用，未提交模型请求"
         return 1
@@ -4164,6 +4325,7 @@ llm_stream_answer_and_play() {
     : > "$wd/done"
     wait "$play_pid"
     play_rc=$?
+    ROUTE_BEEP_PLAY_PID=""
     [ -z "${ROUTE_BEEP_DIR:-}" ] || route_beep_end
     if [ "$early" = 1 ] && [ ! -f "$wd/no_history" ]; then
         first_pcm="$wd/0001.pcm"
@@ -4256,7 +4418,7 @@ send_text_native() {
     record_llm_query "$text"
     [ "${DEVICE_TTS_EARLY_START:-0}" != 1 ] || tts_early_filler_start "$session_id"
     set_busy "llm_playing"
-    if [ -z "${ROUTE_BEEP_DIR:-}" ] || [ ! -f "$ROUTE_BEEP_DIR/trigger" ]; then
+    if [ -z "${ROUTE_BEEP_PLAY_PID:-}" ]; then
         apply_llm_master_volume && beep_master_ready=1
     fi
     freeze_native_player
@@ -4274,7 +4436,7 @@ send_text_native() {
     # 句级流式：仅端侧 EdgeTTS 且开关打开时启用（边生成边按句播，降首声延迟）。
     if [ "$TTS_ENGINE" = "device" ] && [ "$DEVICE_TTS_STREAM" = "1" ]; then
         if [ "${LLM_ROUTE_BEEP:-0}" = 1 ] && route_beep_allowed; then
-            if [ -z "${ROUTE_BEEP_DIR:-}" ] || [ ! -f "$ROUTE_BEEP_DIR/trigger" ]; then
+            if [ -z "${ROUTE_BEEP_PLAY_PID:-}" ]; then
                 if [ "$NATIVE_PLAYER_STOP_OK" = 1 ] && [ "$beep_master_ready" = 1 ]; then
                     route_beep_fire master-ready || :
                 else
@@ -4283,7 +4445,7 @@ send_text_native() {
                 fi
             fi
         fi
-        if [ -z "${ROUTE_BEEP_DIR:-}" ] || [ ! -f "$ROUTE_BEEP_DIR/trigger" ] || [ "${route_beep_turn:-}" != wake ]; then
+        if [ -z "${ROUTE_BEEP_PLAY_PID:-}" ] || [ "${route_beep_turn:-}" != wake ]; then
             led_feedback_llm_playing
         fi
         if [ "$cleanup_mode" = "defer" ]; then
@@ -4673,6 +4835,7 @@ classify_native_dialog_text() {
 }
 
 play_native_dialog_prompt() {
+    [ -z "${ROUTE_BEEP_DIR:-}" ] || route_beep_end
     local text="$1" wd=/tmp/native_first_input_prompt play_pid rc=0
     set_state "LLM_SPEAKING"
     set_busy "input_prompt"
@@ -4925,12 +5088,70 @@ handle_llm_dialog() {
     set_state "IDLE"
 }
 
+native_route_wait_quiet() {
+    local status now start limit start_limit seen=0 idle=0
+    # A dispatched Speak can still be queued when the first status is idle.
+    # Confirm an observed playback has ended before transferring audio ownership.
+    start=$(monotonic_ms)
+    [ -n "$start" ] || return 1
+    start_limit=$((start + 1000 * TTS_NATIVE_STATUS_START_TIMEOUT_SECONDS))
+    limit=$((start + 1000 * TTS_NATIVE_STATUS_MAX_SECONDS))
+    while :; do
+        status=$(native_tts_player_status)
+        now=$(monotonic_ms)
+        [ -n "$now" ] || return 1
+        case "$status" in
+            1) seen=1; idle=0 ;;
+            0) if [ "$seen" = 1 ]; then
+                   idle=$((idle + 1))
+                   [ "$idle" -lt "$TTS_NATIVE_STATUS_IDLE_HITS" ] || return 0
+               fi ;;
+            *) idle=0 ;;
+        esac
+        if [ "$now" -ge "$limit" ] || { [ "$seen" = 0 ] && [ "$now" -ge "$start_limit" ]; }; then
+            return 1
+        fi
+        sleep "$TTS_NATIVE_STATUS_POLL_SECONDS"
+    done
+}
+
+native_route_beep_gate() {
+    case "$RESULT_SOURCE:$RESULT_SPEAK" in
+        'aivs_lab_early_failure:[failure Speak suppressed before dispatch]')
+            route_beep_fire || :
+            ;;
+        aivs_lab_instruction:?*)
+            if ! native_route_wait_quiet; then
+                log '[ROUTE] native output completion unconfirmed; keep native dialog'
+                return 1
+            fi
+            route_beep_quiet=1
+            ;;
+        *)
+            [ "$(native_tts_player_status)" != 0 ] || route_beep_quiet=1
+            ;;
+    esac
+    return 0
+}
+
+wake_is_followup_teardown() {
+    local event="$1" event_ms="$2" physical_ms="$3"
+    [ "$event" = think ] || return 1
+    case "$event_ms:$physical_ms:${FOLLOWUP_TIMEOUT_START_MS:-}:${FOLLOWUP_TIMEOUT_END_MS:-}" in
+        *[!0-9:]*|:*|*::*) return 1 ;;
+    esac
+    [ -n "${FOLLOWUP_TIMEOUT_END_MS:-}" ] &&
+        [ "$event_ms" -ge "$FOLLOWUP_TIMEOUT_START_MS" ] &&
+        [ "$event_ms" -le "$FOLLOWUP_TIMEOUT_END_MS" ] &&
+        [ "$physical_ms" -lt "$FOLLOWUP_TIMEOUT_START_MS" ]
+}
+
 handle_wakeup() {
     if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
         latency_begin
         latency_mark wake
     fi
-    local wake_ts="$1" route_beep_turn=wake
+    local wake_ts="$1" route_beep_turn=wake route_beep_quiet=0
     if [ "${LLM_ROUTE_BEEP:-0}" = 1 ] && route_beep_allowed; then route_beep_begin || :; fi
     new_llm_session_id
     local session_id="$NEW_LLM_SESSION_ID"
@@ -4984,14 +5205,20 @@ handle_wakeup() {
             if is_unsupported_result; then
                 log "[NATIVE] unsupported，停止原生播报并转 LLM"
                 [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark route_llm
-                if [ "${LLM_ROUTE_BEEP:-0}" = 1 ] && [ "$RESULT_SOURCE" = aivs_lab_early_failure ] &&
-                    [ "$RESULT_SPEAK" = '[failure Speak suppressed before dispatch]' ]; then
-                    route_beep_fire || :
+                if [ "${LLM_ROUTE_BEEP:-0}" = 1 ] && route_beep_allowed && ! native_route_beep_gate; then
+                    led_off
+                    [ "${DEVICE_TTS_EARLY_START:-0}" != 1 ] || tts_persistent_stop
+                    set_state "IDLE"
+                    return 0
                 fi
                 [ "${DEVICE_TTS_EARLY_START:-0}" != 1 ] || tts_early_filler_start "$session_id"
                 set_state "NATIVE_FALLBACK"
                 [ "$FOLLOWUP_ENABLED" = "1" ] && [ "$FOLLOWUP_MODE" = "native_multirounds" ] && native_followup_mark_multirounds
                 freeze_native_player
+                if [ "$route_beep_quiet" = 1 ] && [ "$NATIVE_PLAYER_STOP_OK" = 1 ]; then
+                    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark freeze_first
+                    route_beep_fire || :
+                fi
                 handle_llm_dialog "$session_id" "$fallback_query"
                 return 0
             fi
@@ -5007,14 +5234,20 @@ handle_wakeup() {
             else
                 log "[NATIVE] non-success-domain，立即 fallback LLM"
                 [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark route_llm
-                if [ "${LLM_ROUTE_BEEP:-0}" = 1 ] && [ "$RESULT_SOURCE" = aivs_lab_early_failure ] &&
-                    [ "$RESULT_SPEAK" = '[failure Speak suppressed before dispatch]' ]; then
-                    route_beep_fire || :
+                if [ "${LLM_ROUTE_BEEP:-0}" = 1 ] && route_beep_allowed && ! native_route_beep_gate; then
+                    led_off
+                    [ "${DEVICE_TTS_EARLY_START:-0}" != 1 ] || tts_persistent_stop
+                    set_state "IDLE"
+                    return 0
                 fi
                 [ "${DEVICE_TTS_EARLY_START:-0}" != 1 ] || tts_early_filler_start "$session_id"
                 set_state "NATIVE_FALLBACK"
                 [ "$FOLLOWUP_ENABLED" = "1" ] && [ "$FOLLOWUP_MODE" = "native_multirounds" ] && native_followup_mark_multirounds
                 freeze_native_player
+                if [ "$route_beep_quiet" = 1 ] && [ "$NATIVE_PLAYER_STOP_OK" = 1 ]; then
+                    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark freeze_first
+                    route_beep_fire || :
+                fi
                 handle_llm_dialog "$session_id" "$fallback_query"
                 return 0
             fi
@@ -5182,7 +5415,7 @@ setup_native_endpoint
 log "[IDLE] 等待原生唤醒词：小爱同学"
 exec 3<>"$EVENT_FIFO"
 while true; do
-    if ! read event ts <&3; then
+    if ! read -r event ts event_ms physical_ms <&3; then
         sleep 0.2
         continue
     fi
@@ -5193,14 +5426,23 @@ while true; do
     esac
     now=$(date +%s)
     if [ -n "$ts" ] && [ $((now - ts)) -gt "$WAKE_EVENT_MAX_AGE" ] 2>/dev/null; then
-        log "[WAKE] ignore stale event ts=$ts age=$((now - ts))s"
+        log "[WAKE] ignored reason=stale event=$event ts=$ts age=$((now - ts))s"
         continue
     fi
     if is_busy; then
-        log "[WAKE] ignored while busy ts=$ts"
+        log "[WAKE] ignored reason=busy event=$event ts=$ts"
         continue
     fi
+    if wake_is_followup_teardown "$event" "$event_ms" "$physical_ms"; then
+        log "[WAKE] ignored reason=followup_teardown event=$event"
+        continue
+    fi
+    FOLLOWUP_TIMEOUT_START_MS=""
+    FOLLOWUP_TIMEOUT_END_MS=""
     handle_wakeup "$ts"
+    if [ -n "${FOLLOWUP_TIMEOUT_START_MS:-}" ]; then
+        FOLLOWUP_TIMEOUT_END_MS=$(monotonic_ms)
+    fi
     [ -z "${ROUTE_BEEP_DIR:-}" ] || route_beep_end
     [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_discard
     rm -f "$AIVS_GUARD_ARMED"

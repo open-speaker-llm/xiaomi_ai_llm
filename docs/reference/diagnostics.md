@@ -154,7 +154,10 @@ native + 端侧流式在轮末输出一行 `[LATENCY]`，同步追加到 `/tmp/n
 | `tts1_first` / `tts1_to_commit` | 正文首段开始合成至首批解码 PCM 发布、至首次写入 FIFO 前。完整合成时间仍看 `tts1` |
 | `player_prestart_wait` | 首次打开播放 FIFO 到首次提交 PCM 前的等待秒数。缺少任一打点时为 `-` |
 | `player_underrun` / `player_underrun_ms` | 本轮各次 aplay 日志的 `underrun!!!` 行数和行内报告的时长之和（毫秒）。日志未报告某次欠载时长时，总时长为 `-`。原始日志路径默认为 `/tmp/native_first_dirac.log`，每次启动播放器时覆盖 |
-| `wake→beep` / `wake→led_green` / `beep` | 从本轮起点至提示音 PCM 提交、触发绿灯的秒数。提示音写入专用 FIFO 且播放器成功退出时标为 `played`，策略关闭或当前轮不适用为 `off`，播放未成功时为 `skipped`。两个时间点都是软件打点 |
+| `wake→beep` / `wake→led_green` / `beep` | 从本轮起点至提示音 PCM 提交、触发绿灯的秒数。开始向播放器写入提示音时标为 `played`，策略关闭或当前轮不适用为 `off`，播放未成功时为 `skipped`。两个时间点都是软件打点 |
+| `player_open` / `player_ready` | 主播放器的实际启动 `player_spawn` 至 FIFO 打开，以及播放器准备开始至 FIFO 打开，单位为秒。旧日志的 `player_open` 包含提示音退出等待 |
+| `wake→beep_drain` / `beep_overlap` | 提示音 PCM 最后一次提交或结束混入的时刻，以及首段语音是否混入了提示音。共享播放器内的这个打点表示写入完成 |
+| `player_underrun_at` / `player_underrun_first_at` / `player_underrun_phase` | aplay 报告欠载时相对本轮起点的秒数列表、首次报告及其阶段。`prestart` 是语音提交前，`filler` 是垫话估计播放期间，`gap` 是估计垫话结束到正文提交，`answer` 是正文提交后，`tail` 是关闭播放器写端后 |
 | `wake→commit1` | 本轮起点至垫话或正文的第一次 PCM FIFO 提交，路由提示音单列 |
 | `pcm1` | 正文首段 PCM 字节数 ÷（采样率 × 2），为单声道 S16LE 音频秒数 |
 | `segs` / `retries` | 已结束合成调用的播放段数（含垫话/兜底）；所有句子的额外尝试总次数 |

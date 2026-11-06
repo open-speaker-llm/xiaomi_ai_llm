@@ -116,6 +116,27 @@ int fclose(FILE *file) {
     return fn(file);
 }
 
+/* The ASR-only worker calls original_wake directly. Only the registered
+ * physical callback publishes evidence for the shell's think-event filter. */
+static void record_physical_wake(void) {
+    char path[sizeof(CONTROL_DIR "/physical-wake.XXXXXX")]=CONTROL_DIR "/physical-wake.XXXXXX";
+    struct timespec ts;
+#ifdef CLOCK_BOOTTIME
+    if (clock_gettime(CLOCK_BOOTTIME,&ts)) return;
+#else
+    if (clock_gettime(CLOCK_MONOTONIC,&ts)) return;
+#endif
+    unsigned long long ms=(unsigned long long)ts.tv_sec*1000+ts.tv_nsec/1000000;
+    int fd=mkstemp(path);
+    if (fd<0) return;
+    char record[48];
+    int n=snprintf(record,sizeof(record),"%u %llu\n",(unsigned)getpid(),ms);
+    int ok=n>0 && (size_t)n<sizeof(record) && write(fd,record,(size_t)n)==n;
+    close(fd);
+    if (ok) (void)rename(path,CONTROL_DIR "/physical-wake");
+    unlink(path);
+}
+
 static void wake_observed(void *ctx, unsigned code, float angle) {
     pthread_mutex_lock(&wake_lock);
     if (code == 1 && angle >= 0 && angle <= 360) last_angle = angle;
@@ -124,6 +145,7 @@ static void wake_observed(void *ctx, unsigned code, float angle) {
     /* Real wakewords yield the ASR-only lease to native NLP. Serialize with
      * software dispatch so the worker cannot wake again after this handoff. */
     pthread_mutex_lock(&wake_dispatch_lock);
+    if (code==1) record_physical_wake();
     struct control s; int fd = state_open(&s);
     int handoff = fd >= 0 && (code & 255u) == 1 &&
         (active(&s) || (s.phase==COMPLETE && alive(s.owner) &&

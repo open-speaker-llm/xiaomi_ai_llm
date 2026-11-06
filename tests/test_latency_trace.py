@@ -128,6 +128,29 @@ sent2_pcm_bytes 48000
         self.assertEqual(fields['commit1'], '0.100')
         self.assertEqual(fields['wake→commit1'], '1.200')
 
+    def test_underrun_is_timestamped_before_player_exit(self):
+        out, _, marks = self.run_shell(functions('llm_aplay') + r'''
+STREAM_PLAY_MARK_DIR="$TEST_DIR"
+DIRAC_PLAYBACK_LOG="$TEST_DIR/aplay.log"
+DIRAC_APLAY="$TEST_DIR/missing-helper"
+monotonic_ms() { echo 4300; }
+aplay() {
+    echo 'underrun!!! (at least 12.500 ms long)' >&2
+    i=0
+    until grep -q '^player_underrun_at 4300$' "$TEST_DIR/marks"; do
+        i=$((i + 1))
+        [ "$i" -lt 100 ] || return 9
+        sleep 0.01
+    done
+    echo 'underrun!!! (at least 0.500 ms long)' >&2
+}
+llm_aplay fixture.pcm || exit "$?"
+latency_report
+''')
+        self.assertEqual(marks.count('player_underrun_at 4300\n'), 2)
+        self.assertIn('player_underrun=2 player_underrun_ms=13.000', out)
+        self.assertIn('player_underrun_at=3.300,3.300 player_underrun_first_at=3.300 player_underrun_phase=answer', out)
+
     def test_player_log_counts_each_invocation_and_preserves_status(self):
         out, _, _ = self.run_shell(functions('llm_aplay') + r'''
 STREAM_PLAY_MARK_DIR="$TEST_DIR"
