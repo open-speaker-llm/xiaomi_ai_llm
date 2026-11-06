@@ -333,7 +333,7 @@ static int receive_json(int ok,void *json) {
                 string_member(j_index(results,0),"text") : "";
             /* Never suppress a failure when there is no usable ASR query for
              * the shell to hand to the LLM. An empty final clears eligibility. */
-            if (*text && strlen(text)<4096) failure_observe_final(id);
+            if (*text && strlen(text)<4096) failure_observe_query(id,text);
             else {
                 pthread_mutex_lock(&failure_lock); failure_observed[0]=0;
                 pthread_mutex_unlock(&failure_lock);

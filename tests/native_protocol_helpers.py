@@ -27,9 +27,11 @@ def embedded_web(source=None):
 
 def with_answer_audio_dependencies(names):
     """Include the shared answer lifecycle when loading individual shell entry points."""
+    if {'get_native_result_aivs_lab', 'native_route_beep_gate'}.intersection(names):
+        names = (*names, 'direct_llm_query')
     if {'handle_llm_dialog', 'send_text_native', 'send_text_and_play', 'route_beep_fire',
         'wait_native_live_asr'}.intersection(names):
         return tuple(dict.fromkeys((*names, 'llm_accept_feedback', 'llm_finish_answer_audio',
-                                    'llm_end_beep', 'llm_answer_interrupted', 'route_beep_allowed',
+                                    'llm_end_beep', 'end_beep_prepare', 'llm_answer_interrupted', 'route_beep_allowed',
                                     'native_dialog_compact')))
     return names

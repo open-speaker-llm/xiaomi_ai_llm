@@ -23,3 +23,5 @@ __attribute__((constructor)) static void initialize_dirac(void) {
     /* Keep the library loaded for the lifetime of aplay. ALSA owns the DSP
        instance, its volume, streaming state and teardown, as in mediaplayer. */
 }
+
+#include "end_cue.h"

@@ -55,6 +55,7 @@ AIVS_GUARD_PID=""
 AIVS_EARLY_GUARD_ENABLED="${AIVS_EARLY_GUARD_ENABLED:-1}"
 AIVS_FAILURE_POLICY="/tmp/native_followup/failure_policy"
 AIVS_FAILURE_DIALOG="/tmp/native_followup/failure_dialog"
+AIVS_DIRECT_DIALOG="/tmp/native_followup/direct_dialog"
 NATIVE_UBUS_TIMEOUT="${NATIVE_UBUS_TIMEOUT:-1}"
 WAKE_EVENT_MAX_AGE="${WAKE_EVENT_MAX_AGE:-4}"
 WAKE_IGNORE_QUERIES="${WAKE_IGNORE_QUERIES:-${WAKE_ONLY_QUERIES:-小爱同学 小爱 小爱小爱 小爱同学小爱同学 我在 在呢}}"
@@ -120,7 +121,9 @@ NATIVE_FOLLOWUP_MULTIROUNDS_TRIGGER="${NATIVE_FOLLOWUP_MULTIROUNDS_TRIGGER:-pns}
 NATIVE_FOLLOWUP_TRIGGER_AFTER_TTS_END="${NATIVE_FOLLOWUP_TRIGGER_AFTER_TTS_END:-0}"
 STREAM_TIMEOUT="${STREAM_TIMEOUT:-180}"
 UNSUPPORTED_PATTERNS="${UNSUPPORTED_PATTERNS:-暂时|不会|不支持|回答不上|需要再学习|没听懂|不知道|不会这项技能|难住|问住|更努力学习|还在学习|我.*(再|多|继续|努力)(学习|学学)|没找到.*(为你推荐其他|的新闻)}"
+# Match the invocation, not device names in native volume/playback commands.
 DIRECT_LLM_QUERY_PATTERNS="${DIRECT_LLM_QUERY_PATTERNS:-DEEPSEEK|DeepSeek|deepseek}"
+DIRECT_DEEPSEEK_WAKE_PATTERN='^(小爱同学[，, ]*)?((呼叫|召唤|问问|问一下|请|让)[ ]*[Dd][Ee][Ee][Pp][Ss][Ee][Ee][Kk]|[Dd][Ee][Ee][Pp][Ss][Ee][Ee][Kk]([ ，,：:]|搜|查|讲|说|帮|给|介绍|解释|回答|分析|告诉|$))'
 
 # --- 音箱端直连 LLM（独立链路，不依赖 Mac 调 LLM）---
 # LLM_PIPELINE=native: 音箱直连 LLM 拿文本 → 整段发 TTS 微服务（端点切句）/原生兜底（默认，主线）
@@ -373,7 +376,7 @@ latency_mark() {
     [ -d "$dir" ] || return 0
     case "$name" in *[!a-z0-9_]*) return 0 ;; esac
     case "$name" in
-        wake|followup_start|native_result|route_llm|freeze_done|freeze_first|led_green|beep_start|beep_commit|beep_drain|beep_end|beep_overlap|end_beep_start|end_beep_end|followup_record_start|beep_skipped|beep_device_spawn|beep_device_ready|native_freeze|llm_entry|llm_prepare|llm_req|llm_first_token|fifo_commit1|fifo_commit_slot|fifo_commit_live|llm_done|play_done|web_plan_start|web_plan_end|web_tool_start|web_tool_end|web_filler|player_start|player_spawn|player_fifo_open|player_drain_start|filler_commit|filler_pcm_bytes|answer_commit|spec_start|spec_cancel|spec_used) ;;
+        wake|followup_start|native_result|route_llm|freeze_done|freeze_first|led_green|beep_start|beep_commit|beep_drain|beep_end|beep_overlap|answer_drain_end|end_beep_start|end_beep_audible|end_beep_end|asr_text_ready|native_mute|native_speak_seen|handoff_start|handoff_beep_ready|handoff_filler_ready|followup_prewarm|followup_record_start|beep_skipped|beep_device_spawn|beep_device_ready|native_freeze|llm_entry|llm_prepare|llm_req|llm_first_token|fifo_commit1|fifo_commit_slot|fifo_commit_live|llm_done|play_done|web_plan_start|web_plan_end|web_tool_start|web_tool_end|web_filler|player_start|player_spawn|player_fifo_open|player_drain_start|filler_commit|filler_pcm_bytes|answer_commit|spec_start|spec_cancel|spec_used) ;;
         sent[0-9]*_split|sent[0-9]*_first_pcm|sent[0-9]*_tts_start|sent[0-9]*_tts_end|sent[0-9]*_pcm_bytes|sent[0-9]*_retries) ;;
         *) return 0 ;;
     esac
@@ -498,7 +501,12 @@ latency_report() {
             printf " wake→beep=%s beep=%s wake→led_green=%s", delta(origin,"beep_commit"), beep, delta(origin,"led_green")
             if (origin == "followup_start") printf " followup→beep=%s followup→led=%s", delta(origin,"beep_commit"), delta(origin,"led_green")
             printf " end_beep=%s play→end_beep=%s end_beep→followup_record=%s", \
-                delta("end_beep_start","end_beep_end"), delta("play_done","end_beep_start"), delta("end_beep_end","followup_record_start")
+                delta("end_beep_start","end_beep_end"), delta("answer_drain_end","end_beep_start"), delta("end_beep_end","followup_record_start")
+            printf " drain→end_beep_audible=%s end_beep_start→audible=%s asr→native_mute=%s", \
+                delta("answer_drain_end","end_beep_audible"), delta("end_beep_start","end_beep_audible"), delta("asr_text_ready","native_mute")
+            printf " freeze_first→beep_ready=%s beep_ready→filler_ready=%s filler_ready→entry=%s freeze_first→req=%s", \
+                delta("freeze_first","handoff_beep_ready"), delta("handoff_beep_ready","handoff_filler_ready"), \
+                delta("handoff_filler_ready","llm_entry"), delta("freeze_first","llm_req")
             if ("player_spawn" in m) printf " player_open=%s", delta("player_spawn","player_fifo_open")
             else if ("player_start" in m) printf " player_open=%s", delta("player_start","player_fifo_open")
             if ("player_start" in m) printf " player_ready=%s", delta("player_start","player_fifo_open")
@@ -1574,7 +1582,7 @@ select_native_result_source() {
 }
 
 start_aivs_speech_guard() {
-    rm -f "$AIVS_FAILURE_POLICY" "$AIVS_FAILURE_DIALOG" "$AIVS_GUARD_ARMED"
+    rm -f "$AIVS_FAILURE_POLICY" "$AIVS_FAILURE_DIALOG" "$AIVS_DIRECT_DIALOG" "$AIVS_GUARD_ARMED"
     [ "$AIVS_GUARD_ENABLED" = "1" ] || return 0
     [ "$FREEZE_NATIVE_PLAYER_ON_FALLBACK" = "1" ] || return 0
     is_system1_root || return 0
@@ -1582,7 +1590,7 @@ start_aivs_speech_guard() {
         [ "$(select_native_result_source)" = aivs_lab_instruction ] &&
         [ "$NATIVE_AIVS_LAB_RESULT_SYSTEM1" = "1" ] &&
         "$NATIVE_ASR_CTL" status >/dev/null 2>&1; then
-        if (umask 077; printf '%s\n%s\n' "$$" "$UNSUPPORTED_PATTERNS" > "$AIVS_FAILURE_POLICY.next" &&
+        if (umask 077; printf '%s\n%s\n%s\n' "$$" "$UNSUPPORTED_PATTERNS" "$DIRECT_DEEPSEEK_WAKE_PATTERN" > "$AIVS_FAILURE_POLICY.next" &&
             mv "$AIVS_FAILURE_POLICY.next" "$AIVS_FAILURE_POLICY"); then
             log "[GUARD] early failure Speak gate enabled; dialog-scoped LLM handoff"
         fi
@@ -1600,7 +1608,7 @@ start_aivs_speech_guard() {
 }
 
 stop_aivs_speech_guard() {
-    rm -f "$AIVS_GUARD_ARMED" "$AIVS_FAILURE_POLICY" "$AIVS_FAILURE_DIALOG"
+    rm -f "$AIVS_GUARD_ARMED" "$AIVS_FAILURE_POLICY" "$AIVS_FAILURE_DIALOG" "$AIVS_DIRECT_DIALOG"
     if [ -n "$AIVS_GUARD_PID" ]; then
         kill "$AIVS_GUARD_PID" 2>/dev/null
         wait "$AIVS_GUARD_PID" 2>/dev/null
@@ -1671,9 +1679,17 @@ endpoint_denial_allows() {
     ' 2>/dev/null
 }
 
+direct_llm_query() {
+    if printf '%s\n' "$1" | grep -qi deepseek; then
+        printf '%s\n' "$1" | grep -Eq "${DIRECT_DEEPSEEK_WAKE_PATTERN:-$DIRECT_LLM_QUERY_PATTERNS}"
+    else
+        printf '%s\n' "$1" | grep -Eq "$DIRECT_LLM_QUERY_PATTERNS"
+    fi
+}
+
 get_native_result_aivs_lab() {
     local new_lines dialog_id dialog_lines raw_query raw_speak
-    local last_dialog failure_dialog
+    local last_dialog failure_dialog direct_owner direct_id asr_ms mute_ms
     local endpoint_file endpoint_record endpoint_magic endpoint_owner endpoint_nonce endpoint_tag endpoint_status endpoint_extra
 
     reset_native_result
@@ -1732,6 +1748,22 @@ EOF
     [ -n "$raw_query" ] && RESULT_QUERY=$(printf '%s\n' "$raw_query" | json_text_unescape)
     [ -n "$raw_speak" ] && RESULT_SPEAK=$(printf '%s\n' "$raw_speak" | json_text_unescape)
 
+    if [ -n "$RESULT_QUERY" ] && [ -n "${AIVS_DIRECT_DIALOG:-}" ] &&
+        read -r direct_owner direct_id asr_ms mute_ms 2>/dev/null < "$AIVS_DIRECT_DIALOG" &&
+        [ "$direct_owner" = "$$" ] && [ "$direct_id" = "$dialog_id" ]; then
+        RESULT_TS=$(date +%s)
+        RESULT_DOMAIN=michat
+        RESULT_ACTION=model
+        RESULT_SOURCE=aivs_lab_direct
+        echo "$dialog_id" > "$AIVS_LAB_LAST_DIALOG_FILE"
+        if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
+            latency_mark asr_text_ready "$asr_ms"
+            latency_mark native_mute "$mute_ms"
+        fi
+        log "[GUARD] explicit DeepSeek Speak gate armed dialog=$dialog_id"
+        return 0
+    fi
+
     # A synchronously rejected Speak never reaches instruction.log. Its ASR
     # still does; only accept the exact dialog and this running client's PID.
     failure_dialog=$(cat "$AIVS_FAILURE_DIALOG" 2>/dev/null)
@@ -1746,7 +1778,7 @@ EOF
         return 0
     fi
 
-    if [ -n "$RESULT_QUERY" ] && echo "$RESULT_QUERY" | grep -Eq "$DIRECT_LLM_QUERY_PATTERNS"; then
+    if [ -n "$RESULT_QUERY" ] && direct_llm_query "$RESULT_QUERY"; then
         RESULT_TS=$(date +%s)
         RESULT_DOMAIN="michat"
         RESULT_ACTION="model"
@@ -2208,6 +2240,7 @@ setup_native_live_asr() {
 
 wait_native_live_asr() {
     local ret session_master="$LLM_SESSION_MASTER_TARGET" timeout="$NATIVE_ASR_LISTEN_TIMEOUT"
+    local route_beep_turn=followup
     FOLLOWUP_TEXT=""
     # Release the frozen player's old queue before opening the microphone, so a
     # real wake can immediately use native audio without a later stop/reset.
@@ -2216,21 +2249,20 @@ wait_native_live_asr() {
     # same conversation. Re-reading media volume would raise later turns.
     LLM_SESSION_MASTER_TARGET="$session_master"
     set_busy "native_followup_listening"
-    if [ -n "${LLM_END_BEEP_PENDING_MS:-}" ]; then
-        local answer_wake_ms="$LLM_END_BEEP_PENDING_MS"
-        LLM_END_BEEP_PENDING_MS=""
-        # Clear the old native queue before the cue, then start ASR right
-        # after drain with its own full followup window.
+    if [ "${LLM_END_BEEP_PLAYED:-0}" = 1 ]; then
+        LLM_END_BEEP_PLAYED=0
         timeout="$FOLLOWUP_TIMEOUT"
         case "$timeout" in [5-9]|[12][0-9]|30) ;; *) timeout=8 ;; esac
-        if ! llm_end_beep "$answer_wake_ms"; then
-            clear_busy
-            latency_report
-            latency_discard
-            return 125
-        fi
     fi
     set_state "FOLLOWUP_LISTENING"
+    if [ -n "${CURRENT_SESSION_ID:-}" ] && [ "${DEVICE_TTS_PERSISTENT:-0}" = 1 ]; then
+        tts_persistent_ensure "$CURRENT_SESSION_ID"
+        # An idle worker can retain its process after closing its socket.
+        # The existing silent filler job exercises the socket ahead of speech.
+        tts_early_filler_start "$CURRENT_SESSION_ID"
+    fi
+    if route_beep_allowed; then route_beep_begin || :; fi
+    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark followup_prewarm
     led_feedback_llm_followup_listening
     log "[FOLLOWUP] native live listening; cloud ASR-only; no wakeword required"
     local listen_ms
@@ -2251,6 +2283,7 @@ wait_native_live_asr() {
     [ "$ret" -ne 124 ] || FOLLOWUP_TIMEOUT_START_MS="$listen_ms"
     if [ "$ret" -eq 125 ]; then
         NATIVE_DIALOG_HANDED_OFF=1
+        [ -z "${ROUTE_BEEP_DIR:-}" ] || route_beep_end
         LLM_SESSION_MASTER_TARGET=""
         # Native wake already owns the LEDs and player. Only stop our refresh;
         # led_off/finish_llm_playback would interfere with its new response.
@@ -3718,6 +3751,8 @@ llm_aplay() {
     local helper="${DIRAC_APLAY:-/data/dirac_aplay.sh}"
     local playback_log="${DIRAC_PLAYBACK_LOG:-/tmp/native_first_dirac.log}" rc
     local err_dir="" reader line observed duration
+    local NATIVE_FIRST_END_CUE_DIR="${STREAM_PLAY_MARK_DIR:-}"
+    export NATIVE_FIRST_END_CUE_DIR
     # One log per player, never store audio or grow a persistent log on /data.
     if [ -x "$helper" ]; then
         set -- "$helper" "$@"
@@ -4112,15 +4147,19 @@ llm_answer_interrupted() {
     return 1
 }
 
+end_beep_prepare() {
+    case "${LLM_END_BEEP_FILE:-builtin}" in
+        builtin) route_beep_default_pcm single > "$1" ;;
+        /*) route_beep_prepare "$1" "$LLM_END_BEEP_FILE" ;;
+        *) return 1 ;;
+    esac
+}
+
 llm_end_beep() {
-    local start="$1" pcm source="${LLM_END_BEEP_FILE:-builtin}"
+    local start="$1" pcm
     llm_answer_interrupted "$start" && return 125
     pcm=$(mktemp /tmp/native_first_end_beep.XXXXXX) || return 0
-    if ! { case "$source" in
-        builtin) route_beep_default_pcm single > "$pcm" ;;
-        /*) route_beep_prepare "$pcm" "$source" ;;
-        *) false ;;
-    esac; }; then
+    if ! end_beep_prepare "$pcm"; then
         log '[WARN] LLM 结束提示音 PCM 不可用，已跳过'
     elif ! llm_answer_interrupted "$start"; then
         [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark end_beep_start
@@ -4147,13 +4186,13 @@ llm_finish_answer_audio() {
     if [ "$cleanup_mode" != native_defer ] && [ "${LLM_END_BEEP:-0}" = 1 ] &&
         [ "${LLM_ANSWER_DRAIN_CONFIRMED:-1}" = 1 ] &&
         { [ -z "${LLM_WEB_MARK_DIR:-}" ] || [ ! -f "$LLM_WEB_MARK_DIR/no_history" ]; }; then
-        if [ "$cleanup_mode" = defer ] && [ "$FOLLOWUP_RECORD_MODE" = native_live ] && is_system1_root; then
-            LLM_END_BEEP_PENDING_MS="$LLM_ANSWER_WAKE_MS"
-        elif ! llm_end_beep "$LLM_ANSWER_WAKE_MS"; then
+        if llm_answer_interrupted "$LLM_ANSWER_WAKE_MS" ||
+            { [ "${LLM_END_CUE_HANDLED:-0}" != 1 ] && ! llm_end_beep "$LLM_ANSWER_WAKE_MS"; }; then
             cancel_followup_vad_prearm
             finish_llm_playback
             return 1
         fi
+        LLM_END_BEEP_PLAYED=1
     fi
     if [ "$cleanup_mode" = defer ]; then
         arm_followup_vad
@@ -4639,14 +4678,27 @@ stream_play_worker() {
         fi
     done
     if [ -n "$ap" ]; then
+        local cue_control="$wd"
+        [ "$ap" != prewarmed ] || cue_control="$cue_dir"
+        if [ -s "$wd/end_beep.pcm" ] && [ -s "$wd/first" ]; then
+            printf '%s %s\n' "$(cat "$wd/end_beep.wake")" "$wd/end_beep.pcm" > "$cue_control/end_cue.arm"
+        fi
         [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark player_drain_start
         exec 8>&-        # 关闭写端 → aplay 播完剩余 PCM 后 EOF 退出
         stream_wait_player "$ap"
         rc=$?
+        if [ -f "$cue_control/end_cue.started" ]; then
+            : > "$wd/end_cue.handled"
+        else
+            [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark answer_drain_end
+        fi
         [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark play_done
         return "$rc"
     fi
-    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark play_done
+    if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
+        latency_mark answer_drain_end
+        latency_mark play_done
+    fi
     return 0
 }
 
@@ -4850,9 +4902,21 @@ llm_stream_answer_and_play() {
 
     [ -z "${TTS_PREWARM_PID:-}" ] || tts_prewarm_stop
     [ -z "${TTS_PERSISTENT_DIR:-}" ] || rm -f "$TTS_PERSISTENT_DIR/round_active"
+    if [ "${LLM_END_BEEP:-0}" = 1 ] && [ "${cleanup_mode:-}" != native_defer ] &&
+        [ "$DEVICE_TTS_PCM_RATE" = 24000 ] && [ -n "${LLM_ANSWER_WAKE_MS:-}" ] &&
+        [ "$(cat "$wd/transport" 2>/dev/null)" = 0 ] &&
+        [ "$(cat "$wd/status" 2>/dev/null)" = complete ] && [ ! -f "$wd/no_history" ] &&
+        [ -s "$wd/raw" ]; then
+        if end_beep_prepare "$wd/end_beep.pcm"; then
+            printf '%s\n' "$LLM_ANSWER_WAKE_MS" > "$wd/end_beep.wake"
+        else
+            rm -f "$wd/end_beep.pcm"
+        fi
+    fi
     : > "$wd/done"
     wait "$play_pid"
     play_rc=$?
+    [ ! -f "$wd/end_cue.handled" ] || LLM_END_CUE_HANDLED=1
     ROUTE_BEEP_PLAY_PID=""
     [ -z "${ROUTE_BEEP_DIR:-}" ] || route_beep_end
     if [ "$early" = 1 ] && [ ! -f "$wd/no_history" ]; then
@@ -4931,7 +4995,7 @@ send_text_native() {
     local cleanup_mode="${3:-now}"
     local t0 t2 first_sound web_raw web_transport NATIVE_PLAYER_STOP_OK=0 beep_master_ready=0
     local LLM_ACCEPT_SHOWN="${LLM_ACCEPT_SHOWN:-0}" LLM_ANSWER_WAKE_MS="${LLM_ANSWER_WAKE_MS:-}"
-    local LLM_ANSWER_DRAIN_CONFIRMED=1
+    local LLM_ANSWER_DRAIN_CONFIRMED=1 LLM_END_CUE_HANDLED=0
     if [ "${route_beep_turn:-}" = followup ]; then
         LLM_ACCEPT_SHOWN=0
         LLM_ANSWER_WAKE_MS=$(monotonic_ms)
@@ -5458,7 +5522,7 @@ handle_llm_dialog() {
     local turn=1
     local ret
     local last_dialog route_beep_turn="${route_beep_turn:-}"
-    local LLM_END_BEEP_PENDING_MS=""
+    local LLM_END_BEEP_PLAYED=0
 
     CURRENT_SESSION_ID="$session_id"
     NATIVE_DIALOG_HANDED_OFF=0
@@ -5667,6 +5731,10 @@ native_route_wait_quiet() {
 native_route_beep_gate() {
     local rc
     case "$RESULT_SOURCE:$RESULT_SPEAK" in
+        aivs_lab_direct:*)
+            log '[HANDOFF] forced reason=direct_asr_gate'
+            route_beep_quiet=1
+            ;;
         'aivs_lab_early_failure:[failure Speak suppressed before dispatch]')
             route_beep_fire || :
             ;;
@@ -5675,7 +5743,7 @@ native_route_beep_gate() {
             ;;
         aivs_lab_instruction:?*)
             if ! is_native_success_domain &&
-                printf '%s\n' "$RESULT_QUERY" | grep -Eq "$DIRECT_LLM_QUERY_PATTERNS"; then
+                direct_llm_query "$RESULT_QUERY"; then
                 # The caller freezes native playback before emitting the cue.
                 log '[HANDOFF] forced reason=direct'
                 route_beep_quiet=1
@@ -5782,7 +5850,12 @@ handle_wakeup() {
             else
                 log "[NATIVE] non-success-domain，立即 fallback LLM"
             fi
-            [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark route_llm
+            if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
+                latency_mark route_llm
+                latency_mark handoff_start
+                # A logged Speak proves dispatch, without measuring audible output.
+                [ -z "$RESULT_SPEAK" ] || [ "$RESULT_SOURCE" != aivs_lab_instruction ] || latency_mark native_speak_seen
+            fi
             if [ "${LLM_ROUTE_BEEP:-0}" = 1 ] && route_beep_allowed && ! native_route_beep_gate; then
                 led_off
                 [ "${DEVICE_TTS_EARLY_START:-0}" != 1 ] || tts_persistent_stop
@@ -5796,7 +5869,9 @@ handle_wakeup() {
                     route_beep_fire || :
                 fi
             fi
+            [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark handoff_beep_ready
             [ "${DEVICE_TTS_EARLY_START:-0}" != 1 ] || tts_early_filler_start "$session_id"
+            [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark handoff_filler_ready
             set_state "NATIVE_FALLBACK"
             [ "$FOLLOWUP_ENABLED" = "1" ] && [ "$FOLLOWUP_MODE" = "native_multirounds" ] && native_followup_mark_multirounds
             [ "$route_beep_quiet" = 1 ] || freeze_native_player

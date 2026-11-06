@@ -206,7 +206,7 @@ stream_synthesize_sentence() {
     fi
 }
 llm_aplay() {
-    local fifo arg
+    local fifo arg before=0
     for arg do fifo="$arg"; done
     case "$fifo" in
         "$TEST_DIR"/ending.*)
@@ -230,12 +230,13 @@ llm_aplay() {
         exec 9<"$fifo"
     fi
     printf '%s\n' open >> "$TEST_DIR/players"
+    [ ! -f "$TEST_DIR/played" ] || before=$(wc -c < "$TEST_DIR/played")
     if [ "$MODE" = builtin_pacing ]; then
         head -c 62400 <&9 >> "$TEST_DIR/played"
     else
         dd bs=2 count=1 <&9 >> "$TEST_DIR/played" 2>/dev/null
     fi
-    [ -s "$TEST_DIR/played" ] || return 0
+    [ "$(wc -c < "$TEST_DIR/played")" -gt "$before" ] || return 0
     [ -f "$TEST_DIR/master" ] || : > "$TEST_DIR/early"
     if [ "$MODE" != early_failure ]; then
         [ -f "$PLAYER_FROZEN_MARKER" ] || : > "$TEST_DIR/early"

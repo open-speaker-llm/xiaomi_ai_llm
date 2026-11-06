@@ -35,7 +35,7 @@
 
 `LLM_API_BASE`、`LLM_MODEL`、`LLM_API_KEY` 是高级覆盖项，非空时优先于后端默认值。只是切换 `BACKEND` 时，先确认没有遗留的通用覆盖项，否则请求可能仍发往旧地址或旧模型。
 
-后端由配置选择，不会在请求失败时自动切换，也不会因用户说“呼叫 Kimi”而自动选择 Kimi。默认直接转 LLM 的触发词匹配 DeepSeek 的大小写写法；需要调整触发词时同时检查 `DIRECT_LLM_QUERY_PATTERNS`。
+后端由配置选择。boot1 从 ASR 最终文本识别“呼叫 DeepSeek”“问问 DeepSeek”或以 DeepSeek 开头的明确提问，在分发前拦截同一会话的小爱 Speak。音量或播放指令里提到的设备名 DeepSeek 不触发这个拦截。其他直达词由 `DIRECT_LLM_QUERY_PATTERNS` 配置。
 
 DeepSeek 默认 `LLM_THINKING=disabled`，GLM 使用 `LLM_REASONING_EFFORT=low`；MiniMax 分离思考内容，Kimi 使用非思考模式。语音链路只播回答内容，首声时间还受网络、切句和 TTS 影响。
 
@@ -141,6 +141,8 @@ IPC 使用 `/tmp/native_first_tts.*` 私有目录。每句独立任务目录先�
 | `LLM_ROUTE_BEEP_GAIN` | `0.5` | 提示音的额外 PCM 增益，允许 0.5–2.0。已有显式配置继续生效 |
 | `LLM_END_BEEP` | `1` | 完整回答确认播完后播放单声提示音。boot1 实时追问在提示音结束后按 `FOLLOWUP_TIMEOUT` 开始收音，默认 8 秒。固件接管收音的 `native_multirounds` 模式跳过此提示音 |
 | `LLM_END_BEEP_FILE` | `builtin` | 复用内置 523 Hz 音色的单次敲击（0.75 秒）。也可填自定义裸 PCM 的绝对路径，要求 24 kHz、S16_LE、单声道，最长 1.30 秒 |
+
+端侧 24 kHz 流式播放可由同版 Dirac 播放组件复用回答的 ALSA 句柄，回答排空后立即提交结束音。独立播放器作为兼容路径。实时追问在结束音排空、原生队列收尾之后才收音，并在等待期间预热已启用的 TTS 持久连接与接管播放器。
 
 唤醒后预备提示音 PCM，并预先启动一个读取 raw stdin 的 Dirac aplay。确认转 LLM 并达到安全接管条件后才写入提示音，随后启动语音消费者，将垫话与正文接入同一个 aplay。原生失败语音已经拦截时，在设置 LLM Master 后触发提示音和绿灯。明确调用 DeepSeek 且已选中 LLM 路由时，已下发的原生播报直接冻结并接管。普通自动转接已下发的播报仍最多等待 4 秒。已识别为原生域的指令继续交给原生。等待期间的新物理唤醒取消旧交接。首段语音就绪时，最多取 100 ms 未提交的提示音混入语音开头并淡出，其余提示音丢弃。
 
