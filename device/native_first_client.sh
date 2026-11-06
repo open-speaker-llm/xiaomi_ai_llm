@@ -2222,6 +2222,7 @@ wait_native_live_asr() {
         # Clear the old native queue before the cue, then start ASR right
         # after drain with its own full followup window.
         timeout="$FOLLOWUP_TIMEOUT"
+        case "$timeout" in [5-9]|[12][0-9]|30) ;; *) timeout=8 ;; esac
         if ! llm_end_beep "$answer_wake_ms"; then
             clear_busy
             latency_report
@@ -4142,7 +4143,9 @@ llm_end_beep() {
 
 llm_finish_answer_audio() {
     local cleanup_mode="$1"
-    if [ "${LLM_END_BEEP:-0}" = 1 ] && [ "${LLM_ANSWER_DRAIN_CONFIRMED:-1}" = 1 ] &&
+    # The firmware owns capture in native_multirounds, so we cannot gate it.
+    if [ "$cleanup_mode" != native_defer ] && [ "${LLM_END_BEEP:-0}" = 1 ] &&
+        [ "${LLM_ANSWER_DRAIN_CONFIRMED:-1}" = 1 ] &&
         { [ -z "${LLM_WEB_MARK_DIR:-}" ] || [ ! -f "$LLM_WEB_MARK_DIR/no_history" ]; }; then
         if [ "$cleanup_mode" = defer ] && [ "$FOLLOWUP_RECORD_MODE" = native_live ] && is_system1_root; then
             LLM_END_BEEP_PENDING_MS="$LLM_ANSWER_WAKE_MS"
@@ -4154,7 +4157,7 @@ llm_finish_answer_audio() {
     fi
     if [ "$cleanup_mode" = defer ]; then
         arm_followup_vad
-    elif [ "$cleanup_mode" != native_defer ] && [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
+    elif [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
         latency_report
         latency_discard
     fi
@@ -5010,7 +5013,7 @@ send_text_native() {
         t2=$(elapsed_s "$t0")
         llm_finish_answer_audio "$cleanup_mode" || return 1
         log "[LLM-NATIVE] streamed in ${t2}s (首声=${LLM_STREAM_FIRST_SOUND:-?}s llm_ttft=${LLM_DIRECT_TTFT:-?}s llm_gen=${LLM_DIRECT_GEN_S:-?}s segs=${LLM_STREAM_SEGS:-0})"
-        if [ "$cleanup_mode" = "defer" ] || [ "$cleanup_mode" = "native_defer" ]; then
+        if [ "$cleanup_mode" = "defer" ]; then
             log "[LLM-NATIVE] playback done, defer cleanup for followup"
             set_state "FOLLOWUP_WINDOW"
         else
@@ -5063,7 +5066,7 @@ send_text_native() {
     fi
     # 首声=从触发LLM到音箱开口（=llm_gen+tts合成）；llm_ttft=首字延迟，能看出是否卡在首字前
     log "[LLM-NATIVE] played in ${t2}s (首声=${first_sound}s llm_ttft=${LLM_DIRECT_TTFT:-?}s llm_gen=${LLM_DIRECT_GEN_S:-?}s)"
-    if [ "$cleanup_mode" = "defer" ] || [ "$cleanup_mode" = "native_defer" ]; then
+    if [ "$cleanup_mode" = "defer" ]; then
         log "[LLM-NATIVE] playback done, defer cleanup for followup"
         set_state "FOLLOWUP_WINDOW"
     else
@@ -5124,14 +5127,15 @@ send_text_and_play() {
         "${SERVER}/api/v1/stream/text_chat" || stream_rc=1
     t2=$(date +%s)
     log "[LLM] HTTP playback done in $((t2 - t0))s rc=$stream_rc"
+    if [ "$cleanup_mode" = "native_defer" ]; then
+        native_followup_tts_end
+    fi
     if [ "$stream_rc" != 0 ]; then
-        [ "$cleanup_mode" != native_defer ] || native_followup_tts_end
         cancel_followup_vad_prearm
         finish_llm_playback
         return 1
     fi
     llm_finish_answer_audio "$cleanup_mode" || return 1
-    [ "$cleanup_mode" != native_defer ] || native_followup_tts_end
     if [ "$cleanup_mode" = "defer" ] || [ "$cleanup_mode" = "native_defer" ]; then
         log "[LLM] playback done, defer cleanup for followup"
         set_state "FOLLOWUP_WINDOW"
@@ -5486,11 +5490,6 @@ handle_llm_dialog() {
             turn=$((turn + 1))
             set_state "FOLLOWUP_LISTENING"
             led_feedback_llm_followup_listening
-            if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
-                latency_mark followup_record_start
-                latency_report
-                latency_discard
-            fi
             if ! wait_native_followup_text "$last_dialog" "$first_text"; then
                 log "[FOLLOWUP] 原生追问 ASR 无文本，退出对话"
                 led_feedback_error
