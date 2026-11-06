@@ -5,11 +5,14 @@ import tempfile
 import shlex
 from pathlib import Path
 
+from tests.native_protocol_helpers import with_answer_audio_dependencies
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class NativeAsrShellTest(unittest.TestCase):
     def functions(self, *names):
+        names = with_answer_audio_dependencies(names)
         if 'handle_llm_dialog' in names:
             names += ('native_dialog_compact', 'classify_native_dialog_text', 'collect_native_dialog_text',
                       'cancel_followup_vad_prearm', 'is_followup_exit_command', 'is_followup_reset_command')
@@ -23,7 +26,8 @@ class NativeAsrShellTest(unittest.TestCase):
     def test_native_followup_keeps_session_and_uses_no_recorder_or_mac(self):
         result = self.shell(self.functions('handle_llm_dialog') + '''
 FOLLOWUP_ENABLED=1; FOLLOWUP_MODE=local_record; FOLLOWUP_RECORD_MODE=native_live
-SUPPRESS_DUP_SECONDS=5; calls=0
+SUPPRESS_DUP_SECONDS=5; calls=0; LATENCY_TRACE_ENABLED=1
+latency_begin() { printf 'trace=%s\\n' "$1"; }
 is_system1_root() { return 0; }
 log() { :; }; set_state() { :; }; pause_native_asr() { :; }; resume_native_asr() { :; }
 led_feedback_llm_accept() { :; }; led_feedback_followup_asr_ok() { :; }; led_off() { :; }
@@ -41,7 +45,7 @@ echo "restored-dedup=$SUPPRESS_DUP_SECONDS"
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), [
             'same-session|first-question|defer|dedup=5',
-            'same-session|不要再讲了|defer|dedup=0', 'cleaned', 'restored-dedup=5'])
+            'trace=followup', 'same-session|不要再讲了|defer|dedup=0', 'cleaned', 'restored-dedup=5'])
 
     def test_llm_error_does_not_open_microphone(self):
         result = self.shell(self.functions('handle_llm_dialog') + '''
@@ -116,6 +120,35 @@ start_native_asr
         self.assertEqual(result.returncode, 1)
         self.assertIn('firmware ABI hash mismatch', result.stdout)
         self.assertNotIn('unexpected-mount', result.stdout)
+
+    def test_quiet_native_turn_resumes_without_draining_the_queue(self):
+        result = self.shell(self.functions('finish_llm_playback') + '''
+begin_native_queue_drain() { echo mute; }
+resume_native_player() { echo "resume=$1"; }
+restore_llm_master_volume() { echo restore; }
+end_native_queue_drain() { echo unmute; }
+clear_busy() { echo clear; }
+finish_llm_playback quiet
+finish_llm_playback
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(),
+                         ['resume=0', 'restore', 'clear', 'mute', 'resume=1',
+                          'restore', 'unmute', 'clear'])
+
+    def test_joining_background_history_preserves_order_and_error(self):
+        result = self.shell(self.functions('wait_llm_history_save') + '''
+log() { echo history-error; }
+(sleep 0.02; echo history-saved) &
+LLM_HISTORY_SAVE_PID=$!
+wait_llm_history_save && echo next-query
+(exit 1) &
+LLM_HISTORY_SAVE_PID=$!
+wait_llm_history_save || echo next-query-rejected
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(),
+                         ['history-saved', 'next-query', 'history-error', 'next-query-rejected'])
 
     def test_followup_preserves_llm_volume_but_restores_native_volume(self):
         for rc in (0, 124, 125):

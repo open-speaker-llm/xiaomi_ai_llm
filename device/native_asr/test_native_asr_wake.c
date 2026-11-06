@@ -12,6 +12,14 @@ static void native_wake(void *ctx,unsigned code,float angle) {
     assert(ctx==&callbacks && code==expected_code && angle==90);
     struct control s; int fd=state_open(&s); assert(fd>=0);
     assert(s.phase==expected_phase);
+    if (code==1) {
+        unsigned pid=0;
+        unsigned long long ms=0;
+        FILE *stamp=fopen(CONTROL_DIR "/physical-wake","r");
+        assert(stamp && fscanf(stamp,"%u %llu",&pid,&ms)==2);
+        fclose(stamp);
+        assert(pid==(unsigned)getpid() && ms>0);
+    }
     if (expected_phase==NATIVE_HANDOFF) {
         assert(!s.text[0] && !active(&s));
         assert(!strcmp(s.dialog,"owned-old"));
@@ -40,6 +48,7 @@ int main(void) {
     }
     assert(callbacks==18);
     unlink(NATIVE_BUSY_FILE); unlink(CONTROL_FILE); unlink(CONTROL_DIR "/events.log");
+    assert(unlink(CONTROL_DIR "/physical-wake")==0);
     assert(rmdir(CONTROL_DIR)==0);
     puts("PASS: 18 wake callbacks, native handoff, busy release, retained dialog, ordinary wake passthrough");
     return 0;

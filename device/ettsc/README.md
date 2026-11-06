@@ -10,7 +10,7 @@
 
 **纯阻塞 IO，不用 tokio。** tokio 的 epoll 异步 reactor 在这台音箱（musl 静态 / kernel 4.9 / zig 构建）上不工作：
 TCP 内核层能连上但 `connect().await` 永不返回、握手永不发出（早期以为是路由器代理/TLS 库的问题，实为此）。
-换 `std::net::TcpStream`（阻塞）+ 同步 `tungstenite` 后一切正常。本工作负载是"一次连接、收完即退"，
+换 `std::net::TcpStream`（阻塞）+ 同步 `tungstenite` 后一切正常。默认模式是"一次连接、收完即退"，
 也根本不需要异步——阻塞既是唯一能跑的，也是架构上最贴合的。
 
 TLS 用 **rustls + 内置 webpki 根证书**：纯 Rust、无需系统 CA / `SSL_CERT_FILE`，二进制 ~0.95MB。
@@ -49,6 +49,34 @@ miplayer --file /tmp/out.mp3 2>/dev/null
 # 自检：只测 wss 握手（看 101 / 错误）
 /data/ettsc probe
 ```
+
+## 首段预连接实验
+
+客户端开关 `DEVICE_TTS_PREWARM=0` 默认关闭。启用后，客户端在 LLM 生成期间启动：
+
+```sh
+/data/ettsc prewarm /tmp/本轮私有任务目录 zh-CN-YunjianNeural
+```
+
+目录由客户端使用 `mktemp` 创建。程序先完成真实握手，写 `ready`，并保留同一连接；客户端将首段文本写入 `request.part` 后原子改名为 `request`。程序只处理一个合成 turn，收到 `turn.end` 且解码成功后发布 `audio.pcm`，计时日志完成后写 `done=0`；错误为 `done=1`，不发布残缺音频。始终输出裸 PCM。首段使用完即退出，不支持单连接多句复用。
+
+没有文本时，握手成功后空闲 20 秒退出。`cancel` 文件可取消等待；客户端在轮末/中断时终止并回收自己启动的进程。候选握手采用 5 秒 TCP 建链预算和 socket 读写超时，首段整体等待还受客户端 `DEVICE_TTS_TIMEOUT` 限制。默认的一次性与 `probe` 模式保持原行为；`probe` 是握手后断开，不能供后续进程复用。
+
+上线前需要构建匹配架构的新二进制，并按[实际测试说明](../../docs/testing/2026-11-05-tts-prewarm.md)核验。关闭客户端开关即可回到一次性链路。2026-11-05 的握手基线 P50 785 ms、P90 1165 ms（20 次成功）；这是握手数据，不能代替声学首声验收。
+
+## 会话内复用实验
+
+`DEVICE_TTS_PERSISTENT=0` 默认关闭；开启后优先于 `DEVICE_TTS_PREWARM`，独立完成提前握手、多句和连续追问复用。使用同一 ettsc 程序：
+
+```sh
+ETTSC_IDLE_SECS=20 /data/ettsc serve /tmp/本会话私有目录
+```
+
+私有目录由客户端 `mktemp` 创建。每句建立 `job.<随机后缀>` 子目录，写入 `request`（文本，最多 65536 字节）与 `voice`，最后发布 `queued`。worker 串行消费，复用同一 WebSocket；收到完整 `turn.end` 且解码成功才原子发布 `audio.pcm`，随后写单句计时 `worker.log` 和最终 `done=0`。失败为 `done=1`，客户端复制结果后删除任务。客户端超时使用 `cancel`，该目录不会成为下一句结果。
+
+连接故障最多新建一次并重试当前未发布的 turn；音频不会提前进入播放队列，故不重复播放半句。空闲默认 20 秒释放连接；没有活动轮次则退出并写 `exited`，下次客户端按需启动。生成中的轮次使用 `round_active`，让空闲连接释放后仍能按需重新建立并继续复用。session 或合成配置变化、对话结束和退出均由客户端回收 worker 与私有目录。
+
+同连接多 turn 已在 S12A 隔离合成验证；声学首声、真人中断与长期资源使用仍需按[测试说明](../../docs/testing/2026-11-05-tts-persistent.md)验收。实现使用已验证的私有目录队列，不依赖 FIFO、额外二进制或新 crate，仍为阻塞网络 IO。
 
 ## 维护：版本过期（403）怎么办
 

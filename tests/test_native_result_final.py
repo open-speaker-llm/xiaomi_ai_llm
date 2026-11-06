@@ -26,7 +26,7 @@ class NativeResultFinalTest(unittest.TestCase):
         source = (ROOT / 'device/native_first_client.sh').read_text()
         functions = '\n'.join(re.search(r'^' + name + r'\(\) \{.*?(?=^[a-zA-Z_]\w*\(\) \{|\Z)', source,
                                        re.M | re.S).group()
-                              for name in ('reset_native_result', 'get_native_result_aivs_lab',
+                              for name in ('reset_native_result', 'get_native_result_aivs_lab', 'direct_llm_query',
                                            'endpoint_denial_allows', 'is_unsupported_result', 'json_unicode_decode',
                                            'json_text_unescape', 'json_text_field'))
         with tempfile.TemporaryDirectory() as temp:

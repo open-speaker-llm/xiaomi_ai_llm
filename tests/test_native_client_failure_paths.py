@@ -16,10 +16,13 @@ import unittest
 from pathlib import Path
 from tests.native_protocol_helpers import PROTOCOL_FUNCTIONS, embedded_protocol, embedded_web
 
+from tests.native_protocol_helpers import with_answer_audio_dependencies
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def functions(*names):
+    names = with_answer_audio_dependencies(names)
     if 'send_text_native' in names:
         names += ('llm_history_limits', 'llm_history_safe_dir', 'llm_history_prepare',
                   'llm_history_owned', 'llm_history_filter', 'llm_history_load',
@@ -219,6 +222,129 @@ echo "RESULT=$?"
         out, history = self.run_answer(tts_rc=1)
         self.assertIn('RESULT=1', out)
         self.assertEqual(history, '')
+
+
+class WebClientIntegrationTest(unittest.TestCase):
+    def run_client(self, mode='success', streaming=True):
+        from tests.test_native_web import JSONFILTER, plan
+        import sys
+        with tempfile.TemporaryDirectory() as temp:
+            shim = Path(temp, 'jsonfilter')
+            shim.write_text('#!' + sys.executable + '\n' + JSONFILTER)
+            shim.chmod(0o700)
+            Path(temp, 'planner').write_text(json.dumps(plan('search', query='测试'), ensure_ascii=False))
+            code = functions('send_text_native', 'llm_direct_answer', 'llm_stream_answer_and_play',
+                             'llm_sse_content', 'json_escape', 'llm_build_request',
+                             'cancel_followup_vad_prearm')
+            code = code.replace('/tmp/native_first_stream', temp + '/stream')
+            code = code.replace('/tmp/native_first_direct_web', temp + '/direct')
+            code = code.replace('/tmp/native_first_llm_', temp + '/llm_')
+            code += r'''
+LLM_API_KEY=sk-test; LLM_API_BASE=https://api.deepseek.com; DEEPSEEK_API_KEY=sk-test
+LLM_MODEL=deepseek-flash; LLM_DIRECT_TIMEOUT=1; LLM_THINKING=disabled
+LLM_WEB_SEARCH=auto; LLM_WEB_SPECULATIVE=0; LLM_WEB_RETRIES=1; LLM_WEB_RETRY_BACKOFF_MS=0
+LLM_WEB_FILLER='搜索中，请稍等。'; LLM_HISTORY_DIR="$TEST_DIR/history"
+TTS_ENGINE=server; DEVICE_TTS_STREAM=0; SUPPRESS_DUP_SECONDS=0
+[ "$STREAMING" != 1 ] || { TTS_ENGINE=device; DEVICE_TTS_STREAM=1; }
+[ "$MODE" != fail_closed ] || LLM_WEB_FALLBACK=fail
+FOLLOWUP_VAD_PID=
+log() { printf '%s\n' "$*" >&2; }
+monotonic_ms() { echo 10000; }; elapsed_s() { echo 0; }
+llm_build_messages() { printf '{"role":"user","content":"测试问题"}'; }
+llm_web_post() {
+    case "$1" in
+        */chat/completions)
+            if [ "$MODE" = auth ]; then llm_web_post_state 401 401 ''; return 11; fi
+            if [ "$MODE" = balance ]; then llm_web_post_state 402 402 ''; return 11; fi
+            if [ "$MODE" = fail_closed ]; then llm_web_post_state timeout 000 ''; return 10; fi
+            cat "$TEST_DIR/planner";;
+        *) printf '{"results":[{"title":"来源","url":"https://example.com","summary":"内容"}]}';;
+    esac
+}
+curl() {
+    case "$MODE" in
+        final_failure) return 28;;
+        partial_failure) printf 'data: {"choices":[{"delta":{"content":"部分回答。"}}]}\n\n'; return 28;;
+    esac
+    printf 'data: {"choices":[{"delta":{"content":"正常回答。"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+}
+stream_synthesize_sentence() { printf '%s\n' "$3" >> "$TEST_DIR/synthesized"; printf '%s\n' "$3" >> "$1/segs"; }
+stream_play_worker() { while [ ! -f "$1/done" ]; do sleep 0.01; done; }
+tts_play_text() { printf '%s\n' "$1" >> "$TEST_DIR/spoken"; }
+is_recent_duplicate_llm_query() { return 1; }; record_llm_query() { :; }
+set_state() { :; }; set_busy() { :; }; apply_llm_master_volume() { :; }; freeze_native_player() { :; }
+led_feedback_llm_playing() { :; }; led_feedback_error() { :; }; finish_llm_playback() { :; }
+llm_web_init
+send_text_native session question now
+printf 'RESULT=%s\n' "$?"
+'''
+            rc, out, err = shell(code, {'TEST_DIR': str(Path(temp).resolve()), 'MODE': mode, 'STREAMING': str(int(streaming)),
+                                       'PATH': temp + os.pathsep + os.environ['PATH'], 'LC_ALL': 'C'})
+            self.assertEqual(rc, 0, err)
+            if mode == 'success':
+                self.assertIn('RESULT=0', out, err)
+            def read(path):
+                p = Path(temp, path)
+                return p.read_text() if p.exists() else ''
+            return out, read('history/.native_first_history_v1/h_session'), read('spoken'), read('synthesized')
+
+    def test_stream_filler_is_played_but_removed_from_history(self):
+        out, history, spoken, synthesized = self.run_client()
+        self.assertIn('RESULT=0', out)
+        self.assertEqual(synthesized, '搜索中，请稍等。\n正常回答。\n')
+        self.assertEqual(spoken, '')
+        self.assertIn('assistant\t正常回答。', history)
+        self.assertNotIn('搜索中', history)
+
+    def test_final_transport_failure_speaks_fixed_notice_once_without_history(self):
+        for streaming in (True, False):
+            with self.subTest(streaming=streaming):
+                out, history, spoken, synthesized = self.run_client('final_failure', streaming)
+                self.assertIn('RESULT=1', out)
+                self.assertEqual(spoken, '暂时无法联网查询，请稍后再试。\n')
+                self.assertEqual(history, '')
+                self.assertEqual(synthesized, '搜索中，请稍等。\n' if streaming else '')
+
+    def test_partial_final_answer_does_not_replay_fixed_notice(self):
+        for streaming in (True, False):
+            with self.subTest(streaming=streaming):
+                out, history, spoken, _ = self.run_client('partial_failure', streaming)
+                self.assertIn('RESULT=1', out)
+                self.assertEqual(history, '')
+                self.assertEqual(spoken, '')
+
+    def test_auth_billing_and_fail_closed_notices_never_enter_history(self):
+        for mode, text in (('auth', '大模型密钥无效，请检查配置。'),
+                           ('balance', '大模型账户余额不足，请充值后再试。'),
+                           ('fail_closed', '暂时无法联网查询，请稍后再试。')):
+            for streaming in (True, False):
+                with self.subTest(mode=mode, streaming=streaming):
+                    out, history, spoken, synthesized = self.run_client(mode, streaming)
+                    self.assertIn('RESULT=0', out)
+                    self.assertEqual(history, '')
+                    self.assertEqual((synthesized if streaming else spoken).count(text), 1)
+                    if mode != 'fail_closed':
+                        self.assertNotIn('搜索中', synthesized + spoken)
+
+    def test_stream_ttft_ignores_first_filler_line(self):
+        source = (ROOT / 'device/native_first_client.sh').read_text()
+        awk = re.search(r"awk -v wd=\"\$wd\" -v filler=\"\$LLM_WEB_FILLER\" [^']*'(.*?)' \\",
+                        source, re.S).group(1)
+        with tempfile.TemporaryDirectory() as temp:
+            # Replace only the clock IO in the actual production awk fragment.
+            awk = awk.replace('getline up < "/proc/uptime"', 'up = ++clock')
+            awk = awk.replace('getline ue < "/proc/uptime"', 'ue = ++clock')
+            Path(temp, 'status').write_text('complete')
+            filler = '搜索中，请稍等。'
+            run = subprocess.run(['awk', '-v', 'wd='+temp, '-v', 'filler='+filler,
+                                  '-v', 'early=1', '-v', 'early_count=1', '-v', 'min_chars=8',
+                                  '-v', 'max_chars=24', awk],
+                                 input=filler+'\n正常回答。\n', capture_output=True, text=True,
+                                 env={**os.environ, 'LC_ALL': 'C'}, timeout=3)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(Path(temp, 'filler_t').read_text().strip(), '1')
+            self.assertEqual(Path(temp, 'ttft').read_text().strip(), '2')
+            self.assertEqual(run.stdout, filler+'\n正常回答。\n')
 
 
 class FollowupFailureTest(unittest.TestCase):

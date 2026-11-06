@@ -99,6 +99,8 @@ boot0 的 `domain` 是能力类别，不是统一的成功标志；`qabot/query`
 
 boot1 默认直接触发词匹配 DeepSeek 的大小写写法。没有命中时，匹配 `UNSUPPORTED_PATTERNS` 才接管失败回答；尚无已验证的通用业务失败字段替代该规则。适配器填入的 `michat/model` 是内部路由标记，不是固件返回的失败状态。
 
+默认失败规则包含“没找到”且提到所找的新闻或推荐其他内容的回复。显式覆盖 `UNSUPPORTED_PATTERNS` 时，按所配置的规则识别。
+
 `NATIVE_RESULT_SOURCE=auto` 按根分区选择结果源。boot1 不照搬 boot0 的 `think` 预冻结，也跳过不兼容的 dsnoop/音频库覆盖；提前冻结或复制旧系统原生库，可能影响原生识别。应保留两套适配，不用一套系统的二进制“补齐”另一套。
 
 功能与验收差异统一列在[双系统能力表](../status.md#双系统能力对照)。

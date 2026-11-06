@@ -35,7 +35,7 @@
 
 `LLM_API_BASE`、`LLM_MODEL`、`LLM_API_KEY` 是高级覆盖项，非空时优先于后端默认值。只是切换 `BACKEND` 时，先确认没有遗留的通用覆盖项，否则请求可能仍发往旧地址或旧模型。
 
-后端由配置选择，不会在请求失败时自动切换，也不会因用户说“呼叫 Kimi”而自动选择 Kimi。默认直接转 LLM 的触发词匹配 DeepSeek 的大小写写法；需要调整触发词时同时检查 `DIRECT_LLM_QUERY_PATTERNS`。
+后端由配置选择。boot1 从 ASR 最终文本识别“呼叫 DeepSeek”“问问 DeepSeek”或以 DeepSeek 开头的明确提问，在分发前拦截同一会话的小爱 Speak。音量或播放指令里提到的设备名 DeepSeek 不触发这个拦截。其他直达词由 `DIRECT_LLM_QUERY_PATTERNS` 配置。
 
 DeepSeek 默认 `LLM_THINKING=disabled`，GLM 使用 `LLM_REASONING_EFFORT=low`；MiniMax 分离思考内容，Kimi 使用非思考模式。语音链路只播回答内容，首声时间还受网络、切句和 TTS 影响。
 
@@ -47,13 +47,21 @@ DeepSeek 默认 `LLM_THINKING=disabled`，GLM 使用 `LLM_REASONING_EFFORT=low`�
 
 | 配置 | 默认值 | 含义 |
 |---|---|---|
-| `LLM_WEB_SEARCH` | `auto` | `auto` 按语义联网；`off` 关闭判断和搜索，恢复纯聊天 |
-| `LLM_WEB_PLAN_TIMEOUT` | `8` | 每轮联网判断的最长秒数，允许 1–20 |
+| `LLM_WEB_SEARCH` | `auto` | `auto` 按语义联网（`on/1/true/yes` 同义）；`off` 关闭判断和搜索，恢复纯聊天 |
+| `LLM_WEB_PLAN_TIMEOUT` | `4` | 单次联网判断的最长秒数，允许 1–20 |
 | `LLM_WEB_TIMEOUT` | `8` | 单次搜索或网页读取的最长秒数，允许 1–20 |
+| `LLM_WEB_RETRIES` | `1` | 规划和工具各自最多重试 0–2 次，只重试返回类别 10 |
+| `LLM_WEB_RETRY_BACKOFF_MS` | `500` | 网络错误或 5xx 的退避毫秒，允许 0–3000；429 默认 1 秒，整数 `Retry-After` ≤2 秒时采用它，>2 秒不重试 |
+| `LLM_WEB_TOTAL_BUDGET` | `12` | 规划、退避、重试及工具共用秒数，允许 4–30；最终回答仍由 `LLM_DIRECT_TIMEOUT` 控制 |
+| `LLM_WEB_FILLER` | `搜索中，请稍等。` | 仅流式链路在规划准备重试或调用工具前输出，每轮最多一次；空值关闭；不接受换行 |
+| `LLM_WEB_FILLER_CACHE` | `0` | `0` 关闭、`1` 缓存成功合成的垫话 PCM；命中时从 0000 段播放，缺失/越界时回到 SSE；非法值告警并用 0 |
+| `LLM_WEB_SPECULATIVE` | `1` | native DeepSeek 的端侧句级流式并行启动规划与离线候选正文，规划授权后才放行候选。设 `0` 恢复先规划后请求正文 |
+| `LLM_WEB_FALLBACK` | `answer` | 联网失败后附加“未联网”system 提示并正常回答；`fail` 只播固定失败提示 |
+| `LLM_WEB_TEST_FAULT` | 空 | 调试故障：`plan_timeout/plan_429/plan_401/plan_402/plan_403`、`tool_timeout/tool_429/tool_401/tool_402/tool_403/tool_503`；非空启动时醒目警告，使用后清空 |
 
 搜索使用 `DEEPSEEK_API_KEY`；只有官方 DeepSeek 聊天地址才允许回用通用 `LLM_API_KEY`，不会把其它服务商的通用密钥发送给 DeepSeek。需要系统已有的 `jsonfilter`，不需要 Python、jq 或 Mac 搜索服务。判断本身每轮增加一次模型请求；搜索最多返回三条来源，Search/Fetch 及模型调用分别计费。
 
-联网失败、结果为空或判断无效时，固定提示“暂时无法联网查询，请稍后再试。”，不继续生成未经核验的实时答案。回答用口语说明来源，原始网址保留在客户端日志的 `[WEB] source=` 行。具体行为和限制见[联网搜索参考](native-web-search.md)，操作见[联网搜索测试](../testing/2026-11-02-web-search.md)。可选 `server` 链路不包含此功能。
+配置模式非法、缺 `jsonfilter`、缺可用搜索 key 或超时配置非法时，启动只记一次 warning 并按 off 处理，普通回答继续。新增配置非法时记一次警告并用表中默认值。规划/工具的网络临时故障各自重试，预算不足则停止；200 但规划内容损坏或 `finish_reason` 不是 stop 时不重试。默认联网失败、空结果或无效判断后追加“未联网、不得声称查过、实时信息无法确认”的提示并继续回答；`LLM_WEB_FALLBACK=fail` 可恢复固定失败提示。规划 HTTP 401/403 直接提示“大模型密钥无效，请检查配置。”，402 提示“大模型账户余额不足，请充值后再试。”，不请求最终回答；工具鉴权或余额错误只降级。垫话与固定错误提示不写入历史，ttft 不把垫话当答案首片。只有本轮经过规划、最终传输失败且没有答案（或只有垫话）时，补播一次“暂时无法联网查询，请稍后再试。”。回答用口语说明来源，原始网址保留在客户端日志的 `[WEB] source=` 行。具体行为和限制见[联网搜索参考](native-web-search.md)，操作见[重试与兜底测试](../testing/2026-11-04-web-search-retry.md)。可选 `server` 链路不包含此功能。
 
 ## 再选文字怎样变成声音
 
@@ -66,6 +74,91 @@ DeepSeek 默认 `LLM_THINKING=disabled`，GLM 使用 `LLM_REASONING_EFFORT=low`�
 端侧 `DEVICE_TTS_STREAM=1` 默认逐句合成，PCM 按顺序播放；单句失败会重试，仍失败时可按序原生补播，补播也失败则结束本轮。端侧 TTS 并非只能等待整段 MP3 合成完再播放。组件和协议版本参数见 [ettsc](../../device/ettsc/README.md)。
 
 本机现有的 Dirac 播放适配、音量恢复与参考通道各有固件限制；音效的构建和验证见 [Dirac 组件](../../device/dirac/README.md)，出现音量异常从[排障](../runbooks/troubleshooting.md#7-llm-音量忽大忽小)进入。
+
+### TTS 正文首段提前切分
+
+| 配置 | 默认值 | 含义 |
+|---|---|---|
+| `STREAM_FIRST_SPLIT_ENABLED` | `1` | `1` 开启，`0` 恢复原有 `。！？` 切句 |
+| `STREAM_FIRST_SPLIT_MIN_CHARS` | `8` | 到达此字符数后允许在 `，、；：,;` 处切 |
+| `STREAM_FIRST_SPLIT_MAX_CHARS` | `24` | 达到上限时优先在最近的空格或逗号处切，其次按完整 UTF-8 字符硬切 |
+| `STREAM_EARLY_SPLIT_SENTENCES` | `1` | 从正文开始应用提前切分的段数，之后恢复 `。！？` |
+
+适用于 native + device 句级流式，普通和搜索正文共用规则，垫话不占正文段数。三个数值键接受无前导零的整数 1–999，最小字符数不得大于上限。非法值使用对应默认值，范围倒置时恢复两个字符阈值，客户端至多告警一次。已有配置可以继续使用。
+
+开启时检查正文首段的实际 PCM 字节数。诊断按 8 字/秒估算时长，以单声道 S16_LE 采样率换算字节并留两倍余量，默认 24 字和 24 kHz 对应 288000 字节。超过预算记录 `[WARN] sent1_too_long`，播放照常继续。
+
+### TTS 正文首段边合成边播放
+
+| 配置 | 默认值 | 含义 |
+|---|---|---|
+| `DEVICE_TTS_STREAM_COMMIT` | `1` | 端侧句级流式提前提交正文首段。设 `0` 后等待每段完整合成 |
+| `DEVICE_TTS_STREAM_MIN_MS` | `300` | 首次提交前至少累计的 PCM 毫秒数，整数 1–5000 |
+
+非法值启动告警并使用默认值。默认 24 kHz 单声道 S16_LE 对应 14400 字节。需部署配套 ettsc，增量解码沿用现有 24 kHz 单声道 48 kbps MP3。旧 ettsc、其它格式和采样率沿用整段发布。垫话、固定错误提示和后续正文段沿用整段发布。
+
+首段断流后继续使用既有重试预算。已提前提交时，只在重试 PCM 的已提交前缀逐字节相同后继续提交剩余 PCM。无法安全对齐时结束本轮并保留已播放部分，不提交完整历史。原生兜底在首段尚未提交时可用。
+
+### TTS 首段预连接（实验）
+
+`DEVICE_TTS_PREWARM=0` 默认关闭，允许 `0/1`；非法值启动告警一次并使用 `0`。仅作用于 native + device 句级流式路径。开启后，在 LLM 请求开始前异步启动同一 `ettsc` 二进制的 `prewarm` 模式：提前完成 TCP/TLS/WebSocket 握手，保留连接等待首个待合成段，使用该连接合成一次后退出。首段可能是未命中 PCM 缓存的搜索垫话；缓存已命中时用于答案首段。后续段继续使用原一次性模式。
+
+必须配套支持 `prewarm` 的新 ettsc。设备旧配置无需增加此项。握手、空闲退出、未完成音频或超时等故障回到普通合成，原有重试和原生兜底预算保持；预连接等待最多 `DEVICE_TTS_TIMEOUT`，失败回退会额外花时间。连接建立后无文本空闲 20 秒退出；回答结束或客户端中断时回收本轮子进程并删除其私有任务目录。IPC、音频及日志仅写私有 `/tmp` 轮次目录，不改私有 env，不新增常驻系统服务。启用和恢复步骤见[实际测试说明](../testing/2026-11-05-tts-prewarm.md)。
+
+### TTS 会话内连接复用（实验）
+
+| 配置 | 默认值 | 含义 |
+|---|---|---|
+| `DEVICE_TTS_PERSISTENT` | `0` | `0/1`；同会话多句与追问复用一个 ettsc worker 和 WebSocket，优先于 `DEVICE_TTS_PREWARM` |
+| `DEVICE_TTS_EARLY_START` | `0` | `0/1`；依赖 `DEVICE_TTS_PERSISTENT=1`，唤醒预连接、LLM 路由时静默预合成搜索垫话、提前启动等待 PCM 的播放器 |
+| `ETTSC_IDLE_SECS` | `20` | 空闲秒数，允许 1–120；非法值告警后使用 20，前导零按十进制处理 |
+
+仅作用于 native + device 句级流式链路。开启后，在本轮 LLM 请求开始前建立连接；后续句子复用，连续追问同 session 继续保留。换会话、音色/增益等合成配置改变时回收旧 worker。正常对话结束、换话题、新唤醒和客户端退出均清理自己的进程和私有任务目录，不关闭其它进程。关闭时保持旧行为；非法开关告警并使用 0。
+
+IPC 使用 `/tmp/native_first_tts.*` 私有目录。每句独立任务目录先写文本与音色，再发布 `queued`；完整 turn 结束并解码成功后发布 PCM 和 `done`。同一时刻仅一个任务，超时任务标记取消并隔离，不能被下一句误用。连接失败时丢弃未完成连接并最多重建一次；仍失败或 worker 不可用时回到原一次性合成、原重试及原生兜底。单句等待最多沿用 `DEVICE_TTS_TIMEOUT`，故障回退可能增加等待。
+
+没有任务时达到空闲阈值会关闭连接并退出 worker；下一轮按需重建。模型仍在生成的轮次有 `round_active` 标记：空闲连接照常释放，worker 等待本轮任务并按需重新建链，轮末移除标记；因此慢回答的后续句子仍能复用。需要配套升级支持 `serve` 的 ettsc，真实生产和声学验收见[实际测试说明](../testing/2026-11-05-tts-persistent.md)。
+
+### TTS 提前准备（实验）
+
+`DEVICE_TTS_EARLY_START=0` 默认关闭；非法值告警一次并使用 0。仅在 `DEVICE_TTS_PERSISTENT=1` 且 native + device 句级流式路径生效，不需要更换已有支持 `serve` 的 ettsc 二进制。
+
+启用后，首轮唤醒创建会话时异步建立连接，与原生识别并行；原生成功、忽略或无结果时只回收连接，不合成、不播放垫话。确定转 LLM 时、冻结原生播放器之前，若联网模式为 auto 且后端为 DeepSeek，则向同一个 worker 静默提交固定垫话任务；追问在提交 LLM 之前按轮提交。仍由原联网流程确认需要搜索、抓取或失败重试时授权播放；普通 answer、搜索关闭或空垫话均不播放预备垫话。未使用 PCM 随轮次/会话清理，不写历史。默认不开启 PCM 持久缓存；缓存开关为 1 时，仅实际使用的完整垫话按原规则保存。
+
+播放器在 LLM 流开始前异步启动、等待 FIFO 数据；这不会提前发声。授权后的垫话使用独立 0000 槽，PCM 就绪即按序发布播放，不经过正文 SSE/切句管道，因此可在正文首 token 之前播放。正文仍从 0001 开始，不改变切句规则或与垫话混入历史。连接保持单任务顺序：正文如果遇到尚未完成的垫话合成，只等待从垫话提交算起的 `DEVICE_TTS_TIMEOUT` 原预算；故障沿用一次性合成、原重试和原生兜底，可能增加等待。预合成也会用于最终走普通 answer 的轮次，产生一小段未播放的合成请求，并可能短暂占用连接。
+
+原消费者本来就不要求正文首 token 到达才播放；此前合成完成到 FIFO 提交的等待，不能直接归因于等待正文。新增计时在提前准备生效时追加 `player_open`（启动播放器到 FIFO 打开）、`wake→filler_commit`、`wake→answer_commit`。`sent0_*` 对应提前准备垫话，`sent1_*` 对应第一段正文；`sent0_tts_end` 为播放器检测并发布预备结果的时刻，可能晚于 worker 实际合成结束，不应用于精确服务耗时。TCP/TLS 和服务端音频耗时继续查看各句 `[T]`。原有 `[LATENCY]` 键名保持，`tts1`/`pcm1` 对应首段正文，而 `wake→commit1` 是垫话或正文的首次 FIFO 提交，不等于声学出声。`commit1` 按首次提交的 PCM 段计算，垫话与正文的独立提交时刻仍可分别查看。
+
+恢复原时序：设 `DEVICE_TTS_EARLY_START=0` 后按原维护流程在空闲时重启；仍可保留会话内复用。验证步骤与尚未执行的真人验收见[提前准备测试说明](../testing/2026-11-06-tts-early-start.md)。
+
+### 转 LLM 提示音
+
+| 配置 | 默认值 | 含义 |
+|---|---|---|
+| `LLM_ROUTE_BEEP` | `1` | 物理唤醒确定转端侧句级流式 LLM 且原生失败语音已拦截或播放器已冻结时，播放两声提示音。设 `0` 恢复原 PCM 序列 |
+| `LLM_ROUTE_BEEP_FOLLOWUP` | `1` | 主开关开启时，追问识别得到有效问题并转入端侧句级流式 LLM 后播放 |
+| `LLM_ROUTE_BEEP_FILE` | `dongdong_523.pcm` | 内置提示音（兼容 `builtin`）或自定义裸 PCM 绝对路径。要求 24 kHz、S16_LE、单声道，最长 1.30 秒 |
+| `LLM_ROUTE_BEEP_GAIN` | `0.5` | 提示音的额外 PCM 增益，允许 0.5–2.0。已有显式配置继续生效 |
+| `LLM_END_BEEP` | `1` | 完整回答确认播完后播放单声提示音。boot1 实时追问在提示音结束后按 `FOLLOWUP_TIMEOUT` 开始收音，默认 8 秒。固件接管收音的 `native_multirounds` 模式跳过此提示音 |
+| `LLM_END_BEEP_FILE` | `builtin` | 复用内置 523 Hz 音色的单次敲击（0.75 秒）。也可填自定义裸 PCM 的绝对路径，要求 24 kHz、S16_LE、单声道，最长 1.30 秒 |
+
+端侧 24 kHz 流式播放可由同版 Dirac 播放组件复用回答的 ALSA 句柄，回答排空后立即提交结束音。独立播放器作为兼容路径。实时追问在结束音排空后开始收音，并同时预热已启用的 TTS 持久连接与接管播放器。原生音频已在分发前被拦截或该轮使用 ASR-only 时，可直接恢复原生播放器。其他轮次先清理原生队列再收音。
+
+唤醒后预备提示音 PCM，并预先启动一个读取 raw stdin 的 Dirac aplay。确认转 LLM 并达到安全接管条件后才写入提示音，随后启动语音消费者，将垫话与正文接入同一个 aplay。原生失败语音已经拦截时，在设置 LLM Master 后触发提示音和绿灯。明确调用 DeepSeek 且已选中 LLM 路由时，已下发的原生播报直接冻结并接管。普通自动转接已下发的播报仍最多等待 4 秒。已识别为原生域的指令继续交给原生。等待期间的新物理唤醒取消旧交接。首段语音就绪时，最多取 100 ms 未提交的提示音混入语音开头并淡出，其余提示音丢弃。
+
+内置 PCM 长 1.30 秒，基频 523 Hz，两声各长 750 ms，第二声在 550 ms 处开始。素材峰值 −1 dBFS，默认以 0.5 倍 PCM 增益对齐 `DEVICE_TTS_GAIN=2.0` 的参考回答。修改 `DEVICE_TTS_GAIN` 时提示音按比例跟随，双方沿用同一 LLM Master 和 Dirac。端侧句级流式使用 `DEVICE_TTS_GAIN`，`LLM_VOLUME` 用于服务端播放路径。自定义 PCM 由提供方保证采样率、位深和声道，文件不可用时记告警并继续回答。开发机可用 `python3 scripts/generate_dongdong.py` 重新生成仓库中的 WAV 和裸 PCM。
+
+## M03 延迟观测
+
+仅 `LLM_PIPELINE=native`、`TTS_ENGINE=device`、`DEVICE_TTS_STREAM=1` 的轮次生成分段数据。计时不改变切句、播放顺序、超时、重试次数或间隔；旧配置文件无需增加参数。
+
+| 配置 | 默认值 | 含义 |
+|---|---|---|
+| `LATENCY_TRACE_ENABLED` | `1` | `0/1`，关闭时不新增打点和 `[LATENCY]` 汇总 |
+| `LATENCY_LOG_MAX_LINES` | `200` | `/tmp/native_first_latency.log` 最近行数，允许 20–2000 |
+| `ETTSC_TIMING` | `0` | `0/1`，端侧流式 ettsc 输出可选 `[T]` 毫秒计时到各次合成日志 |
+
+非法值只警告一次并回退到表中默认值，警告不打印输入值。新增计时日志只记阶段、时间、PCM 长度、分段数和重试次数，保存在 `/tmp`；原有对话日志的内容保持现状。FIFO 提交时间不等于声学首声。字段、离线统计和录音校准见[诊断参考](diagnostics.md#m03-分段计时)，实际操作见[M03 验收说明](../testing/2026-11-04-latency-trace.md)。
 
 ## 会话与可选组件
 

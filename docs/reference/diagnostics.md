@@ -130,3 +130,58 @@ sh device/speaker_doctor.sh --root /绝对路径/音箱快照
 4. 若启用了 boot1 追问或判停，分别检查组件文件、包摘要与快照项。出现 `FAIL` 时按对应“下一步”排查；仅有进程或快照迹象时仍不能记作真实语音验收通过。
 
 5. 后续另行安排真人用例时，按[人工验收](../../tests/manual_native_first_cases.md)检查原生报时、LLM 完整播放、上下文追问、静默退出与首轮停顿续说。诊断不代替听觉、家居动作、重启、断电或全天稳定性测试。
+
+
+## M03 分段计时
+
+native + 端侧流式在轮末输出一行 `[LATENCY]`，同步追加到 `/tmp/native_first_latency.log`，默认只保留最近 200 行。关闭 `LATENCY_TRACE_ENABLED` 后不生成新计时数据；已存在的日志不会被清空。原有客户端日志仍可能含对话原文，应留在私有环境。
+
+所有时间字段单位为秒，保留三位小数；`-` 表示缺失或时序倒置，不算作零。示例：
+
+```text
+[LATENCY] start=wake wake→route=0.600 route→req=0.100 ttft=1.100 split1=0.350 tts1=0.700 commit1=0.050 wake→commit1=2.900 pcm1=1.800 segs=2 retries=0 web=off plan=- search=- filler=- llm=1.700 play=5.000 wake→filler_commit=- wake→answer_commit=2.900 filler→answer_gap=- filler→answer_gap_kind=-
+```
+
+| 字段 | 口径 |
+|---|---|
+| `start` | `wake` 为 `handle_wakeup` 入口，`followup` 为确认本次追问转 LLM 的时刻，`-` 为起点缺失。所有 `wake→*` 字段均从本轮起点计算 |
+| `wake→route` | 本轮起点至决定转 LLM。追问在同一时刻确认起点和路由，值为 `0.000` |
+| `route→req` | 路由决定至首次启动聊天请求的 curl，取联网规划、投机和正文请求中最早的打点，不含搜索工具请求 |
+| `freeze→llm_entry` / `llm_entry→prepare` / `llm_prepare→req` | 首次成功冻结到进入 LLM、从进入到请求准备、从准备到实际启动 curl 的单调时钟时差 |
+| `ttft` | 请求开始至首个非垫话回答片段；包含联网规划和工具耗时 |
+| `split1` | 首个非垫话片段至消费正文首段；沿用串行消费位置，可能包含管道缓冲等待 |
+| `tts1` | 正文首段的整次合成调用，包含既有重试和 PCM 解码 |
+| `commit1` | 首个 PCM 段（垫话或正文）从合成结束到写入 FIFO 前的秒数。增量提交从首批解码 PCM 发布算起，缓存垫话从触发发布算起。缺少对应打点时为 `-` |
+| `tts1_first` / `tts1_to_commit` | 正文首段开始合成至首批解码 PCM 发布、至首次写入 FIFO 前。完整合成时间仍看 `tts1` |
+| `player_prestart_wait` | 首次打开播放 FIFO 到首次提交 PCM 前的等待秒数。缺少任一打点时为 `-` |
+| `player_underrun` / `player_underrun_ms` / `player_prestart_underrun_ms` / `player_gap_underrun_ms` | 播放阶段欠载次数和毫秒总长。开播前和紧邻垫话接正文的欠载分别单列。缺失单次时长时，对应总长为 `-`。原始播放日志默认位于 `/tmp/native_first_dirac.log`，只保留最近一次播放 |
+| `wake→beep` / `wake→led_green` / `beep` | 从本轮起点至提示音 PCM 提交、触发绿灯的秒数。开始向播放器写入提示音时标为 `played`，策略关闭或当前轮不适用为 `off`，播放未成功时为 `skipped`。两个时间点都是软件打点 |
+| `player_open` / `player_ready` | 主播放器启动至 FIFO 打开，以及准备开始至 FIFO 打开，单位为秒。启用预热提示音时，`player_spawn` 指首批提示音写入后启动语音消费者，`player_fifo_open` 指语音消费者接入已预热的 FIFO |
+| `beep_start→commit` / `beep_commit→player_spawn` | 触发到首批提示音写入，以及首批提示音写入到语音消费者启动的秒数。`wake→beep_device_spawn` 单列预热 aplay 的启动，`wake→beep_device_ready` 来自 aplay 的 raw stdin 播放提示 |
+| `wake→beep_drain` / `wake→beep_end` / `beep_overlap` | 提示音 PCM 最后一次提交或停止写入的时刻、按提交的 PCM 帧估算的提示音结束时刻，以及首段语音是否混入提示音（`0` 或 `1`）。`beep_end` 不含设备缓冲延迟 |
+| `player_underrun_at` / `player_underrun_first_at` / `player_underrun_phase` | 全部欠载报告的相对时间、首次报告及其阶段。垫话或无垫话的正文首段提交时刻前后 100 ms 内归 `prestart`，垫话后的正文提交前后 100 ms 内归 `gap`，均从卡顿统计中剔除。窗口外保留原阶段判定 |
+| `wake→commit1` | 本轮起点至垫话或正文的第一次 PCM FIFO 提交，路由提示音单列 |
+| `pcm1` | 正文首段 PCM 字节数 ÷（采样率 × 2），为单声道 S16LE 音频秒数 |
+| `segs` / `retries` | 已结束合成调用的播放段数（含垫话/兜底）；所有句子的额外尝试总次数 |
+| `web` | 只读本轮已有 action：`off/answer/search/fetch`；状态不足为 `unknown`，不证明搜索成功 |
+| `plan` / `search` / `filler` | 若 marks 中有 `web_plan_start/end`、`web_tool_start/end`、`web_filler`，分别输出规划、工具耗时和请求至垫话的时间 |
+| `wake→filler_commit` / `wake→answer_commit` | 本轮起点至垫话或正文首段 PCM 写入 FIFO 前 |
+| `filler→answer_gap` / `filler→answer_gap_kind` | 有垫话和正文首段 PCM 提交时，计算两次提交的间隔减去垫话 PCM 时长，最小为零，并标记 `est`。估算不含播放器缓冲及设备输出偏移；缺少任一提交或垫话 PCM 时长时均为 `-` |
+| `llm` / `play` | 请求开始至流结束、消费者结束（含失败退出） |
+
+对已下发的原生播报，`[HANDOFF] forced reason=direct` 表示明确调用 DeepSeek 的轮次直接走冻结接管。`[HANDOFF] cancelled reason=new_wake` 表示等待中的旧交接被新的物理唤醒取消。
+
+每轮 marks 为 `name ms`，位于 `/tmp/native_first_stream/marks`（另有段号、字节数、次数及欠载微秒等数值），下一流式轮覆盖。唤醒阶段先用私有 `/tmp/native_first_marks.XXXXXX`，进入流式后合并并删除临时目录；未转 LLM 和客户端清理时也删除待合并目录。追问用新目录记录 `followup_start`，不继承上轮数据。计时写入失败不会改变回答的成功/失败判断。
+
+在开发机仓库根目录手动上传离线汇总脚本：
+
+```sh
+scp -O device/latency_summary.sh xiaomi:/data/latency_summary.sh
+ssh xiaomi 'sh /data/latency_summary.sh'
+```
+
+脚本默认读取 `/tmp/native_first_latency.log`，也可传入一个日志文件路径；只输出固定时间字段的样本数、P50/P90/max，缺失样本不计入。百分位按最近秩第 `ceil(p*n)` 个数取值，不需要 Python 或新工具。脚本不安装或重启任何组件。
+
+`ETTSC_TIMING=1` 时，端侧流式每次尝试日志 `/tmp/native_first_stream/NNNN.attempt-N.log` 中出现 `[T] tcp_ms=… tls_ws_ms=… first_audio_ms=… turn_end_ms=…`。TCP 含 DNS，`tls_ws_ms` 含请求构建和 TLS/WebSocket 握手；后两项从 config/SSML 发送完成起算，分别至首个非空音频负载和真实 `turn.end`。未达到的阶段为 `-`。该行使用 `[T]`，不会触发已有 `[!]` 失败判定；握手失败沿用原有退出路径，可能没有完整计时行。
+
+声学校准仍需真机录音：固定手机位置，保留唤醒词和首段语音，测唤醒词末尾到首个语音波形；同时对齐 `handle_wakeup` 入口和唤醒词末尾的偏移，再与 `wake→commit1` 相减，得到 FIFO 提交至实际出声的偏移。至少记录 5 轮、设备分区/音量和测量误差；存在垫话时单列测量，不能把垫话首声当答案首声。结果未测前不使用固定补偿值。人工验收见[M03 实际测试](../testing/2026-11-04-latency-trace.md)。

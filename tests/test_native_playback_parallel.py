@@ -6,10 +6,24 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.test_latency_trace import functions
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class NativePlaybackParallelTest(unittest.TestCase):
+    def test_teardown_think_preserves_real_wake_and_normal_think(self):
+        script = functions('wake_is_followup_teardown') + """
+FOLLOWUP_TIMEOUT_START_MS=1000
+FOLLOWUP_TIMEOUT_END_MS=9000
+wake_is_followup_teardown think 8980 500 || exit 1
+if wake_is_followup_teardown WuW 8990 500; then exit 2; fi
+if wake_is_followup_teardown think 8990 8985; then exit 3; fi
+if wake_is_followup_teardown think 9100 500; then exit 4; fi
+if wake_is_followup_teardown think 8990 -; then exit 5; fi
+"""
+        subprocess.run(['sh', '-c', script], check=True, timeout=3)
+
     def test_only_owned_followup_suppresses_native_callbacks(self):
         source = (ROOT / 'device/native_first_client.sh').read_text()
         hook = source.split('cat > "$HOOK_WAKEUP" << \'EOF\'\n', 1)[1].split('\nEOF', 1)[0]

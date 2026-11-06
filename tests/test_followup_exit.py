@@ -7,11 +7,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.native_protocol_helpers import with_answer_audio_dependencies
+
 ROOT = Path(__file__).resolve().parents[1]
 COMMANDS = ('结束对话', '退出对话', '停止对话', '不聊了', '退下')
 
 
 def functions(*names):
+    names = with_answer_audio_dependencies(names)
     if 'is_followup_reset_command' not in names:
         names += ('is_followup_reset_command',)
     source = (ROOT / 'device/native_first_client.sh').read_text()
