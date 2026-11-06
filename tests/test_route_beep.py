@@ -56,6 +56,7 @@ class RouteBeepTest(unittest.TestCase):
             (root / 'uptime').write_text('1.00 0\n')
             code += r'''
 LATENCY_TRACE_ENABLED="$TRACE"; LATENCY_LOG_MAX_LINES=200
+LED_FEEDBACK_ENABLED=1
 LLM_PIPELINE=native; TTS_ENGINE=device; DEVICE_TTS_STREAM=1
 LLM_API_KEY=sk-test; DEVICE_TTS_PCM_RATE=24000
 [ "$BUILTIN" = 1 ] || LLM_ROUTE_BEEP_FILE="$TEST_DIR/beep.pcm"
@@ -209,11 +210,15 @@ llm_aplay() {
     for arg do fifo="$arg"; done
     case "$fifo" in
         "$TEST_DIR"/ending.*)
+            [ "$LLM_APLAY_TIMEOUT" = 8 ] || : > "$TEST_DIR/early"
             echo end_beep_start >> "$TEST_DIR/events"
             cat "$fifo" >> "$TEST_DIR/played"
             echo end_beep_end >> "$TEST_DIR/events"
+            # Model the target ash retaining the cue settings after a function.
+            LLM_APLAY_TIMEOUT=8
             return 0 ;;
     esac
+    [ -z "${LLM_APLAY_TIMEOUT:-}" ] || : > "$TEST_DIR/early"
     if [ "$1" = -t ]; then
         exec 9<&0
         if [ "$MODE" = cold_start ]; then

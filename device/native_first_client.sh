@@ -4123,8 +4123,13 @@ llm_end_beep() {
         log '[WARN] LLM 结束提示音 PCM 不可用，已跳过'
     elif ! llm_answer_interrupted "$start"; then
         [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark end_beep_start
-        if DIRAC_PLAYBACK_LOG=/tmp/native_first_end_beep.log LLM_APLAY_TIMEOUT=8 \
-            llm_aplay -t raw -r 24000 -f S16_LE -c 1 "$pcm" >/dev/null; then
+        # Older BusyBox ash can retain assignments prefixed to a function call.
+        # Keep the cue timeout and stderr path out of later answer players.
+        if (
+            DIRAC_PLAYBACK_LOG=/tmp/native_first_end_beep.log
+            LLM_APLAY_TIMEOUT=8
+            llm_aplay -t raw -r 24000 -f S16_LE -c 1 "$pcm" >/dev/null
+        ); then
             [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark end_beep_end
         else
             log '[WARN] LLM 结束提示音播放失败'
@@ -4699,7 +4704,7 @@ llm_stream_answer_and_play() {
     : > "$wd/segs"
     : > "$wd/native_segs"
 
-    : > "$wd/answer_led"
+    [ "${LED_FEEDBACK_ENABLED:-0}" != 1 ] || : > "$wd/answer_led"
     [ -z "$play_pid" ] || : > "$wd/stream_ready"
     messages=$(llm_build_messages "$sid" "$user") || {
         if [ -n "$play_pid" ]; then
