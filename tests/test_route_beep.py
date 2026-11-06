@@ -81,6 +81,11 @@ killall() {
 TTS_NATIVE_STATUS_START_TIMEOUT_SECONDS=3; TTS_NATIVE_STATUS_MAX_SECONDS=8
 TTS_NATIVE_STATUS_IDLE_HITS=2; TTS_NATIVE_STATUS_POLL_SECONDS=0.01
 native_tts_player_status() {
+    if [ "$MODE" = empty_speak ] || [ "$MODE" = early_failure ]; then
+        : > "$TEST_DIR/early"
+        echo 1
+        return
+    fi
     if [ -f "$TEST_DIR/clock" ]; then
         read -r now < "$TEST_DIR/clock"
         printf '%s\n' "$((now + 1000))" > "$TEST_DIR/clock"
@@ -122,7 +127,7 @@ new_llm_session_id() { NEW_LLM_SESSION_ID=stub; }
 select_native_result_source() { echo stub; }
 get_native_result() {
     [ "$MODE" != no_result ] || return 1
-    case "$MODE" in direct_timeout|direct_cancel) get_native_result_aivs_lab; return ;; esac
+    case "$MODE" in direct_timeout|direct_cancel|empty_speak) get_native_result_aivs_lab; return ;; esac
     if [ "$MODE" = cold_start ]; then
         until [ -f "$TEST_DIR/transport_ready" ]; do sleep 0.01; done
     fi
@@ -140,7 +145,7 @@ get_native_result() {
         RESULT_SPEAK='这个设置回答不上'
     fi
 }
-is_system1_root() { case "$MODE" in direct_timeout|direct_cancel) return 0 ;; *) return 1 ;; esac; }
+is_system1_root() { case "$MODE" in direct_timeout|direct_cancel|empty_speak) return 0 ;; *) return 1 ;; esac; }
 is_ignored_query_result() { return 1; }
 is_recent_duplicate_llm_query() { return 1; }
 is_followup_exit_command() { return 1; }
@@ -312,6 +317,12 @@ exit 0
         self.assertEqual(audio, b'BBFFAA')
         self.assertIn('beep=played', log)
         self.assertEqual(led, ['accept'])
+
+    def test_empty_speak_freezes_and_hands_off_without_status_query(self):
+        audio, log, _ = self.run_round('empty_speak', native_result=(INCIDENT_CASES[0][0], ''))
+        self.assertEqual(audio, b'BBFFAA')
+        self.assertIn('[LLM-NATIVE] direct', log)
+        self.assertNotIn('[HANDOFF] forced', log)
 
     def test_gain_scales_pcm_without_changing_answer(self):
         audio, _, _ = self.run_round('wake', asset=b'\x00\x40', gain='0.5')

@@ -3408,8 +3408,12 @@ tts_early_filler_pending() {
 
 # Called only by the independent player, never by the web/LLM producer.
 tts_early_filler_publish() {
-    local wd="$1" job="${TTS_EARLY_FILLER_JOB:-}" started
+    local wd="$1" job started
+    local TTS_EARLY_FILLER_JOB="" TTS_PERSISTENT_DIR="" TTS_PERSISTENT_PID=""
     [ -f "$wd/web_filler_direct" ] && [ ! -f "$wd/0000.rdy" ] || return 0
+    # The prewarmed player was forked before the TTS job was queued.
+    IFS=' ' read -r TTS_EARLY_FILLER_JOB TTS_PERSISTENT_DIR TTS_PERSISTENT_PID < "$wd/early_filler" || :
+    job="$TTS_EARLY_FILLER_JOB"
     tts_early_filler_pending && return 0
     started=""
     [ -z "$job" ] || started=$(cat "$job/started" 2>/dev/null)
@@ -4570,7 +4574,10 @@ llm_stream_answer_and_play() {
     if [ "${DEVICE_TTS_EARLY_START:-0}" = 1 ] && [ "${DEVICE_TTS_PERSISTENT:-0}" = 1 ] &&
         [ "$LLM_PIPELINE" = native ] && [ "$TTS_ENGINE" = device ] && [ "$DEVICE_TTS_STREAM" = 1 ]; then
         tts_early_filler_start "$sid"
-        [ -z "${TTS_EARLY_FILLER_JOB:-}" ] || : > "$wd/early_filler"
+        if [ -n "${TTS_EARLY_FILLER_JOB:-}" ]; then
+            printf '%s %s %s\n' "$TTS_EARLY_FILLER_JOB" "$TTS_PERSISTENT_DIR" "$TTS_PERSISTENT_PID" \
+                > "$wd/early_filler" || rm -f "$wd/early_filler"
+        fi
         : > "$wd/early_player"
     fi
     export LLM_WEB_MARK_DIR="$wd" LLM_WEB_FILLER_ALLOWED=1
@@ -5509,6 +5516,9 @@ native_route_beep_gate() {
     case "$RESULT_SOURCE:$RESULT_SPEAK" in
         'aivs_lab_early_failure:[failure Speak suppressed before dispatch]')
             route_beep_fire || :
+            ;;
+        aivs_lab_instruction:)
+            route_beep_quiet=1
             ;;
         aivs_lab_instruction:?*)
             native_route_wait_quiet

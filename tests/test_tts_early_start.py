@@ -58,7 +58,8 @@ else:
 
 
 class TtsEarlyStartTest(unittest.TestCase):
-    def pipeline(self, action='search', mode='ok', early=1, wake=False, native=False, shell=None, body='', cache=0):
+    def pipeline(self, action='search', mode='ok', early=1, wake=False, native=False, shell=None, body='', cache=0,
+                 prewarmed=False):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp); fake=root/'fake-ettsc'
             fake.write_text('#!'+sys.executable+'\n'+FAKE); fake.chmod(0o700)
@@ -134,7 +135,21 @@ handle_wakeup 1
 printf 'RESULT=%s\n' "$?"
 '''
             else:
-                code+='\nlatency_begin; latency_mark wake\ntts_early_filler_start same\n'
+                code+='\nlatency_begin; latency_mark wake\n'
+                if prewarmed:
+                    code+=r'''
+ROUTE_BEEP_WD="$TEST_DIR/stream"
+mkdir "$ROUTE_BEEP_WD"
+cat "$LATENCY_MARK_DIR/marks" > "$ROUTE_BEEP_WD/marks"
+latency_discard
+LATENCY_MARK_DIR="$ROUTE_BEEP_WD"
+(
+    while [ ! -f "$ROUTE_BEEP_WD/stream_ready" ]; do sleep .01; done
+    stream_play_worker "$ROUTE_BEEP_WD"
+) &
+ROUTE_BEEP_PLAY_PID=$!
+'''
+                code+='tts_early_filler_start same\n'
                 code+='llm_stream_answer_and_play same fixture 1000\nprintf "RESULT=%s\\n" "$?"\n'
             code+=body+'\ntts_persistent_stop\n'
             run=subprocess.run((shell or ['sh'])+['-c',code], capture_output=True,text=True,timeout=20,
@@ -157,6 +172,14 @@ printf 'RESULT=%s\n' "$?"
         self.assertLess(r['events'].index('filler-played'),r['events'].index('first-token'))
         self.assertIn('filler_commit ',r['marks']); self.assertIn('answer_commit ',r['marks'])
         self.assertIn('player_start ',r['marks']); self.assertIn('player_fifo_open ',r['marks'])
+
+    def test_prewarmed_player_reads_filler_job_queued_after_fork(self):
+        r=self.pipeline(prewarmed=True)
+        self.assertIn('RESULT=0',r['stdout']); self.assertTrue(r['early'])
+        self.assertEqual(r['played'],'F'*1024+'A'*1024)
+        self.assertIn('[TTS] early filler hit',r['log'])
+        self.assertNotIn('ordinary-filler',r['events'])
+        self.assertLess(r['events'].index('filler-played'),r['events'].index('first-token'))
 
     def test_wake_launches_worker_before_asr_and_filler_before_freeze(self):
         r=self.pipeline(wake=True)
