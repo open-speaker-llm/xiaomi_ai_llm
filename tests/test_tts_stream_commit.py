@@ -125,12 +125,11 @@ exit "$rc"
         self.assertNotIn('native', events)
         self.assertNotIn('history', events)
 
-    def test_starvation_counts_once_without_injecting_pcm(self):
+    def test_delayed_pcm_keeps_audio_without_fabricating_underrun(self):
         result, audio, _ = self.run_round('starve')
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertEqual(audio, 'FF' + 'A' * 14400 + 'BBCC')
-        self.assertEqual(result.stdout.count('[TTS] player_underrun'), 1)
-        self.assertIn('player_underrun=1', result.stdout)
+        self.assertIn('player_underrun=0 player_underrun_ms=0.000', result.stdout)
 
     @unittest.skipUnless(shutil.which('busybox'), 'BusyBox ash unavailable on host')
     def test_busybox_commit_and_retry(self):

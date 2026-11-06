@@ -92,15 +92,16 @@ latency_report
     def test_inline_filler_uses_body_split_and_commit_in_summary(self):
         marks = MARKS + '''inline_filler 1
 filler_commit 2200
+fifo_commit_slot 1
 filler_pcm_bytes 96000
 sent2_split 3200
 sent2_tts_start 3200
 sent2_pcm_bytes 48000
 '''
-        marks = marks.replace('sent1_split 3150', 'sent1_split 2000')
+        marks = marks.replace('sent1_split 3150', 'sent1_split 2000').replace('sent1_tts_end 3850', 'sent1_tts_end 2200')
         marks = marks.replace('fifo_commit1 3900', 'fifo_commit1 2200').replace('answer_commit 3900', 'answer_commit 4250')
         out, _, _ = self.run_shell('latency_report', marks)
-        for field in ('split1=0.400', 'tts1=1.000', 'commit1=0.050', 'pcm1=1.000',
+        for field in ('split1=0.400', 'tts1=1.000', 'commit1=0.000', 'pcm1=1.000',
                       'wake→commit1=1.200', 'wake→answer_commit=3.250',
                       'filler→answer_gap=0.050 filler→answer_gap_kind=est'):
             self.assertIn(field, out)
@@ -108,6 +109,46 @@ sent2_pcm_bytes 48000
         self.assertIn('filler→answer_gap=0.000 filler→answer_gap_kind=est', out)
         out, _, _ = self.run_shell('latency_report', marks.replace('filler_pcm_bytes 96000', ''))
         self.assertIn('filler→answer_gap=- filler→answer_gap_kind=-', out)
+
+    def test_live_first_commit_and_prestart_wait(self):
+        marks = MARKS.replace('fifo_commit1 3900', 'fifo_commit1 3600')
+        marks += 'fifo_commit_slot 1\nfifo_commit_live 1\nsent1_first_pcm 3400\nplayer_fifo_open 2000\n'
+        out, _, _ = self.run_shell('latency_report', marks)
+        fields = dict(item.split('=', 1) for item in out.split()[1:])
+        self.assertEqual(fields['commit1'], '0.200')
+        self.assertEqual(fields['player_prestart_wait'], '1.600')
+        self.assertEqual(fields['player_underrun'], '0')
+        self.assertEqual(fields['player_underrun_ms'], '0.000')
+
+    def test_cached_filler_uses_its_own_commit(self):
+        marks = MARKS.replace('fifo_commit1 3900', 'fifo_commit1 2200')
+        marks += 'fifo_commit_slot 0\nweb_filler 2100\nfiller_commit 2200\n'
+        out, _, _ = self.run_shell('latency_report', marks)
+        fields = dict(item.split('=', 1) for item in out.split()[1:])
+        self.assertEqual(fields['commit1'], '0.100')
+        self.assertEqual(fields['wake→commit1'], '1.200')
+
+    def test_player_log_counts_each_invocation_and_preserves_status(self):
+        out, _, _ = self.run_shell(functions('llm_aplay') + r'''
+STREAM_PLAY_MARK_DIR="$TEST_DIR"
+DIRAC_PLAYBACK_LOG="$TEST_DIR/aplay.log"
+DIRAC_APLAY="$TEST_DIR/missing-helper"
+aplay() {
+    printf '%s\n' 'underrun!!! (at least 12.500 ms long)' 'xrun: underrun!!! (at least 7,250 ms long)' >&2
+    return 7
+}
+llm_aplay test.pcm
+printf 'rc=%s\n' "$?"
+aplay() { echo 'underrun!!! (at least 3 ms long)' >&2; }
+llm_aplay test.pcm
+latency_report
+aplay() { echo 'underrun!!!' >&2; }
+llm_aplay test.pcm
+latency_report
+''')
+        self.assertIn('rc=7', out)
+        self.assertIn('player_underrun=3 player_underrun_ms=22.750', out)
+        self.assertIn('player_underrun=4 player_underrun_ms=-', out)
 
     def test_missing_reversed_and_duplicate_marks(self):
         out, _, _ = self.run_shell('latency_report', 'llm_req 1000\nllm_first_token 900\nllm_req 500\n')

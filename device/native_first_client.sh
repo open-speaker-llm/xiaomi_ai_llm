@@ -363,7 +363,7 @@ latency_mark() {
     [ -d "$dir" ] || return 0
     case "$name" in *[!a-z0-9_]*) return 0 ;; esac
     case "$name" in
-        wake|followup_start|native_result|route_llm|freeze_done|llm_req|llm_first_token|fifo_commit1|llm_done|play_done|web_plan_start|web_plan_end|web_tool_start|web_tool_end|web_filler|player_start|player_fifo_open|filler_commit|filler_pcm_bytes|answer_commit|spec_start|spec_cancel|spec_used|player_underrun) ;;
+        wake|followup_start|native_result|route_llm|freeze_done|llm_req|llm_first_token|fifo_commit1|fifo_commit_slot|fifo_commit_live|llm_done|play_done|web_plan_start|web_plan_end|web_tool_start|web_tool_end|web_filler|player_start|player_fifo_open|filler_commit|filler_pcm_bytes|answer_commit|spec_start|spec_cancel|spec_used) ;;
         sent[0-9]*_split|sent[0-9]*_first_pcm|sent[0-9]*_tts_start|sent[0-9]*_tts_end|sent[0-9]*_pcm_bytes|sent[0-9]*_retries) ;;
         *) return 0 ;;
     esac
@@ -385,7 +385,9 @@ latency_report() {
     esac
     line=$(LC_ALL=C awk -v web="$web" -v rate="$DEVICE_TTS_PCM_RATE" '
         NF == 2 && $2 ~ /^[0-9]+$/ {
-            if ($1 == "player_underrun") underruns++
+            if ($1 == "player_underrun_count") underruns+=$2
+            if ($1 == "player_underrun_us") underrun_us+=$2
+            if ($1 == "player_underrun_unknown") underrun_unknown+=$2
             if (!($1 in m)) m[$1]=$2+0
         }
         function delta(a,b) {
@@ -406,6 +408,10 @@ latency_report() {
             if ("followup_start" in m) { start="followup"; origin="followup_start" }
             else if (!("wake" in m)) start="-"
             first=("inline_filler" in m) ? "sent2" : "sent1"
+            slot=("fifo_commit_slot" in m) ? "sent" m["fifo_commit_slot"] : first
+            ready=slot "_tts_end"
+            if ("fifo_commit_live" in m) ready=slot "_first_pcm"
+            else if (slot == "sent0" && !(ready in m)) ready="web_filler"
             gap="-"; gap_kind="-"
             if (("filler_commit" in m) && ("answer_commit" in m) &&
                 m["answer_commit"] >= m["filler_commit"] && m["filler_pcm_bytes"] > 0 &&
@@ -417,15 +423,17 @@ latency_report() {
             printf "[LATENCY] start=%s wake→route=%s route→req=%s ttft=%s split1=%s tts1=%s commit1=%s wake→commit1=%s pcm1=%s segs=%d retries=%d web=%s plan=%s search=%s filler=%s llm=%s play=%s", \
                 start, delta(origin,"route_llm"), delta("route_llm","llm_req"), \
                 delta("llm_req","llm_first_token"), delta("llm_first_token",first "_split"), \
-                delta(first "_tts_start",first "_tts_end"), delta(first "_tts_end","answer_commit"), \
+                delta(first "_tts_start",first "_tts_end"), delta(ready,"fifo_commit1"), \
                 delta(origin,"fifo_commit1"), length_s(first "_pcm_bytes"), segs, retries, web, \
                 delta("web_plan_start","web_plan_end"), delta("web_tool_start","web_tool_end"), \
                 delta("llm_req","web_filler"), delta("llm_req","llm_done"), delta("llm_req","play_done")
             spec="off"
             if ("spec_used" in m) spec="used"
             else if ("spec_cancel" in m) spec="cancelled"
-            printf " spec=%s tts1_first=%s tts1_to_commit=%s player_underrun=%d", spec, \
-                delta(first "_tts_start",first "_first_pcm"), delta(first "_tts_start","answer_commit"), underruns
+            printf " spec=%s tts1_first=%s tts1_to_commit=%s player_prestart_wait=%s player_underrun=%d player_underrun_ms=%s", spec, \
+                delta(first "_tts_start",first "_first_pcm"), delta(first "_tts_start","answer_commit"), \
+                delta("player_fifo_open","fifo_commit1"), underruns, \
+                underrun_unknown ? "-" : sprintf("%.3f", underrun_us/1000)
             if ("player_start" in m) printf " player_open=%s", delta("player_start","player_fifo_open")
             printf " wake→filler_commit=%s wake→answer_commit=%s filler→answer_gap=%s filler→answer_gap_kind=%s", \
                 delta(origin,"filler_commit"), delta(origin,"answer_commit"), gap, gap_kind
@@ -3567,22 +3575,43 @@ stream_synthesize_sentence() {
 
 llm_aplay() {
     local helper="${DIRAC_APLAY:-/data/dirac_aplay.sh}"
+    local playback_log="${DIRAC_PLAYBACK_LOG:-/tmp/native_first_dirac.log}" rc
     # One log per player, never store audio or grow a persistent log on /data.
     if [ -x "$helper" ]; then
         LLM_DIRAC_ENABLED="${LLM_DIRAC_ENABLED:-1}" "$helper" "$@" \
-            2>"${DIRAC_PLAYBACK_LOG:-/tmp/native_first_dirac.log}"
+            2>"$playback_log"
     else
         log '[DIRAC] helper unavailable; using ordinary aplay'
-        aplay "$@" 2>"${DIRAC_PLAYBACK_LOG:-/tmp/native_first_dirac.log}"
+        aplay "$@" 2>"$playback_log"
     fi
+    rc=$?
+    if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ] && [ -n "${STREAM_PLAY_MARK_DIR:-}" ] && latency_active; then
+        # Read each completed aplay log before the next player can overwrite it.
+        # ALSA reports underruns while writing or draining audio. FIFO wait before
+        # the first write is timed separately and produces no ALSA event.
+        LC_ALL=C awk '
+            /(^|[[:space:]])underrun!!!([[:space:]]|$)/ {
+                count++
+                if (match($0, /[0-9]+([.,][0-9]+)? ms/)) {
+                    ms=substr($0, RSTART, RLENGTH-3)
+                    sub(/,/, ".", ms)
+                    us+=ms*1000
+                } else unknown++
+            }
+            END {
+                printf "player_underrun_count %d\nplayer_underrun_us %.0f\nplayer_underrun_unknown %d\n", count, us, unknown
+            }
+        ' "$playback_log" 2>/dev/null >> "$STREAM_PLAY_MARK_DIR/marks" || :
+    fi
+    return "$rc"
 }
 
 # PCM 常驻 FIFO 连播；遇到原生补播任务先排空并关闭 aplay，补播结束后续接 PCM。
 stream_play_worker() {
     local wd="$1"
-    local fifo="$wd/play.fifo"
+    local fifo="$wd/play.fifo" STREAM_PLAY_MARK_DIR="$wd"
     local idx=1 n ap="" sentence rc answer_idx=1 pcm_commit
-    local threshold=0 sent=0 size bytes deadline=0 now starving=0 aborted=0
+    local threshold=0 sent=0 size bytes aborted=0
     if [ "${DEVICE_TTS_STREAM_COMMIT:-0}" = 1 ] && [ "$DEVICE_TTS_PCM_RATE" = 24000 ]; then
         threshold=$((48 * ${DEVICE_TTS_STREAM_MIN_MS:-300}))
     fi
@@ -3648,6 +3677,7 @@ stream_play_worker() {
                     llm_aplay -r "$DEVICE_TTS_PCM_RATE" -f S16_LE -c 1 "$fifo" >/dev/null &
                     ap=$!
                     exec 8>"$fifo"
+                    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark player_fifo_open
                 fi
                 pcm_commit=""
                 if [ ! -f "$wd/first" ]; then
@@ -3655,6 +3685,7 @@ stream_play_worker() {
                     if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
                         pcm_commit=$(cat "$wd/first")
                         latency_mark fifo_commit1 "$pcm_commit"
+                        latency_mark fifo_commit_slot "$idx"
                     fi
                 fi
                 if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
@@ -3679,7 +3710,7 @@ stream_play_worker() {
                 return 1
             fi
             idx=$((idx + 1))
-            sent=0; deadline=0; starving=0; aborted=0
+            sent=0; aborted=0
             continue
         fi
         if [ "$threshold" -gt 0 ] && [ -s "$wd/$n.live" ] && [ ! -f "$wd/$n.stream_aborted" ]; then
@@ -3691,12 +3722,17 @@ stream_play_worker() {
                     llm_aplay -r "$DEVICE_TTS_PCM_RATE" -f S16_LE -c 1 "$fifo" >/dev/null &
                     ap=$!
                     exec 8>"$fifo"
+                    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark player_fifo_open
                 fi
                 if [ "$sent" = 0 ]; then
                     pcm_commit=$(monotonic_ms)
                     if [ ! -f "$wd/first" ]; then
                         printf '%s\n' "$pcm_commit" > "$wd/first"
-                        [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark fifo_commit1 "$pcm_commit"
+                        if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
+                            latency_mark fifo_commit1 "$pcm_commit"
+                            latency_mark fifo_commit_slot "$idx"
+                            latency_mark fifo_commit_live 1
+                        fi
                     fi
                     [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark answer_commit "$pcm_commit"
                 fi
@@ -3708,19 +3744,7 @@ stream_play_worker() {
                     return 1
                 fi
                 sent=$size
-                now=$(monotonic_ms)
-                [ "$deadline" -ge "${now:-0}" ] || deadline=$now
-                deadline=$((deadline + (bytes + 47) / 48))
-                starving=0
                 continue
-            fi
-        fi
-        if [ "$sent" -gt 0 ] && [ "$starving" = 0 ] && [ "$deadline" -gt 0 ]; then
-            now=$(monotonic_ms)
-            if [ "${now:-0}" -ge "$deadline" ]; then
-                log '[TTS] player_underrun'
-                [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark player_underrun "$now"
-                starving=1
             fi
         fi
         # No cached filler this round: the first normal segment resolves slot 0.

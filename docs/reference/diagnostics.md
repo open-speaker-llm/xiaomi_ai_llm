@@ -150,9 +150,10 @@ native + 端侧流式在轮末输出一行 `[LATENCY]`，同步追加到 `/tmp/n
 | `ttft` | 请求开始至首个非垫话回答片段；包含联网规划和工具耗时 |
 | `split1` | 首个非垫话片段至消费正文首段；沿用串行消费位置，可能包含管道缓冲等待 |
 | `tts1` | 正文首段的整次合成调用，包含既有重试和 PCM 解码 |
-| `commit1` | 正文首段合成结束至该段 PCM 写入 FIFO 前。提前提交或原生兜底时为 `-` |
+| `commit1` | 首个 PCM 段（垫话或正文）从合成结束到写入 FIFO 前的秒数。增量提交从首批解码 PCM 发布算起，缓存垫话从触发发布算起。缺少对应打点时为 `-` |
 | `tts1_first` / `tts1_to_commit` | 正文首段开始合成至首批解码 PCM 发布、至首次写入 FIFO 前。完整合成时间仍看 `tts1` |
-| `player_underrun` | 首段增量提交期间，按已写入的 PCM 时长估算的等待数据次数。设备驱动的实际欠载另看播放器状态 |
+| `player_prestart_wait` | 首次打开播放 FIFO 到首次提交 PCM 前的等待秒数。缺少任一打点时为 `-` |
+| `player_underrun` / `player_underrun_ms` | 本轮各次 aplay 日志的 `underrun!!!` 行数和行内报告的时长之和（毫秒）。日志未报告某次欠载时长时，总时长为 `-`。原始日志路径默认为 `/tmp/native_first_dirac.log`，每次启动播放器时覆盖 |
 | `wake→commit1` | 本轮起点至第一次 PCM FIFO 提交，可能是垫话 |
 | `pcm1` | 正文首段 PCM 字节数 ÷（采样率 × 2），为单声道 S16LE 音频秒数 |
 | `segs` / `retries` | 已结束合成调用的播放段数（含垫话/兜底）；所有句子的额外尝试总次数 |
@@ -162,7 +163,7 @@ native + 端侧流式在轮末输出一行 `[LATENCY]`，同步追加到 `/tmp/n
 | `filler→answer_gap` / `filler→answer_gap_kind` | 有垫话和正文首段 PCM 提交时，计算两次提交的间隔减去垫话 PCM 时长，最小为零，并标记 `est`。估算不含播放器缓冲及设备输出偏移；缺少任一提交或垫话 PCM 时长时均为 `-` |
 | `llm` / `play` | 请求开始至流结束、消费者结束（含失败退出） |
 
-每轮 marks 为 `name ms`，位于 `/tmp/native_first_stream/marks`（`sentN_pcm_bytes` 和 `sentN_retries` 为字节/次数），下一流式轮覆盖。唤醒阶段先用私有 `/tmp/native_first_marks.XXXXXX`，进入流式后合并并删除临时目录；未转 LLM 和客户端清理时也删除待合并目录。追问用新目录记录 `followup_start`，不继承上轮数据。计时写入失败不会改变回答的成功/失败判断。
+每轮 marks 为 `name ms`，位于 `/tmp/native_first_stream/marks`（另有段号、字节数、次数及欠载微秒等数值），下一流式轮覆盖。唤醒阶段先用私有 `/tmp/native_first_marks.XXXXXX`，进入流式后合并并删除临时目录；未转 LLM 和客户端清理时也删除待合并目录。追问用新目录记录 `followup_start`，不继承上轮数据。计时写入失败不会改变回答的成功/失败判断。
 
 在开发机仓库根目录手动上传离线汇总脚本：
 
