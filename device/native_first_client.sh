@@ -2280,6 +2280,9 @@ wait_native_live_asr() {
     wait "$NATIVE_ASR_LISTEN_PID"
     ret=$?
     NATIVE_ASR_LISTEN_PID=""
+    if [ -n "${LLM_HISTORY_SAVE_PID:-}" ]; then
+        wait_llm_history_save || { [ "$ret" -eq 125 ] || ret=1; }
+    fi
     if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
         latency_report
         latency_discard
@@ -3314,6 +3317,17 @@ llm_history_commit() {
         rm -f "$staging"; return 1
     fi
     llm_history_gc "$sid"
+}
+
+wait_llm_history_save() {
+    local pid="${LLM_HISTORY_SAVE_PID:-}"
+    [ -n "$pid" ] || return 0
+    LLM_HISTORY_SAVE_PID=""
+    if ! wait "$pid"; then
+        log "[HISTORY] 完整回答未能安全保存，结束本轮"
+        return 1
+    fi
+    return 0
 }
 
 llm_build_messages() {
@@ -4998,6 +5012,13 @@ llm_stream_answer_and_play() {
 
     [ ! -s "$wd/native_segs" ] || LLM_NATIVE_QUEUE_QUIET=0
     [ ! -f "$wd/no_history" ] || return 0
+    if [ "${LLM_NATIVE_QUEUE_QUIET:-0}" = 1 ] && [ "${cleanup_mode:-}" = defer ]; then
+        # The answer has drained. Publish the pair while ASR listens and join
+        # before using the recognized query, so context cannot race the write.
+        llm_history_commit "$sid" "$user" "$LLM_DIRECT_ANSWER" &
+        LLM_HISTORY_SAVE_PID=$!
+        return 0
+    fi
     llm_history_commit "$sid" "$user" "$LLM_DIRECT_ANSWER" || {
         log "[HISTORY] 完整回答未能安全保存，结束本轮"
         return 1
@@ -5540,7 +5561,7 @@ handle_llm_dialog() {
     local turn=1
     local ret
     local last_dialog route_beep_turn="${route_beep_turn:-}"
-    local LLM_END_BEEP_PLAYED=0 LLM_NATIVE_QUEUE_QUIET=0
+    local LLM_END_BEEP_PLAYED=0 LLM_NATIVE_QUEUE_QUIET=0 LLM_HISTORY_SAVE_PID=""
 
     CURRENT_SESSION_ID="$session_id"
     NATIVE_DIALOG_HANDED_OFF=0
@@ -5644,6 +5665,7 @@ handle_llm_dialog() {
             # A deliberate repeated followup is a new turn, not a duplicate wake.
             SUPPRESS_DUP_SECONDS=0
         done
+        [ -z "${LLM_HISTORY_SAVE_PID:-}" ] || wait_llm_history_save || :
         SUPPRESS_DUP_SECONDS="$saved_dup"
         if [ "$NATIVE_DIALOG_HANDED_OFF" != "1" ]; then
             finish_llm_playback
@@ -5941,6 +5963,7 @@ cleanup() {
         kill "$NATIVE_ASR_LISTEN_PID" 2>/dev/null || :
         wait "$NATIVE_ASR_LISTEN_PID" 2>/dev/null || :
     fi
+    [ -z "${LLM_HISTORY_SAVE_PID:-}" ] || wait_llm_history_save || :
     [ -z "${ROUTE_BEEP_DIR:-}" ] || route_beep_end
     [ -z "${TTS_PERSISTENT_PID:-}" ] || tts_persistent_stop
     [ -z "${TTS_PREWARM_PID:-}" ] || tts_prewarm_stop

@@ -33,5 +33,5 @@ def with_answer_audio_dependencies(names):
         'wait_native_live_asr'}.intersection(names):
         return tuple(dict.fromkeys((*names, 'llm_accept_feedback', 'llm_finish_answer_audio',
                                     'llm_end_beep', 'end_beep_prepare', 'llm_answer_interrupted', 'route_beep_allowed',
-                                    'native_dialog_compact')))
+                                    'native_dialog_compact', 'wait_llm_history_save')))
     return names

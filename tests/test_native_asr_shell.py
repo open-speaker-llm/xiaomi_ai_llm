@@ -136,6 +136,20 @@ finish_llm_playback
                          ['resume=0', 'restore', 'clear', 'mute', 'resume=1',
                           'restore', 'unmute', 'clear'])
 
+    def test_joining_background_history_preserves_order_and_error(self):
+        result = self.shell(self.functions('wait_llm_history_save') + '''
+log() { echo history-error; }
+(sleep 0.02; echo history-saved) &
+LLM_HISTORY_SAVE_PID=$!
+wait_llm_history_save && echo next-query
+(exit 1) &
+LLM_HISTORY_SAVE_PID=$!
+wait_llm_history_save || echo next-query-rejected
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(),
+                         ['history-saved', 'next-query', 'history-error', 'next-query-rejected'])
+
     def test_followup_preserves_llm_volume_but_restores_native_volume(self):
         for rc in (0, 124, 125):
             with self.subTest(rc=rc), tempfile.TemporaryDirectory() as temp:
