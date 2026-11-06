@@ -192,6 +192,8 @@ DEVICE_TTS_UA="${DEVICE_TTS_UA:-}"            # 留空用 ettsc 内置默认
 DEVICE_TTS_ORIGIN="${DEVICE_TTS_ORIGIN:-}"    # 留空用 ettsc 内置默认
 # 句级流式：1=LLM 边流式输出边按句合成播放（首句即开声，LLM 慢时收益大）；0=整段收完再合成播放。
 DEVICE_TTS_STREAM="${DEVICE_TTS_STREAM:-1}"
+DEVICE_TTS_STREAM_COMMIT="${DEVICE_TTS_STREAM_COMMIT:-1}"
+DEVICE_TTS_STREAM_MIN_MS="${DEVICE_TTS_STREAM_MIN_MS:-300}"
 # 普通与联网正文共用首段提前切分；搜索垫话不计入正文段数。
 STREAM_FIRST_SPLIT_ENABLED="${STREAM_FIRST_SPLIT_ENABLED:-1}"
 STREAM_FIRST_SPLIT_MIN_CHARS="${STREAM_FIRST_SPLIT_MIN_CHARS:-8}"
@@ -361,8 +363,8 @@ latency_mark() {
     [ -d "$dir" ] || return 0
     case "$name" in *[!a-z0-9_]*) return 0 ;; esac
     case "$name" in
-        wake|followup_start|native_result|route_llm|freeze_done|llm_req|llm_first_token|fifo_commit1|llm_done|play_done|web_plan_start|web_plan_end|web_tool_start|web_tool_end|web_filler|player_start|player_fifo_open|filler_commit|filler_pcm_bytes|answer_commit|spec_start|spec_cancel|spec_used) ;;
-        sent[0-9]*_split|sent[0-9]*_tts_start|sent[0-9]*_tts_end|sent[0-9]*_pcm_bytes|sent[0-9]*_retries) ;;
+        wake|followup_start|native_result|route_llm|freeze_done|llm_req|llm_first_token|fifo_commit1|llm_done|play_done|web_plan_start|web_plan_end|web_tool_start|web_tool_end|web_filler|player_start|player_fifo_open|filler_commit|filler_pcm_bytes|answer_commit|spec_start|spec_cancel|spec_used|player_underrun) ;;
+        sent[0-9]*_split|sent[0-9]*_first_pcm|sent[0-9]*_tts_start|sent[0-9]*_tts_end|sent[0-9]*_pcm_bytes|sent[0-9]*_retries) ;;
         *) return 0 ;;
     esac
     [ -n "$value" ] || value=$(monotonic_ms)
@@ -382,7 +384,10 @@ latency_report() {
         off) web=off ;; answer) web=answer ;; search) web=search ;; fetch) web=fetch ;;
     esac
     line=$(LC_ALL=C awk -v web="$web" -v rate="$DEVICE_TTS_PCM_RATE" '
-        NF == 2 && $2 ~ /^[0-9]+$/ && !($1 in m) { m[$1]=$2+0 }
+        NF == 2 && $2 ~ /^[0-9]+$/ {
+            if ($1 == "player_underrun") underruns++
+            if (!($1 in m)) m[$1]=$2+0
+        }
         function delta(a,b) {
             if (!(a in m) || !(b in m) || m[b] < m[a]) return "-"
             return sprintf("%.3f", (m[b]-m[a])/1000)
@@ -419,7 +424,8 @@ latency_report() {
             spec="off"
             if ("spec_used" in m) spec="used"
             else if ("spec_cancel" in m) spec="cancelled"
-            printf " spec=%s", spec
+            printf " spec=%s tts1_first=%s tts1_to_commit=%s player_underrun=%d", spec, \
+                delta(first "_tts_start",first "_first_pcm"), delta(first "_tts_start","answer_commit"), underruns
             if ("player_start" in m) printf " player_open=%s", delta("player_start","player_fifo_open")
             printf " wake→filler_commit=%s wake→answer_commit=%s filler→answer_gap=%s filler→answer_gap_kind=%s", \
                 delta(origin,"filler_commit"), delta(origin,"answer_commit"), gap, gap_kind
@@ -3342,8 +3348,15 @@ tts_persistent_take() {
     if ! { printf '%s' "$sentence" > "$job/request" && printf '%s' "$DEVICE_TTS_VOICE" > "$job/voice"; }; then
         rm -rf "$job"; return 1
     fi
+    if [ -n "${live_path:-}" ] && ! {
+        ln "$live_path" "$job/audio.live" && ln "$wd/$n.first_pcm" "$job/audio.first_pcm"
+    }; then
+        rm -rf "$job"
+        return 1
+    fi
     : > "$TTS_PERSISTENT_DIR/busy"
     : > "$job/queued"
+    [ -z "${live_path:-}" ] || live_queued=1
     case "$seconds" in ''|*[!0-9]*) seconds=30;; esac
     if [ "${#seconds}" -le 3 ] && [ "$seconds" -ge 1 ] && [ "$seconds" -le 300 ]; then
         limit=$(awk -v n="$seconds" 'BEGIN {printf "%d", n*20}')
@@ -3367,6 +3380,16 @@ tts_persistent_take() {
     [ ! -f "$job/done" ] || rm -rf "$job"
     log '[TTS] persistent unavailable; using ordinary synthesis'
     return 1
+}
+
+tts_stream_commit_init() {
+    case "$DEVICE_TTS_STREAM_COMMIT" in
+        0|1) :;;
+        *) DEVICE_TTS_STREAM_COMMIT=1; log '[TTS] warning invalid DEVICE_TTS_STREAM_COMMIT; using 1';;
+    esac
+    DEVICE_TTS_STREAM_MIN_MS=$(llm_web_uint "$DEVICE_TTS_STREAM_MIN_MS" 1 5000) || {
+        DEVICE_TTS_STREAM_MIN_MS=300; log '[TTS] warning invalid DEVICE_TTS_STREAM_MIN_MS; using 300';
+    }
 }
 
 tts_prewarm_init() {
@@ -3413,9 +3436,17 @@ tts_prewarm_take() {
     [ -d "${TTS_PREWARM_DIR:-}" ] && [ -n "${TTS_PREWARM_PID:-}" ] || return 1
     [ ! -f "$TTS_PREWARM_DIR/claimed" ] || return 1
     : > "$TTS_PREWARM_DIR/claimed"
+    if [ -n "${live_path:-}" ] && ! {
+        ln "$live_path" "$TTS_PREWARM_DIR/audio.live" &&
+        ln "$wd/$n.first_pcm" "$TTS_PREWARM_DIR/audio.first_pcm"
+    }; then
+        : > "$TTS_PREWARM_DIR/cancel"
+        return 1
+    fi
     # Publish text atomically; it can arrive while the worker is still handshaking.
     printf '%s' "$sentence" > "$TTS_PREWARM_DIR/request.part" &&
         mv "$TTS_PREWARM_DIR/request.part" "$TTS_PREWARM_DIR/request" || return 1
+    [ -z "${live_path:-}" ] || live_queued=1
     case "$seconds" in ''|*[!0-9]*) seconds=30;; esac
     if [ "${#seconds}" -le 3 ] && [ "$seconds" -ge 1 ] && [ "$seconds" -le 300 ]; then
         limit=$(awk -v n="$seconds" 'BEGIN { printf "%d", n * 20 }')
@@ -3441,19 +3472,39 @@ tts_prewarm_take() {
     return 1
 }
 
-# 单句合成只发布完整成功的 PCM；失败重试后发布原生补播任务。
+# Compare only bytes already submitted, at an even PCM sample boundary.
+stream_pcm_matches() {
+    local live="$1" pcm="$2" count="$3" a b
+    [ "$(wc -c < "$pcm")" -ge "$count" ] || return 1
+    a=$(head -c "$count" "$live" | sha256sum)
+    b=$(head -c "$count" "$pcm" | sha256sum)
+    [ "$a" = "$b" ]
+}
+
+# 完整段仍通过原有发布协议交付；只有正文首段可另有增量 PCM。
 stream_synthesize_sentence() {
     local wd="$1" n="$2" sentence="$3"
     local mark_n="$n"
     while [ "${mark_n#0}" != "$mark_n" ]; do mark_n=${mark_n#0}; done
     local attempt=0 retries="${DEVICE_TTS_STREAM_RETRIES:-2}" rc prewarmed=0
+    local live_path="" stream_path="" live_queued=0 committed
+    if [ "${4:-0}" = 1 ] && ( : > "$wd/$n.live" && : > "$wd/$n.first_pcm" ); then
+        live_path="$wd/$n.live"
+        stream_path="$live_path"
+    fi
     case "$retries" in ''|*[!0-9]*) retries=2 ;; esac
     # 配置错误也不能导致无限重试。
     [ "$retries" -le 5 ] 2>/dev/null || retries=5
     if [ "${DEVICE_TTS_PERSISTENT:-0}" = 1 ]; then
         if tts_persistent_take "$wd" "$n" "$sentence"; then prewarmed=1; fi
-    elif [ "${DEVICE_TTS_PREWARM:-0}" = 1 ] && tts_prewarm_take "$wd" "$n" "$sentence"; then
-        prewarmed=1
+    elif [ "${DEVICE_TTS_PREWARM:-0}" = 1 ]; then
+        if tts_prewarm_take "$wd" "$n" "$sentence"; then prewarmed=1; fi
+    fi
+    if [ "$live_queued" = 1 ] && [ "$prewarmed" = 0 ]; then
+        : > "$wd/$n.stream_aborted"
+        stream_path=""
+        # A worker that already published audio owns this first attempt.
+        if [ -s "$live_path" ]; then attempt=1; fi
     fi
     while [ "$attempt" -le "$retries" ]; do
         attempt=$((attempt + 1))
@@ -3466,9 +3517,20 @@ stream_synthesize_sentence() {
             ETTSC_GEC_VERSION="$DEVICE_TTS_GEC_VERSION" \
             ETTSC_UA="$DEVICE_TTS_UA" ETTSC_ORIGIN="$DEVICE_TTS_ORIGIN" \
             ETTSC_PCM=1 ETTSC_GAIN="$DEVICE_TTS_GAIN" ETTSC_TIMING="${ETTSC_TIMING:-0}" \
+            ETTSC_STREAM_PCM="$stream_path" \
                 timeout -t "$DEVICE_TTS_TIMEOUT" "$DEVICE_TTS_BIN" "$sentence" "$wd/$n.part" "$DEVICE_TTS_VOICE" \
                 >"$wd/$n.attempt-$attempt.log" 2>&1
             rc=$?
+            if [ "$rc" = 0 ] && [ -n "$stream_path" ] && [ -s "$stream_path" ]; then
+                ln "$stream_path" "$wd/$n.part" || rc=1
+            fi
+        fi
+        if [ "$rc" = 0 ] && [ -s "$wd/$n.part" ] && [ -s "$wd/$n.stream_sent" ] &&
+            [ -f "$wd/$n.stream_aborted" ]; then
+            committed=$(cat "$wd/$n.stream_sent")
+            if [ -n "$committed" ]; then
+                stream_pcm_matches "$live_path" "$wd/$n.part" "$committed" || rc=1
+            fi
         fi
         # ettsc 的旧版在读流失败后也可能返回 0 并留下部分音频，不能只检查文件大小。
         if [ "$rc" = "0" ] && [ -s "$wd/$n.part" ] && \
@@ -3484,6 +3546,10 @@ stream_synthesize_sentence() {
             echo x >> "$wd/segs"
             log "[TTS] 端侧流式合成 $n($(wc -c < "$wd/$n.pcm")B pcm) attempt=$attempt: $sentence"
             return 0
+        fi
+        if [ -n "$live_path" ]; then
+            : > "$wd/$n.stream_aborted"
+            stream_path=""
         fi
         rm -f "$wd/$n.part"
         log "[TTS] 单句合成失败 $n attempt=$attempt rc=$rc detail=$wd/$n.attempt-$attempt.log"
@@ -3516,6 +3582,10 @@ stream_play_worker() {
     local wd="$1"
     local fifo="$wd/play.fifo"
     local idx=1 n ap="" sentence rc answer_idx=1 pcm_commit
+    local threshold=0 sent=0 size bytes deadline=0 now starving=0 aborted=0
+    if [ "${DEVICE_TTS_STREAM_COMMIT:-0}" = 1 ] && [ "$DEVICE_TTS_PCM_RATE" = 24000 ]; then
+        threshold=$((48 * ${DEVICE_TTS_STREAM_MIN_MS:-300}))
+    fi
     [ "${LLM_WEB_FILLER_CACHE:-0}" != 1 ] && [ ! -f "$wd/early_filler" ] || idx=0
     rm -f "$fifo"
     mkfifo "$fifo" 2>/dev/null || mknod "$fifo" p 2>/dev/null
@@ -3529,7 +3599,20 @@ stream_play_worker() {
     while :; do
         [ ! -f "$wd/early_filler" ] || tts_early_filler_publish "$wd"
         n=$(printf "%04d" "$idx")
+        if [ "$sent" -gt 0 ] && [ "$aborted" = 0 ] && [ -f "$wd/$n.stream_aborted" ]; then
+            log '[TTS] stream_commit_abort'
+            aborted=1
+        fi
         if [ -f "$wd/$n.rdy" ]; then
+            if [ "$sent" -gt 0 ] && { [ ! -s "$wd/$n.pcm" ] ||
+                { [ "$aborted" = 1 ] && ! stream_pcm_matches "$wd/$n.live" "$wd/$n.pcm" "$sent"; }; }; then
+                # Native TTS has no common PCM/text cursor. Do not replay an
+                # unverified prefix or claim a complete answer in history.
+                exec 8>&-
+                wait "$ap" 2>/dev/null
+                [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark play_done
+                return 1
+            fi
             # 内联垫话占第 1 段；缓存和直发垫话使用第 0 段。
             if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ] && [ "$idx" = 1 ] && [ -s "$wd/filler_t" ] &&
                 [ ! -f "$wd/web_filler_cached" ] && [ ! -f "$wd/web_filler_direct" ]; then
@@ -3578,11 +3661,13 @@ stream_play_worker() {
                     if [ "$idx" -lt "$answer_idx" ]; then
                         latency_mark filler_commit "$pcm_commit"
                         latency_mark filler_pcm_bytes "$(wc -c < "$wd/$n.pcm" | tr -d ' ')"
-                    elif [ "$idx" = "$answer_idx" ]; then
+                    elif [ "$idx" = "$answer_idx" ] && [ "$sent" = 0 ]; then
                         latency_mark answer_commit "$pcm_commit"
                     fi
                 fi
-                if ! cat "$wd/$n.pcm" >&8; then
+                if ! { if [ "$sent" = 0 ]; then cat "$wd/$n.pcm"; else
+                    tail -c "+$((sent + 1))" "$wd/$n.pcm"
+                fi; } >&8; then
                     exec 8>&-
                     wait "$ap" 2>/dev/null
                     [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark play_done
@@ -3594,10 +3679,53 @@ stream_play_worker() {
                 return 1
             fi
             idx=$((idx + 1))
+            sent=0; deadline=0; starving=0; aborted=0
             continue
         fi
+        if [ "$threshold" -gt 0 ] && [ -s "$wd/$n.live" ] && [ ! -f "$wd/$n.stream_aborted" ]; then
+            size=$(wc -c < "$wd/$n.live")
+            size=$((size - size % 2))
+            bytes=$((size - sent))
+            if [ "$bytes" -gt 0 ] && { [ "$sent" -gt 0 ] || [ "$size" -ge "$threshold" ]; }; then
+                if [ -z "$ap" ]; then
+                    llm_aplay -r "$DEVICE_TTS_PCM_RATE" -f S16_LE -c 1 "$fifo" >/dev/null &
+                    ap=$!
+                    exec 8>"$fifo"
+                fi
+                if [ "$sent" = 0 ]; then
+                    pcm_commit=$(monotonic_ms)
+                    if [ ! -f "$wd/first" ]; then
+                        printf '%s\n' "$pcm_commit" > "$wd/first"
+                        [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark fifo_commit1 "$pcm_commit"
+                    fi
+                    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark answer_commit "$pcm_commit"
+                fi
+                printf '%s\n' "$size" > "$wd/$n.stream_sent"
+                if ! tail -c "+$((sent + 1))" "$wd/$n.live" | head -c "$bytes" >&8; then
+                    exec 8>&-
+                    wait "$ap" 2>/dev/null
+                    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark play_done
+                    return 1
+                fi
+                sent=$size
+                now=$(monotonic_ms)
+                [ "$deadline" -ge "${now:-0}" ] || deadline=$now
+                deadline=$((deadline + (bytes + 47) / 48))
+                starving=0
+                continue
+            fi
+        fi
+        if [ "$sent" -gt 0 ] && [ "$starving" = 0 ] && [ "$deadline" -gt 0 ]; then
+            now=$(monotonic_ms)
+            if [ "${now:-0}" -ge "$deadline" ]; then
+                log '[TTS] player_underrun'
+                [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark player_underrun "$now"
+                starving=1
+            fi
+        fi
         # No cached filler this round: the first normal segment resolves slot 0.
-        if [ "$idx" = 0 ] && [ ! -f "$wd/web_filler_direct" ] && { [ -f "$wd/0001.rdy" ] || [ -f "$wd/done" ]; }; then
+        if [ "$idx" = 0 ] && [ ! -f "$wd/web_filler_direct" ] &&
+            { [ -f "$wd/0001.rdy" ] || [ -s "$wd/0001.live" ] || [ -f "$wd/done" ]; }; then
             idx=1
             continue
         fi
@@ -3623,7 +3751,7 @@ llm_stream_answer_and_play() {
     local sid="$1"
     local user="$2"
     local t0="$3"
-    local messages t_req seq n play_pid play_rc native_segs transport_rc stream_status split_ms
+    local messages t_req seq n play_pid play_rc native_segs transport_rc stream_status split_ms live first_pcm_ms
     local wd="/tmp/native_first_stream"
     local early="${STREAM_FIRST_SPLIT_ENABLED:-1}" early_count="${STREAM_EARLY_SPLIT_SENTENCES:-1}"
     local split_min="${STREAM_FIRST_SPLIT_MIN_CHARS:-8}" split_max="${STREAM_FIRST_SPLIT_MAX_CHARS:-24}"
@@ -3753,8 +3881,24 @@ llm_stream_answer_and_play() {
                 latency_mark "sent${seq}_split" "$split_ms"
                 latency_mark "sent${seq}_tts_start" "$split_ms"
             fi
-            stream_synthesize_sentence "$wd" "$n" "$sentence"
-            [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark "sent${seq}_tts_end"
+            live=0
+            if [ "${DEVICE_TTS_STREAM_COMMIT:-0}" = 1 ] && [ "$DEVICE_TTS_PCM_RATE" = 24000 ] &&
+                [ "${ETTSC_FORMAT:-audio-24khz-48kbitrate-mono-mp3}" = audio-24khz-48kbitrate-mono-mp3 ] &&
+                [ ! -f "$wd/no_history" ]; then
+                if [ -s "$wd/filler_t" ] && [ ! -f "$wd/web_filler_cached" ] && [ ! -f "$wd/web_filler_direct" ]; then
+                    [ "$seq" != 2 ] || live=1
+                else
+                    [ "$seq" != 1 ] || live=1
+                fi
+            fi
+            stream_synthesize_sentence "$wd" "$n" "$sentence" "$live"
+            if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
+                latency_mark "sent${seq}_tts_end"
+                if [ -s "$wd/$n.first_pcm" ]; then
+                    first_pcm_ms=$(cat "$wd/$n.first_pcm")
+                    [ -z "$first_pcm_ms" ] || latency_mark "sent${seq}_first_pcm" "$first_pcm_ms"
+                fi
+            fi
             : > "$wd/$n.rdy"
         done
 
@@ -4699,6 +4843,7 @@ log "Server: $SERVER"
 log "Backend: $BACKEND"
 llm_web_init
 latency_init
+tts_stream_commit_init
 tts_prewarm_init
 tts_persistent_init
 log "Web search: mode=$LLM_WEB_SEARCH pipeline=$LLM_PIPELINE planner_timeout=${LLM_WEB_PLAN_TIMEOUT}s tool_timeout=${LLM_WEB_TIMEOUT}s retries=$LLM_WEB_RETRIES budget=${LLM_WEB_TOTAL_BUDGET}s fallback=$LLM_WEB_FALLBACK"

@@ -59,6 +59,8 @@ where F: FnMut(&mut Timing) -> Result<Socket, ()> {
             }
         }
         *socket = None; // Never reuse a socket with an unfinished turn.
+        // The shell owns retries once it can observe an append-only prefix.
+        if dir.join("audio.live").is_file() { break; }
     }
     let _ = fs::remove_file(dir.join("audio.part"));
     let _ = fs::remove_file(dir.join("audio.pcm"));

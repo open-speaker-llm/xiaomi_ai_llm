@@ -12,6 +12,7 @@ use tungstenite::Message;
 mod gec_v2;
 mod prewarm;
 mod persistent;
+mod stream_pcm;
 
 const TRUSTED: &str = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
 const HOST: &str = "speech.platform.bing.com";
@@ -235,6 +236,18 @@ fn main() {
     let out = a.get(2).cloned().unwrap_or_else(|| "/tmp/edgetts.mp3".into());
     let voice = a.get(3).cloned().unwrap_or_else(|| "zh-CN-YunjianNeural".into());
 
+    if let Some(live) = std::env::var_os("ETTSC_STREAM_PCM").filter(|path| !path.is_empty()) {
+        let rc = prewarm::connect(&mut timing).and_then(|mut ws|
+            prewarm::receive_audio(&mut ws, None, &voice, &text, &mut timing,
+                                   Some(std::path::Path::new(&live))));
+        timing.report();
+        if rc.is_err() {
+            eprintln!("[!] incremental PCM synthesis failed");
+            std::process::exit(3);
+        }
+        return;
+    }
+
     eprintln!("[*] connecting ...");
     let mut ws = connect(&mut timing);
 
@@ -303,10 +316,17 @@ fn decode_mp3_to_pcm(mp3: &[u8], gain: f32) -> Vec<u8> {
     decode_mp3_checked(mp3, gain).0
 }
 
+fn pcm_gain(sample: i16, gain: f32) -> i16 {
+    if (gain - 1.0).abs() > 0.001 {
+        (sample as f32 * gain).round().clamp(-32768.0, 32767.0) as i16
+    } else {
+        sample
+    }
+}
+
 fn decode_mp3_checked(mp3: &[u8], gain: f32) -> (Vec<u8>, bool) {
     let mut dec = minimp3::Decoder::new(mp3);
     let mut out: Vec<u8> = Vec::new();
-    let apply = (gain - 1.0).abs() > 0.001;
     let mut peak: i32 = 0;
     let mut complete = true;
     loop {
@@ -317,12 +337,7 @@ fn decode_mp3_checked(mp3: &[u8], gain: f32) -> (Vec<u8>, bool) {
                     if a > peak {
                         peak = a;
                     }
-                    let v = if apply {
-                        (s as f32 * gain).round().clamp(-32768.0, 32767.0) as i16
-                    } else {
-                        s
-                    };
-                    out.extend_from_slice(&v.to_le_bytes());
+                    out.extend_from_slice(&pcm_gain(s, gain).to_le_bytes());
                 }
             }
             Err(minimp3::Error::Eof) => break,

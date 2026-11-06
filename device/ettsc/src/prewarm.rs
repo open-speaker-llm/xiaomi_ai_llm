@@ -51,15 +51,18 @@ fn request(dir: &Path, idle: Duration) -> Result<String, ()> {
     }
 }
 
-pub(super) fn synthesize<S: Read + Write>(ws: &mut WebSocket<S>, dir: &Path, voice: &str,
-                              text: &str, timing: &mut Timing) -> Result<(), ()> {
+pub(super) fn receive_audio<S: Read + Write>(ws: &mut WebSocket<S>, cancel: Option<&Path>,
+                              voice: &str, text: &str, timing: &mut Timing,
+                              live: Option<&Path>) -> Result<Vec<u8>, ()> {
     let (config, ssml) = speech_messages(text, voice);
+    let mut stream = live.map(super::stream_pcm::PcmStream::open).transpose()?;
+    let mut received = 0;
     ws.send(Message::Text(config)).map_err(|_| ())?;
     ws.send(Message::Text(ssml)).map_err(|_| ())?;
     let start = timing.start();
     let mut audio = Vec::new();
     loop {
-        if dir.join("cancel").exists() { return Err(()); }
+        if cancel.is_some_and(Path::exists) { return Err(()); }
         match ws.read().map_err(|_| ())? {
             Message::Text(text) if text.contains("Path:turn.end") => {
                 timing.turn_end_ms = Timing::elapsed(start);
@@ -69,17 +72,33 @@ pub(super) fn synthesize<S: Read + Write>(ws: &mut WebSocket<S>, dir: &Path, voi
                 if bytes.len() < 2 { return Err(()); }
                 let start_of_audio = 2 + u16::from_be_bytes([bytes[0], bytes[1]]) as usize;
                 let payload = bytes.get(start_of_audio..).ok_or(())?;
-                if audio.len() + payload.len() > MAX_AUDIO { return Err(()); }
+                received += payload.len();
+                if received > MAX_AUDIO { return Err(()); }
                 if !payload.is_empty() && timing.first_audio_ms.is_none() {
                     timing.first_audio_ms = Timing::elapsed(start);
                 }
-                audio.extend_from_slice(payload);
+                if let Some(stream) = &mut stream {
+                    stream.push(payload)?;
+                } else {
+                    audio.extend_from_slice(payload);
+                }
             }
             Message::Close(_) => return Err(()),
             _ => {}
         }
     }
-    if audio.is_empty() { return Err(()); }
+    if received == 0 || cancel.is_some_and(Path::exists) { return Err(()); }
+    if let Some(stream) = stream { stream.finish()?; }
+    Ok(audio)
+}
+
+pub(super) fn synthesize<S: Read + Write>(ws: &mut WebSocket<S>, dir: &Path, voice: &str,
+                              text: &str, timing: &mut Timing) -> Result<(), ()> {
+    let live = dir.join("audio.live");
+    let streaming = live.is_file();
+    let audio = receive_audio(ws, Some(&dir.join("cancel")), voice, text, timing,
+                              streaming.then_some(live.as_path()))?;
+    if streaming { return fs::rename(live, dir.join("audio.pcm")).map_err(|_| ()); }
     let gain = env_or("ETTSC_GAIN", "1.0").parse().unwrap_or(1.0);
     let (pcm, decoded) = decode_mp3_checked(&audio, gain);
     if !decoded || pcm.is_empty() || dir.join("cancel").exists() { return Err(()); }
@@ -128,6 +147,48 @@ mod tests {
         fs::write(dir.join("request"), "valid").unwrap();
         fs::write(dir.join("cancel"), b"").unwrap();
         assert!(request(&dir, IDLE).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn live_job_publishes_before_turn_end_and_finishes_the_same_pcm() {
+        let dir = directory();
+        fs::write(dir.join("audio.live"), b"").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let audio = include_bytes!("../tests/fixtures/tone-24k-mono.mp3");
+        let (finish_tx, finish_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (tcp, _) = listener.accept().unwrap();
+            let mut ws = tungstenite::accept(tcp).unwrap();
+            ws.read().unwrap();
+            ws.read().unwrap();
+            let mut packet = vec![0, 0];
+            packet.extend_from_slice(&audio[..145]);
+            ws.send(Message::Binary(packet)).unwrap();
+            finish_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            let mut packet = vec![0, 0];
+            packet.extend_from_slice(&audio[145..]);
+            ws.send(Message::Binary(packet)).unwrap();
+            ws.send(Message::Text("Path:turn.end".into())).unwrap();
+        });
+        let tcp = TcpStream::connect(address).unwrap();
+        tcp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let (mut ws, _) = tungstenite::client(format!("ws://{address}"), tcp).unwrap();
+        let job = dir.clone();
+        let worker = thread::spawn(move || {
+            synthesize(&mut ws, &job, "voice", "text", &mut Timing::default())
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while fs::metadata(dir.join("audio.live")).unwrap().len() < 1152 {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!dir.join("audio.pcm").exists());
+        finish_tx.send(()).unwrap();
+        worker.join().unwrap().unwrap();
+        server.join().unwrap();
+        assert_eq!(fs::read(dir.join("audio.pcm")).unwrap(), decode_mp3_checked(audio, 1.0).0);
         fs::remove_dir_all(dir).unwrap();
     }
 

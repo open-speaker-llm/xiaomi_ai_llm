@@ -47,10 +47,12 @@ emit("正式正文。", final=True)
 CLIENT = r'''
 LLM_API_KEY=sk-test; LLM_API_BASE=https://api.deepseek.com; LLM_MODEL=test
 LLM_WEB_SEARCH=auto; LLM_WEB_RETRIES=0; LLM_DIRECT_TIMEOUT=5
+LLM_WEB_FILLER='搜索中，请稍等。'
 LLM_WEB_FALLBACK="$FALLBACK"
 [ "$SPEC" = default ] || LLM_WEB_SPECULATIVE="$SPEC"
 LLM_PIPELINE=native; TTS_ENGINE=device; DEVICE_TTS_STREAM=1; DEVICE_TTS_PCM_RATE=24000
 LATENCY_TRACE_ENABLED=1
+DEVICE_TTS_STREAM_COMMIT=1; DEVICE_TTS_STREAM_MIN_MS=300
 log() { printf '%s\n' "$*" >&2; }
 monotonic_ms() { echo 1000; }; elapsed_s() { echo 0; }
 llm_build_messages() { printf '{"role":"user","content":"测试"}'; }
@@ -82,6 +84,9 @@ stream_synthesize_sentence() {
         '正式正文。') pcm=grounded;;
         '搜索中，请稍等。') pcm=filler;;
         *) pcm=notice;;
+    esac
+    case "$pcm:$4" in offline:1|grounded:1|ending:0|filler:0|notice:0) :;;
+        *) : > "$TEST_DIR/wrong-stream-eligibility";;
     esac
     printf '%s' "$pcm" > "$1/$2.pcm"
 }
@@ -118,6 +123,7 @@ class WebSpeculativeTest(unittest.TestCase):
                                          'SPEC': spec, 'LC_ALL': 'C', 'CANDIDATE_FAIL': str(int(candidate_fail))})
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse((root / 'early-commit').exists(), result.stderr)
+            self.assertFalse((root / 'wrong-stream-eligibility').exists(), result.stderr)
             self.assertEqual(list(root.glob('stream/spec.*')), [])
             return root.joinpath('played').read_text(), {p.name for p in root.iterdir()}, result.stderr
 
