@@ -152,9 +152,10 @@ native + 端侧流式在轮末输出一行 `[LATENCY]`，同步追加到 `/tmp/n
 | `tts1` | 正文首段的整次合成调用，包含既有重试和 PCM 解码 |
 | `commit1` | 首个 PCM 段（垫话或正文）从合成结束到写入 FIFO 前的秒数。增量提交从首批解码 PCM 发布算起，缓存垫话从触发发布算起。缺少对应打点时为 `-` |
 | `tts1_first` / `tts1_to_commit` | 正文首段开始合成至首批解码 PCM 发布、至首次写入 FIFO 前。完整合成时间仍看 `tts1` |
-| `player_prestart_wait` | 首次打开播放 FIFO 到首次提交 PCM 前的等待秒数。缺少任一打点时为 `-` |
+| `player_prestart_wait` | 首次打开播放 FIFO 到首次提交 PCM 前的等待秒数，有路由提示音时以提示音为首次提交。缺少任一打点时为 `-` |
 | `player_underrun` / `player_underrun_ms` | 本轮各次 aplay 日志的 `underrun!!!` 行数和行内报告的时长之和（毫秒）。日志未报告某次欠载时长时，总时长为 `-`。原始日志路径默认为 `/tmp/native_first_dirac.log`，每次启动播放器时覆盖 |
-| `wake→commit1` | 本轮起点至第一次 PCM FIFO 提交，可能是垫话 |
+| `wake→beep` / `beep` | 本轮起点至提示音 PCM 开始提交的秒数。成功入 FIFO 标为 `played`，策略关闭或当前轮不适用标为 `off`，符合策略但因冻结或素材等问题跳过标为 `skipped`。未提交时耗时为 `-` |
+| `wake→commit1` | 本轮起点至垫话或正文的第一次 PCM FIFO 提交，路由提示音单列 |
 | `pcm1` | 正文首段 PCM 字节数 ÷（采样率 × 2），为单声道 S16LE 音频秒数 |
 | `segs` / `retries` | 已结束合成调用的播放段数（含垫话/兜底）；所有句子的额外尝试总次数 |
 | `web` | 只读本轮已有 action：`off/answer/search/fetch`；状态不足为 `unknown`，不证明搜索成功 |

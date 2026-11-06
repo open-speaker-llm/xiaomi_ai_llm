@@ -16,6 +16,7 @@ fi
 echo "== Embedded protocol module =="
 "$PYTHON" scripts/embed_native_protocol.py --check
 "$PYTHON" scripts/embed_native_web.py --check
+"$PYTHON" scripts/embed_route_beep.py --check
 
 echo "== Python unit tests =="
 "$PYTHON" -m unittest discover -s tests -p 'test_*.py'
