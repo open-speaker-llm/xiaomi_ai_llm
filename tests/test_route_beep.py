@@ -40,7 +40,7 @@ class RouteBeepTest(unittest.TestCase):
                      'llm_stream_answer_and_play', 'stream_play_worker', 'freeze_native_player',
                      'is_native_player_frozen', 'native_route_beep_gate', 'native_route_wait_quiet', 'reset_native_result',
                      'get_native_result_aivs_lab', 'endpoint_denial_allows', 'is_unsupported_result',
-                     'is_native_success_domain')
+                     'is_native_success_domain', 'wait_native_live_asr',                     'collect_native_dialog_text', 'classify_native_dialog_text')
             beep = ('init', 'prepare', 'default_pcm', 'gain', 'scale', 'worker', 'allowed',
                     'begin', 'fire', 'end', 'prewarm', 'mark_end', 'step', 'mix', 'write_voice')
             protocol = Path(__file__).resolve().parents[1] / 'device/lib/native_protocol.sh'
@@ -48,6 +48,8 @@ class RouteBeepTest(unittest.TestCase):
             for src, dst in (('/tmp/native_first_stream', '/stream'),
                              ('/tmp/native_first_latency.log', '/latency'),
                              ('/tmp/native_first_marks.', '/pending.'),
+                             ('/tmp/native_first_end_beep.', '/ending.'),
+                             ('/tmp/native_followup_text', '/native_followup_text'),
                              ('/tmp/native_followup/physical-wake', '/physical-wake'),
                              ('/tmp/native_first_beep.', '/cue.'), ('/proc/uptime', '/uptime')):
                 code = code.replace(src, temp + dst)
@@ -61,6 +63,11 @@ PLAYER_FROZEN_MARKER="$TEST_DIR/frozen"; FREEZE_NATIVE_PLAYER_ON_FALLBACK=1
 NATIVE_WAIT_SECONDS=0.01; NATIVE_POLL_INTERVAL=0.01
 LLM_WEB_FILLER='搜索中，请稍等。'
 FOLLOWUP_ENABLED=1; FOLLOWUP_MODE=native_multirounds
+case "$MODE" in
+    s30_5*) FOLLOWUP_MODE=local_record; FOLLOWUP_RECORD_MODE=native_live
+        LLM_END_BEEP=1; FOLLOWUP_TIMEOUT=8; NATIVE_ASR_LISTEN_TIMEOUT=20
+        NATIVE_ASR_CTL=stub_asr ;;
+esac
 DIRECT_LLM_QUERY_PATTERNS='DEEPSEEK|DeepSeek|deepseek'
 UNSUPPORTED_PATTERNS='回答不上'
 NATIVE_SUCCESS_DOMAINS='system smartMiot volume'
@@ -142,7 +149,7 @@ get_native_result() {
         RESULT_SPEAK='这个设置回答不上'
     fi
 }
-is_system1_root() { case "$MODE" in direct_immediate|direct_cancel|empty_speak) return 0 ;; *) return 1 ;; esac; }
+is_system1_root() { case "$MODE" in direct_immediate|direct_cancel|empty_speak|s30_5*) return 0 ;; *) return 1 ;; esac; }
 is_ignored_query_result() { return 1; }
 is_recent_duplicate_llm_query() { return 1; }
 is_followup_exit_command() { return 1; }
@@ -155,14 +162,28 @@ wait_native_followup_text() {
 send_text_and_play() { send_text_native "$@"; }
 for stub in set_state set_busy record_llm_query finish_llm_playback \
     resume_native_player pause_native_asr resume_native_asr led_feedback_native_listening \
-    led_feedback_llm_followup_listening \
-    led_feedback_followup_asr_ok led_feedback_error led_off handle_native_success_speak \
+    clear_busy start_followup_vad_prearm arm_followup_vad cancel_followup_vad_prearm \
+    led_feedback_error led_off handle_native_success_speak \
     native_followup_mark_multirounds; do eval "$stub() { :; }"; done
 led_feedback_llm_accept() {
     [ "$LLM_ROUTE_BEEP" != 1 ] || [ -f "$TEST_DIR/master" ] || : > "$TEST_DIR/early"
     echo accept >> "$TEST_DIR/led"
+    echo accept >> "$TEST_DIR/events"
 }
-led_feedback_llm_playing() { echo playing >> "$TEST_DIR/led"; }
+led_feedback_llm_playing() {
+    echo playing >> "$TEST_DIR/led"
+    if [ "$TRACE" = 1 ]; then
+        grep -q '^fifo_commit1 ' "$TEST_DIR/stream/marks" || : > "$TEST_DIR/early"
+    fi
+    echo chase >> "$TEST_DIR/events"
+}
+led_feedback_llm_followup_listening() { echo green_solid >> "$TEST_DIR/events"; }
+stub_asr() {
+    printf 'record:%s\n' "$3" >> "$TEST_DIR/events"
+    [ "$MODE" = s30_5 ] && [ ! -f "$TEST_DIR/followup" ] || return 124
+    : > "$TEST_DIR/followup"
+    printf '%s\n' '那第二个呢'
+}
 llm_build_messages() { echo stub; }
 llm_open_stream() {
     : > "$TEST_DIR/request"
@@ -186,6 +207,13 @@ stream_synthesize_sentence() {
 llm_aplay() {
     local fifo arg
     for arg do fifo="$arg"; done
+    case "$fifo" in
+        "$TEST_DIR"/ending.*)
+            echo end_beep_start >> "$TEST_DIR/events"
+            cat "$fifo" >> "$TEST_DIR/played"
+            echo end_beep_end >> "$TEST_DIR/events"
+            return 0 ;;
+    esac
     if [ "$1" = -t ]; then
         exec 9<&0
         if [ "$MODE" = cold_start ]; then
@@ -209,10 +237,15 @@ llm_aplay() {
     fi
     : > "$TEST_DIR/cue_received"
     cat <&9 >> "$TEST_DIR/played"
+    echo playback_done >> "$TEST_DIR/events"
+    if [ "$MODE" = s30_5_wake ]; then
+        echo '12 1001' > "$TEST_DIR/physical-wake"
+    fi
+    [ "$MODE" != s30_5_error ]
 }
 if command -v route_beep_init >/dev/null; then
     LLM_ROUTE_BEEP="${LLM_ROUTE_BEEP:-1}"
-    LLM_ROUTE_BEEP_FOLLOWUP="${LLM_ROUTE_BEEP_FOLLOWUP:-0}"
+    LLM_ROUTE_BEEP_FOLLOWUP="${LLM_ROUTE_BEEP_FOLLOWUP:-1}"
     LLM_ROUTE_BEEP_FILE="${LLM_ROUTE_BEEP_FILE:-dongdong_523.pcm}"
     LLM_ROUTE_BEEP_GAIN="${LLM_ROUTE_BEEP_GAIN:-0.5}"
     route_beep_init
@@ -239,12 +272,15 @@ exit 0
                 expected = ['beep_commit', 'player_spawn', 'player_fifo_open', 'fifo_commit1']
                 self.assertEqual([mark for mark in marks if mark in expected], expected)
                 self.assertEqual((root / 'players').read_text().splitlines(), ['open'])
+            if mode.startswith('s30_5'):
+                events = (root / 'events').read_text().splitlines()
+                return played, result.stdout, events
             return played, result.stdout, led
 
     def test_wake_beep_precedes_ready_filler_and_answer(self):
         audio, log, led = self.run_round('wake')
         self.assertEqual(audio, b'BBFFAA')
-        self.assertEqual(led, ['accept'])
+        self.assertEqual(led, ['accept', 'playing'])
         self.assertIn('wake→led_green=0.000', log)
         self.assertIn('wake→beep=0.000 beep=played', log)
 
@@ -295,9 +331,29 @@ exit 0
                 self.assertNotIn('[LLM-NATIVE] direct', log)
                 self.assertNotIn('[HANDOFF] forced', log)
 
-    def test_followup_defaults_off_and_can_be_enabled(self):
-        self.assertEqual(self.run_round('followup')[0], b'BBFFAAFFAA')
-        self.assertEqual(self.run_round('followup', followup='1')[0], b'BBFFAABBFFAA')
+    def test_followup_defaults_on_and_can_be_disabled(self):
+        self.assertEqual(self.run_round('followup', followup='')[0], b'BBFFAABBFFAA')
+        self.assertEqual(self.run_round('followup', followup='0')[0], b'BBFFAAFFAA')
+
+    def test_accept_commit_chase_drain_end_beep_and_followup_listening(self):
+        audio, log, events = self.run_round('s30_5', followup='')
+        strike = (Path(__file__).resolve().parents[1] / 'asset/route-beep/dongdong_523.pcm').read_bytes()
+        strike = strike[:26400] + strike[52800:]
+        self.assertEqual(len(strike), 36000)
+        strike = struct.pack('<18000h', *(int(x / 2) for (x,) in struct.iter_unpack('<h', strike)))
+        self.assertEqual(audio, (b'BBFFAA' + strike) * 2)
+        self.assertEqual(events, ['accept', 'chase', 'playback_done', 'end_beep_start',
+                                  'end_beep_end', 'green_solid', 'record:8'] * 2)
+        self.assertIn('native live ASR text=那第二个呢', log)
+        self.assertIn('followup→beep=0.000 followup→led=0.000', log)
+        self.assertEqual(log.count('play→end_beep=0.000 end_beep→followup_record=0.000'), 2)
+
+    def test_interrupted_or_failed_playback_has_no_end_beep_or_capture(self):
+        for mode in ('s30_5_wake', 's30_5_error'):
+            with self.subTest(mode=mode):
+                audio, _, events = self.run_round(mode)
+                self.assertEqual(audio, b'BBFFAA')
+                self.assertEqual(events, ['accept', 'chase', 'playback_done'])
 
     def test_missing_and_invalid_assets_skip_without_losing_answer(self):
         for asset in (None, b'odd', b'RIFF' + bytes(44)):
@@ -313,7 +369,7 @@ exit 0
         audio, log, led = self.run_round('early_failure')
         self.assertEqual(audio, b'BBFFAA')
         self.assertIn('beep=played', log)
-        self.assertEqual(led, ['accept'])
+        self.assertEqual(led, ['accept', 'playing'])
 
     def test_empty_speak_freezes_and_hands_off_without_status_query(self):
         audio, log, _ = self.run_round('empty_speak', native_result=(INCIDENT_CASES[0][0], ''))
@@ -330,7 +386,7 @@ exit 0
         self.assertEqual(audio, b'BBFFAA')
         self.assertIn('beep=played', log)
         self.assertNotIn('[HANDOFF] forced', log)
-        self.assertEqual(led, ['accept'])
+        self.assertEqual(led, ['accept', 'playing'])
 
     def test_incident_queries_force_handoff_without_waiting(self):
         for query, speech in (*INCIDENT_CASES, NEWS_FALLBACK_CASE):
@@ -338,7 +394,7 @@ exit 0
                 audio, log, led = self.run_round('direct_immediate', native_result=(query, speech))
                 self.assertEqual(audio, b'BBFFAA')
                 self.assertEqual(log.count('[HANDOFF] forced reason=direct'), 1)
-                self.assertEqual(led, ['accept'])
+                self.assertEqual(led, ['accept', 'playing'])
                 self.assertLess(log.index('mediaplayer frozen'), log.index('[LLM-NATIVE] direct'))
                 self.assertIn('[LLM-NATIVE] direct', log)
 

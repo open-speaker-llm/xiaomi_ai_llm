@@ -5,11 +5,14 @@ import tempfile
 import shlex
 from pathlib import Path
 
+from tests.native_protocol_helpers import with_answer_audio_dependencies
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class NativeAsrShellTest(unittest.TestCase):
     def functions(self, *names):
+        names = with_answer_audio_dependencies(names)
         if 'handle_llm_dialog' in names:
             names += ('native_dialog_compact', 'classify_native_dialog_text', 'collect_native_dialog_text',
                       'cancel_followup_vad_prearm', 'is_followup_exit_command', 'is_followup_reset_command')

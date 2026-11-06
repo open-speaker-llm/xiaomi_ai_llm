@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.native_protocol_helpers import with_answer_audio_dependencies
+
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / 'device/native_first_client.sh').read_text()
 HELPERS = ('latency_init', 'latency_active', 'latency_discard', 'latency_begin',
@@ -14,6 +16,7 @@ HELPERS = ('latency_init', 'latency_active', 'latency_discard', 'latency_begin',
 
 
 def functions(*names):
+    names = with_answer_audio_dependencies(names)
     return '\n'.join(re.search(r'^' + name + r'\(\) \{.*?^\}', SOURCE, re.M | re.S).group()
                      for name in names)
 
@@ -318,7 +321,7 @@ log() { printf '%s\n' "$*"; }
 monotonic_ms() { echo 1000; }; elapsed_s() { echo 0; }
 is_recent_duplicate_llm_query() { return 1; }; record_llm_query() { :; }
 set_state() { :; }; set_busy() { :; }; apply_llm_master_volume() { :; }
-freeze_native_player() { :; }; led_feedback_llm_playing() { :; }
+freeze_native_player() { :; }; led_feedback_llm_playing() { :; }; led_feedback_llm_accept() { :; }
 finish_llm_playback() { :; }; led_feedback_error() { :; }
 llm_build_messages() { echo fake-request; }
 llm_history_commit() { printf '%s\n' "$3" >> "$TEST_DIR/history"; }

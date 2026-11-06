@@ -16,10 +16,13 @@ import unittest
 from pathlib import Path
 from tests.native_protocol_helpers import PROTOCOL_FUNCTIONS, embedded_protocol, embedded_web
 
+from tests.native_protocol_helpers import with_answer_audio_dependencies
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def functions(*names):
+    names = with_answer_audio_dependencies(names)
     if 'send_text_native' in names:
         names += ('llm_history_limits', 'llm_history_safe_dir', 'llm_history_prepare',
                   'llm_history_owned', 'llm_history_filter', 'llm_history_load',

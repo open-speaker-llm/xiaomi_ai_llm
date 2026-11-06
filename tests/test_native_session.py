@@ -7,6 +7,8 @@ import subprocess
 import tempfile
 import unittest
 
+from tests.native_protocol_helpers import with_answer_audio_dependencies
+
 ROOT = Path(__file__).resolve().parents[1]
 HISTORY_FUNCTIONS = (
     'llm_history_limits', 'llm_history_safe_dir', 'llm_history_prepare',
@@ -21,6 +23,7 @@ SESSION_FUNCTIONS = (
 
 
 def functions(*names):
+    names = with_answer_audio_dependencies(names)
     source = (ROOT / 'device/native_first_client.sh').read_text()
     return '\n'.join(match.group() for name in names
                      if (match := re.search(r'^' + name + r'\(\) \{.*?^\}', source, re.M | re.S)))
@@ -47,7 +50,7 @@ class NativeSessionHistoryTest(unittest.TestCase):
             code = functions(*HISTORY_FUNCTIONS, 'send_text_native') + r'''
 LLM_HISTORY_TURNS=2; TTS_ENGINE=server; DEVICE_TTS_STREAM=0; LLM_MODEL=fixture
 log() { :; }; set_state() { :; }; set_busy() { :; }; apply_llm_master_volume() { :; }
-freeze_native_player() { :; }; finish_llm_playback() { :; }; led_feedback_llm_playing() { :; }
+freeze_native_player() { :; }; finish_llm_playback() { :; }; led_feedback_llm_playing() { :; }; led_feedback_llm_accept() { :; }
 is_recent_duplicate_llm_query() { return 1; }; record_llm_query() { :; }
 monotonic_ms() { printf '1\n'; }; elapsed_s() { printf '0\n'; }
 llm_direct_answer() { LLM_DIRECT_ANSWER="回答 $2"; return 0; }
