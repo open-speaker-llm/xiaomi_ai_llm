@@ -55,6 +55,7 @@ DeepSeek 默认 `LLM_THINKING=disabled`，GLM 使用 `LLM_REASONING_EFFORT=low`�
 | `LLM_WEB_TOTAL_BUDGET` | `12` | 规划、退避、重试及工具共用秒数，允许 4–30；最终回答仍由 `LLM_DIRECT_TIMEOUT` 控制 |
 | `LLM_WEB_FILLER` | `搜索中，请稍等。` | 仅流式链路在规划准备重试或调用工具前输出，每轮最多一次；空值关闭；不接受换行 |
 | `LLM_WEB_FILLER_CACHE` | `0` | `0` 关闭、`1` 缓存成功合成的垫话 PCM；命中时从 0000 段播放，缺失/越界时回到 SSE；非法值告警并用 0 |
+| `LLM_WEB_SPECULATIVE` | `1` | native DeepSeek 的端侧句级流式并行启动规划与离线候选正文，规划授权后才放行候选。设 `0` 恢复先规划后请求正文 |
 | `LLM_WEB_FALLBACK` | `answer` | 联网失败后附加“未联网”system 提示并正常回答；`fail` 只播固定失败提示 |
 | `LLM_WEB_TEST_FAULT` | 空 | 调试故障：`plan_timeout/plan_429/plan_401/plan_402/plan_403`、`tool_timeout/tool_429/tool_401/tool_402/tool_403/tool_503`；非空启动时醒目警告，使用后清空 |
 

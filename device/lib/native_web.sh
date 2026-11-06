@@ -35,6 +35,10 @@ llm_web_init() {
 '*|*"$(printf '\r')"*)
         LLM_WEB_FILLER='搜索中，请稍等。'; log '[WEB] warning invalid LLM_WEB_FILLER; using default' >&2;;
     esac
+    LLM_WEB_SPECULATIVE="${LLM_WEB_SPECULATIVE:-1}"
+    case "$LLM_WEB_SPECULATIVE" in 0|1) :;; *)
+        LLM_WEB_SPECULATIVE=1; log '[WEB] warning invalid LLM_WEB_SPECULATIVE; using default' >&2;;
+    esac
     LLM_WEB_FALLBACK="${LLM_WEB_FALLBACK:-answer}"
     case "$LLM_WEB_FALLBACK" in answer|fail) :;; *)
         LLM_WEB_FALLBACK=answer; log '[WEB] warning invalid LLM_WEB_FALLBACK; using default' >&2;;
@@ -276,6 +280,73 @@ llm_web_public_url() {
     case "$host" in *.*) return 0;; *) return 1;; esac
 }
 
+# The streaming producer subprocess owns the candidate and its EXIT trap.
+llm_web_spec_start() {
+    local messages="$1" req
+    req=$(llm_build_request "$messages,"'{"role":"system","content":"本轮未执行新的联网检索，可以使用已有会话内容；不得声称刚刚搜索或核实了最新信息，不把记忆或历史资料冒充本轮新检索结果。涉及实时信息且无法确认时请明确说明。无需向用户解释路由过程。"}') || return 0
+    LLM_WEB_SPEC_DIR=$(umask 077; mktemp -d "$LLM_WEB_MARK_DIR/spec.XXXXXX" 2>/dev/null) || return 0
+    if ! (umask 077; printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\n' "$LLM_API_KEY" > "$LLM_WEB_SPEC_DIR/headers" &&
+        printf '%s' "$req" > "$LLM_WEB_SPEC_DIR/request" && : > "$LLM_WEB_SPEC_DIR/sse"); then
+        llm_web_spec_cancel
+        return 0
+    fi
+    llm_web_mark spec_start
+    (
+        # Bound the tmpfs spool even if the response lacks Content-Length.
+        ulimit -f 1024 || exit 1
+        exec curl -q -fsS -N -m "$LLM_DIRECT_TIMEOUT" "$LLM_API_BASE/chat/completions" \
+            --config "$LLM_WEB_SPEC_DIR/headers" --data-binary "@$LLM_WEB_SPEC_DIR/request"
+    ) > "$LLM_WEB_SPEC_DIR/sse" 2>/dev/null &
+    LLM_WEB_SPEC_PID=$!
+}
+
+llm_web_spec_cancel() {
+    if [ -n "${LLM_WEB_SPEC_PID:-}" ]; then
+        kill "$LLM_WEB_SPEC_PID" 2>/dev/null || :
+        wait "$LLM_WEB_SPEC_PID" 2>/dev/null || :
+        llm_web_mark spec_cancel
+        LLM_WEB_SPEC_PID=''
+    fi
+    if [ -n "${LLM_WEB_SPEC_DIR:-}" ]; then
+        rm -rf "$LLM_WEB_SPEC_DIR"
+        LLM_WEB_SPEC_DIR=''
+    fi
+}
+
+llm_web_spec_emit() {
+    local sent=0 size pending running rc=0
+    # This is the only path from the private spool into the live SSE pipeline.
+    # Snapshot the byte count so appends during tail cannot duplicate bytes.
+    while :; do
+        running=0
+        if kill -0 "$LLM_WEB_SPEC_PID" 2>/dev/null; then
+            running=1
+        else
+            wait "$LLM_WEB_SPEC_PID" 2>/dev/null || rc=$?
+            if [ "$sent" = 0 ] && [ "$rc" != 0 ]; then break; fi
+        fi
+        size=$(wc -c < "$LLM_WEB_SPEC_DIR/sse") || { llm_web_spec_cancel; return 1; }
+        pending=$((size - sent))
+        if [ "$pending" -gt 0 ]; then
+            if [ "$sent" = 0 ]; then LLM_WEB_SPEC_PUBLISHED=1; llm_web_mark spec_used; fi
+            tail -c "+$((sent + 1))" "$LLM_WEB_SPEC_DIR/sse" | head -c "$pending" || {
+                llm_web_spec_cancel
+                return 1
+            }
+            sent=$size
+        fi
+        [ "$running" = 1 ] || break
+        sleep 0.05
+    done
+    LLM_WEB_SPEC_PID=''
+    llm_web_spec_cancel
+    if [ "$sent" = 0 ]; then
+        llm_web_mark spec_cancel
+        return 1
+    fi
+    return "$rc"
+}
+
 llm_web_enrich() {
     local messages="$1" key plan_prompt plan_request response plan action query url
     local request evidence="" item title summary published i count=0 now
@@ -306,6 +377,7 @@ search的query最多80个中文字符或128个英文字符，优先官方、原�
             LLM_WEB_MESSAGES="$messages,"'{"role":"system","content":"本轮未执行新的联网检索，可以使用已有会话内容；不得声称刚刚搜索或核实了最新信息，不把记忆或历史资料冒充本轮新检索结果。无需向用户解释路由过程。"}'
             return 0;;
         search)
+            llm_web_spec_cancel
             query=$(llm_web_get "$plan" '@.query') || return 1
             [ -n "$query" ] && [ "${#query}" -le 512 ] || return 1
             request=$(printf '{"query":"%s","count":3,"need_content":false}' "$(printf '%s' "$query" | json_escape)") || return 1
@@ -333,6 +405,7 @@ search的query最多80个中文字符或128个英文字符，优先官方、原�
             [ "$count" -gt 0 ] || { LLM_WEB_TOOL_ERR=empty_results; return 1; }
             ;;
         fetch)
+            llm_web_spec_cancel
             url=$(llm_web_get "$plan" '@.url') || return 1
             llm_web_public_url "$url" || return 1
             # The planner may only read a URL already present in this conversation.
@@ -361,6 +434,7 @@ search的query最多80个中文字符或128个英文字符，优先官方、原�
 
 llm_open_stream() {
     local messages="$1" req fallback=none notice='' filler=0 rc
+    LLM_WEB_SPEC_PID=''; LLM_WEB_SPEC_DIR=''; LLM_WEB_SPEC_PUBLISHED=0
     LLM_WEB_START_MS=$(llm_web_now_ms)
     llm_web_init
     LLM_WEB_ACTION=off; LLM_WEB_STAGE=plan
@@ -373,6 +447,12 @@ llm_open_stream() {
         LLM_WEB_MARK_DIR=/tmp/native_first_direct_web
         (umask 077; mkdir -p "$LLM_WEB_MARK_DIR") || return 1
         rm -f "$LLM_WEB_MARK_DIR"/web_* "$LLM_WEB_MARK_DIR/no_history" "$LLM_WEB_MARK_DIR"/post_* "$LLM_WEB_MARK_DIR/marks"
+    fi
+    if [ "${2:-0}" = 1 ] && [ "$LLM_WEB_SPECULATIVE" = 1 ] && [ "$LLM_WEB_SEARCH" = auto ] &&
+        [ "${BACKEND:-deepseek}" = deepseek ] && [ "${LLM_PIPELINE:-native}" = native ]; then
+        trap 'llm_web_spec_cancel' EXIT
+        trap 'exit 1' HUP INT TERM
+        llm_web_spec_start "$messages"
     fi
     if llm_web_enrich "$messages"; then
         :
@@ -399,9 +479,17 @@ llm_open_stream() {
     [ ! -f "$LLM_WEB_MARK_DIR/web_filler" ] || filler=1
     log "[WEB] action=$LLM_WEB_ACTION plan_ms=$LLM_WEB_PLAN_MS plan_try=$LLM_WEB_PLAN_TRY plan_err=$LLM_WEB_PLAN_ERR tool_ms=$LLM_WEB_TOOL_MS tool_try=$LLM_WEB_TOOL_TRY tool_err=$LLM_WEB_TOOL_ERR filler=$filler fallback=$fallback results=$LLM_WEB_RESULTS budget_left_ms=$(llm_web_left_ms)" >&2
     if [ -n "$notice" ]; then
+        llm_web_spec_cancel
         : > "$LLM_WEB_MARK_DIR/no_history"
         printf 'data: {"choices":[{"delta":{"content":"%s"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n' "$(printf '%s' "$notice" | json_escape)"
         return 0
+    fi
+    if [ -n "$LLM_WEB_SPEC_PID" ]; then
+        llm_web_spec_emit
+        rc=$?
+        # Before forwarding any bytes, a failed candidate can use the regular
+        # final request. After forwarding, preserve the original stream failure.
+        if [ "$rc" = 0 ] || [ "$LLM_WEB_SPEC_PUBLISHED" = 1 ]; then return "$rc"; fi
     fi
     req=$(llm_build_request "$LLM_WEB_MESSAGES") || return 1
     curl -fsS -N -m "$LLM_DIRECT_TIMEOUT" "$LLM_API_BASE/chat/completions" \
