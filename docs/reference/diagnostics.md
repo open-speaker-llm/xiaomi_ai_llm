@@ -146,19 +146,20 @@ native + 端侧流式在轮末输出一行 `[LATENCY]`，同步追加到 `/tmp/n
 |---|---|
 | `start` | `wake` 为 `handle_wakeup` 入口，`followup` 为确认本次追问转 LLM 的时刻，`-` 为起点缺失。所有 `wake→*` 字段均从本轮起点计算 |
 | `wake→route` | 本轮起点至决定转 LLM。追问在同一时刻确认起点和路由，值为 `0.000` |
-| `route→req` | 路由决定至请求开始，包含原生冻结、暂停及请求准备 |
+| `route→req` | 路由决定至首次启动聊天请求的 curl，取联网规划、投机和正文请求中最早的打点，不含搜索工具请求 |
+| `freeze→llm_entry` / `llm_entry→prepare` / `llm_prepare→req` | 首次成功冻结到进入 LLM、从进入到请求准备、从准备到实际启动 curl 的单调时钟时差 |
 | `ttft` | 请求开始至首个非垫话回答片段；包含联网规划和工具耗时 |
 | `split1` | 首个非垫话片段至消费正文首段；沿用串行消费位置，可能包含管道缓冲等待 |
 | `tts1` | 正文首段的整次合成调用，包含既有重试和 PCM 解码 |
 | `commit1` | 首个 PCM 段（垫话或正文）从合成结束到写入 FIFO 前的秒数。增量提交从首批解码 PCM 发布算起，缓存垫话从触发发布算起。缺少对应打点时为 `-` |
 | `tts1_first` / `tts1_to_commit` | 正文首段开始合成至首批解码 PCM 发布、至首次写入 FIFO 前。完整合成时间仍看 `tts1` |
 | `player_prestart_wait` | 首次打开播放 FIFO 到首次提交 PCM 前的等待秒数。缺少任一打点时为 `-` |
-| `player_underrun` / `player_underrun_ms` / `player_prestart_underrun_ms` | 播放阶段欠载次数和毫秒总长，开播前欠载的时长单列。缺失单次时长时，对应总长为 `-`。原始播放日志默认位于 `/tmp/native_first_dirac.log`，只保留最近一次播放 |
+| `player_underrun` / `player_underrun_ms` / `player_prestart_underrun_ms` / `player_gap_underrun_ms` | 播放阶段欠载次数和毫秒总长。开播前和紧邻垫话接正文的欠载分别单列。缺失单次时长时，对应总长为 `-`。原始播放日志默认位于 `/tmp/native_first_dirac.log`，只保留最近一次播放 |
 | `wake→beep` / `wake→led_green` / `beep` | 从本轮起点至提示音 PCM 提交、触发绿灯的秒数。开始向播放器写入提示音时标为 `played`，策略关闭或当前轮不适用为 `off`，播放未成功时为 `skipped`。两个时间点都是软件打点 |
 | `player_open` / `player_ready` | 主播放器启动至 FIFO 打开，以及准备开始至 FIFO 打开，单位为秒。启用预热提示音时，`player_spawn` 指首批提示音写入后启动语音消费者，`player_fifo_open` 指语音消费者接入已预热的 FIFO |
 | `beep_start→commit` / `beep_commit→player_spawn` | 触发到首批提示音写入，以及首批提示音写入到语音消费者启动的秒数。`wake→beep_device_spawn` 单列预热 aplay 的启动，`wake→beep_device_ready` 来自 aplay 的 raw stdin 播放提示 |
 | `wake→beep_drain` / `wake→beep_end` / `beep_overlap` | 提示音 PCM 最后一次提交或停止写入的时刻、按提交的 PCM 帧估算的提示音结束时刻，以及首段语音是否混入提示音（`0` 或 `1`）。`beep_end` 不含设备缓冲延迟 |
-| `player_underrun_at` / `player_underrun_first_at` / `player_underrun_phase` | 全部欠载报告的相对时间、首次报告及其阶段。`prestart` 含首段语音提交前的报告，以及首段提交后 100 ms 内、时长接近 FIFO 打开或提示音估算结束至首段语音的报告。时长容差为该空等区间的 25%，最少 100 ms。`filler` 是垫话估计播放期间，`gap` 是估计垫话结束到正文提交，`answer` 是正文提交后，`tail` 是关闭播放器写端后 |
+| `player_underrun_at` / `player_underrun_first_at` / `player_underrun_phase` | 全部欠载报告的相对时间、首次报告及其阶段。垫话或无垫话的正文首段提交时刻前后 100 ms 内归 `prestart`，垫话后的正文提交前后 100 ms 内归 `gap`，均从卡顿统计中剔除。窗口外保留原阶段判定 |
 | `wake→commit1` | 本轮起点至垫话或正文的第一次 PCM FIFO 提交，路由提示音单列 |
 | `pcm1` | 正文首段 PCM 字节数 ÷（采样率 × 2），为单声道 S16LE 音频秒数 |
 | `segs` / `retries` | 已结束合成调用的播放段数（含垫话/兜底）；所有句子的额外尝试总次数 |
@@ -168,7 +169,7 @@ native + 端侧流式在轮末输出一行 `[LATENCY]`，同步追加到 `/tmp/n
 | `filler→answer_gap` / `filler→answer_gap_kind` | 有垫话和正文首段 PCM 提交时，计算两次提交的间隔减去垫话 PCM 时长，最小为零，并标记 `est`。估算不含播放器缓冲及设备输出偏移；缺少任一提交或垫话 PCM 时长时均为 `-` |
 | `llm` / `play` | 请求开始至流结束、消费者结束（含失败退出） |
 
-对已下发的原生播报，`[HANDOFF] forced reason=timeout` 表示明确调用 DeepSeek 的轮次在 4 秒交接期限后发起停止并接管。`[HANDOFF] cancelled reason=new_wake` 表示旧交接被新的物理唤醒取消。
+对已下发的原生播报，`[HANDOFF] forced reason=direct` 表示明确调用 DeepSeek 的轮次直接走冻结接管。`[HANDOFF] cancelled reason=new_wake` 表示等待中的旧交接被新的物理唤醒取消。
 
 每轮 marks 为 `name ms`，位于 `/tmp/native_first_stream/marks`（另有段号、字节数、次数及欠载微秒等数值），下一流式轮覆盖。唤醒阶段先用私有 `/tmp/native_first_marks.XXXXXX`，进入流式后合并并删除临时目录；未转 LLM 和客户端清理时也删除待合并目录。追问用新目录记录 `followup_start`，不继承上轮数据。计时写入失败不会改变回答的成功/失败判断。
 

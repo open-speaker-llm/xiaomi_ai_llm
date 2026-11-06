@@ -2,9 +2,11 @@
 
 适用版本为基于 `7805ef2` 的交接修正。原生静默等待来自 `da308bb`，在本轮修正中将其交接期限限制为 4 秒。真人与实际音频验收 **未执行**。
 
+后续版本将显式调用的交接改为立即冻结，现场验收以 [直达与早切验收](2026-11-06-s30-direct-split.md) 为准。
+
 ## 准备
 
-- 先运行 `.venv/bin/python -m unittest -v tests.test_route_beep.RouteBeepTest.test_three_incident_queries_force_handoff_at_four_seconds`，再运行提交前检查 `./scripts/run_tests.sh`。三条原始问法的 AIVS 回放和已开口的否定播报均由该检查收集。
+- 先运行 `.venv/bin/python -m unittest -v tests.test_route_beep.RouteBeepTest.test_incident_queries_force_handoff_without_waiting`，再运行提交前检查 `./scripts/run_tests.sh`。三条原始问法的 AIVS 回放和已开口的否定播报均由该检查收集。
 - 设备空闲时按维护流程成组备份活动客户端、包内副本及校验清单。确认 boot1 与原生组件匹配。启用 `LATENCY_TRACE_ENABLED=1` 后记录唤醒、灯光和实际出声。
 
 ## 先复测故障问法

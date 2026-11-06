@@ -19,6 +19,8 @@ INCIDENT_CASES = (
     ('呼叫DEEPSEEK让他搜索一下最近24小时内的财经新闻', '好的，一起来收听今天DEEPSE的财经新闻吧'),
     ('呼叫DEEPSEEK让他查一下最近24小时的财经新闻', '好的，一起来收听今天DEEPS小时的财经新闻吧'),
 )
+NEWS_FALLBACK_CASE = ('呼叫DEEPSEEK搜索一下最近24小时的偏爱新闻',
+                      '没找到DEEPSEEK小时偏爱的新闻，为你推荐其他新闻')
 
 
 class RouteBeepTest(unittest.TestCase):
@@ -73,7 +75,7 @@ killall() {
     if [ "$MODE" = native_speak ] && [ ! -f "$TEST_DIR/native_finished" ]; then
         : > "$TEST_DIR/early"
     fi
-    if [ "$MODE" = direct_timeout ] && [ ! -f "$TEST_DIR/native_stopped" ]; then
+    if [ "$MODE" = direct_immediate ] && [ "$(monotonic_ms)" != 1000 ]; then
         : > "$TEST_DIR/early"
     fi
     [ "$MODE" != freeze_failed ]
@@ -81,7 +83,7 @@ killall() {
 TTS_NATIVE_STATUS_START_TIMEOUT_SECONDS=3; TTS_NATIVE_STATUS_MAX_SECONDS=8
 TTS_NATIVE_STATUS_IDLE_HITS=2; TTS_NATIVE_STATUS_POLL_SECONDS=0.01
 native_tts_player_status() {
-    if [ "$MODE" = empty_speak ] || [ "$MODE" = early_failure ]; then
+    if [ "$MODE" = empty_speak ] || [ "$MODE" = early_failure ] || [ "$MODE" = direct_immediate ]; then
         : > "$TEST_DIR/early"
         echo 1
         return
@@ -107,11 +109,6 @@ native_tts_player_status() {
         echo 0
     fi
 }
-stop_native_playback() {
-    [ "$MODE" = direct_timeout ] && [ "$(monotonic_ms)" = 5000 ] &&
-        [ ! -f "$TEST_DIR/request" ] || : > "$TEST_DIR/early"
-    : > "$TEST_DIR/native_stopped"
-}
 timeout() { shift 2; "$@"; }
 apply_llm_master_volume() { : > "$TEST_DIR/master"; }
 monotonic_ms() {
@@ -127,7 +124,7 @@ new_llm_session_id() { NEW_LLM_SESSION_ID=stub; }
 select_native_result_source() { echo stub; }
 get_native_result() {
     [ "$MODE" != no_result ] || return 1
-    case "$MODE" in direct_timeout|direct_cancel|empty_speak) get_native_result_aivs_lab; return ;; esac
+    case "$MODE" in direct_immediate|direct_cancel|empty_speak) get_native_result_aivs_lab; return ;; esac
     if [ "$MODE" = cold_start ]; then
         until [ -f "$TEST_DIR/transport_ready" ]; do sleep 0.01; done
     fi
@@ -145,7 +142,7 @@ get_native_result() {
         RESULT_SPEAK='这个设置回答不上'
     fi
 }
-is_system1_root() { case "$MODE" in direct_timeout|direct_cancel|empty_speak) return 0 ;; *) return 1 ;; esac; }
+is_system1_root() { case "$MODE" in direct_immediate|direct_cancel|empty_speak) return 0 ;; *) return 1 ;; esac; }
 is_ignored_query_result() { return 1; }
 is_recent_duplicate_llm_query() { return 1; }
 is_followup_exit_command() { return 1; }
@@ -335,16 +332,18 @@ exit 0
         self.assertNotIn('[HANDOFF] forced', log)
         self.assertEqual(led, ['accept'])
 
-    def test_three_incident_queries_force_handoff_at_four_seconds(self):
-        for query, speech in INCIDENT_CASES:
+    def test_incident_queries_force_handoff_without_waiting(self):
+        for query, speech in (*INCIDENT_CASES, NEWS_FALLBACK_CASE):
             with self.subTest(query=query):
-                audio, log, _ = self.run_round('direct_timeout', native_result=(query, speech))
+                audio, log, led = self.run_round('direct_immediate', native_result=(query, speech))
                 self.assertEqual(audio, b'BBFFAA')
-                self.assertEqual(log.count('[HANDOFF] forced reason=timeout'), 1)
+                self.assertEqual(log.count('[HANDOFF] forced reason=direct'), 1)
+                self.assertEqual(led, ['accept'])
+                self.assertLess(log.index('mediaplayer frozen'), log.index('[LLM-NATIVE] direct'))
                 self.assertIn('[LLM-NATIVE] direct', log)
 
     def test_new_physical_wake_cancels_waiting_handoff(self):
-        audio, log, _ = self.run_round('direct_cancel', native_result=INCIDENT_CASES[0])
+        audio, log, _ = self.run_round('direct_cancel', native_result=('帮我搜一下财经新闻', '这个问题回答不上'))
         self.assertEqual(audio, b'')
         self.assertIn('[HANDOFF] cancelled reason=new_wake', log)
         self.assertNotIn('[HANDOFF] forced', log)

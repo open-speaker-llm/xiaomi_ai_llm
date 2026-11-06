@@ -142,7 +142,7 @@ curl() {
         marks = [line.split() for line in (self.directory / 'marks').read_text().splitlines()]
         self.assertEqual(marks, [['web_plan_start', '10000'], ['web_filler', '10100'],
                                  ['web_plan_end', '10700'], ['web_tool_start', '10700'],
-                                 ['web_tool_end', '10800']])
+                                 ['web_tool_end', '10800'], ['llm_req', '10800']])
         self.assertIn('results=1', run.stderr)
         self.assertIn('plan_ms=700', run.stderr)
         self.assertEqual(run.stdout.count('搜索中，请稍等。'), 1)
@@ -152,17 +152,17 @@ curl() {
 latency_mark() { printf '%s %s\\n' "$1" "$(monotonic_ms)" >> "$TEST_DIR/delegated"; }
 ''')
         self.assertFalse((self.directory / 'marks').exists())
-        self.assertEqual(len((self.directory / 'delegated').read_text().splitlines()), 5)
+        self.assertEqual(len((self.directory / 'delegated').read_text().splitlines()), 6)
         self.run_web(plan('search', query='新闻'), setup='LATENCY_TRACE_ENABLED=0')
         self.assertFalse((self.directory / 'marks').exists())
 
     def test_answer_off_and_failed_requests_have_only_applicable_marks(self):
         for mode, decision, seq, expected in (
-                ('off', plan(), '0', []),
-                ('auto', plan(), '0', ['web_plan_start', 'web_plan_end']),
-                ('auto', plan(), '12', ['web_plan_start', 'web_plan_end']),
+                ('off', plan(), '0', ['llm_req']),
+                ('auto', plan(), '0', ['web_plan_start', 'web_plan_end', 'llm_req']),
+                ('auto', plan(), '12', ['web_plan_start', 'web_plan_end', 'llm_req']),
                 ('auto', plan('search', query='新闻'), '0',
-                 ['web_plan_start', 'web_plan_end', 'web_filler', 'web_tool_start', 'web_tool_end'])):
+                 ['web_plan_start', 'web_plan_end', 'web_filler', 'web_tool_start', 'web_tool_end', 'llm_req'])):
             with self.subTest(mode=mode, seq=seq):
                 run = self.run_web(decision, mode=mode, plan_seq=seq, tool_seq='12')
                 path = self.directory / 'marks'
@@ -533,6 +533,30 @@ llm_web_post https://unused.invalid sk-test '{}' 1
             self.assertEqual(run.returncode, 10 if curl_rc in (6, 7, 28, 35, 52, 55, 56) else 12)
             self.assertEqual(run.stdout, '')
             self.assertNotIn('sk-test', run.stderr)
+
+    def test_planner_marks_request_at_curl_and_search_tool_does_not(self):
+        code = embedded_web() + r'''
+monotonic_ms() { echo 12345; }
+curl() {
+    if [ "$EXPECTED_MARK" = 1 ]; then
+        grep -qx 'llm_req 12345' "$LLM_WEB_MARK_DIR/marks" || return 1
+    else
+        [ ! -e "$LLM_WEB_MARK_DIR/marks" ] || return 1
+    fi
+    : > "$LLM_WEB_MARK_DIR/checked"
+    return 7
+}
+llm_web_post https://unused.invalid sk-test '{}' 1 "$STAGE"
+'''
+        for stage, expected in (('plan', '1'), ('tool', '0')):
+            with self.subTest(stage=stage):
+                for name in ('checked', 'marks'):
+                    (self.directory / name).unlink(missing_ok=True)
+                run = subprocess.run(['sh', '-c', code], capture_output=True, text=True, timeout=5,
+                                     env={**os.environ, 'LLM_WEB_MARK_DIR': str(self.directory),
+                                          'STAGE': stage, 'EXPECTED_MARK': expected})
+                self.assertEqual(run.returncode, 10, run.stderr)
+                self.assertTrue((self.directory / 'checked').exists())
 
     @unittest.skipUnless(shutil.which('busybox'), 'BusyBox ash unavailable on host')
     def test_busybox_retries_and_filler_share_the_turn_directory(self):

@@ -119,7 +119,7 @@ NATIVE_FOLLOWUP_TTS_NOTIFY="${NATIVE_FOLLOWUP_TTS_NOTIFY:-1}"
 NATIVE_FOLLOWUP_MULTIROUNDS_TRIGGER="${NATIVE_FOLLOWUP_MULTIROUNDS_TRIGGER:-pns}"
 NATIVE_FOLLOWUP_TRIGGER_AFTER_TTS_END="${NATIVE_FOLLOWUP_TRIGGER_AFTER_TTS_END:-0}"
 STREAM_TIMEOUT="${STREAM_TIMEOUT:-180}"
-UNSUPPORTED_PATTERNS="${UNSUPPORTED_PATTERNS:-暂时|不会|不支持|回答不上|需要再学习|没听懂|不知道|不会这项技能|难住|问住|更努力学习|还在学习|我.*(再|多|继续|努力)(学习|学学)}"
+UNSUPPORTED_PATTERNS="${UNSUPPORTED_PATTERNS:-暂时|不会|不支持|回答不上|需要再学习|没听懂|不知道|不会这项技能|难住|问住|更努力学习|还在学习|我.*(再|多|继续|努力)(学习|学学)|没找到.*(为你推荐其他|的新闻)}"
 DIRECT_LLM_QUERY_PATTERNS="${DIRECT_LLM_QUERY_PATTERNS:-DEEPSEEK|DeepSeek|deepseek}"
 
 # --- 音箱端直连 LLM（独立链路，不依赖 Mac 调 LLM）---
@@ -372,7 +372,7 @@ latency_mark() {
     [ -d "$dir" ] || return 0
     case "$name" in *[!a-z0-9_]*) return 0 ;; esac
     case "$name" in
-        wake|followup_start|native_result|route_llm|freeze_done|freeze_first|led_green|beep_start|beep_commit|beep_drain|beep_end|beep_overlap|beep_skipped|beep_device_spawn|beep_device_ready|llm_req|llm_first_token|fifo_commit1|fifo_commit_slot|fifo_commit_live|llm_done|play_done|web_plan_start|web_plan_end|web_tool_start|web_tool_end|web_filler|player_start|player_spawn|player_fifo_open|player_drain_start|filler_commit|filler_pcm_bytes|answer_commit|spec_start|spec_cancel|spec_used) ;;
+        wake|followup_start|native_result|route_llm|freeze_done|freeze_first|led_green|beep_start|beep_commit|beep_drain|beep_end|beep_overlap|beep_skipped|beep_device_spawn|beep_device_ready|native_freeze|llm_entry|llm_prepare|llm_req|llm_first_token|fifo_commit1|fifo_commit_slot|fifo_commit_live|llm_done|play_done|web_plan_start|web_plan_end|web_tool_start|web_tool_end|web_filler|player_start|player_spawn|player_fifo_open|player_drain_start|filler_commit|filler_pcm_bytes|answer_commit|spec_start|spec_cancel|spec_used) ;;
         sent[0-9]*_split|sent[0-9]*_first_pcm|sent[0-9]*_tts_start|sent[0-9]*_tts_end|sent[0-9]*_pcm_bytes|sent[0-9]*_retries) ;;
         *) return 0 ;;
     esac
@@ -407,7 +407,7 @@ latency_report() {
                 player_phases[player_events]=($1 == "player_drain_start") ? "tail" : "playing"
             }
             if ($1 == "player_underrun_unknown") underrun_unknown+=$2
-            if (!($1 in m)) m[$1]=$2+0
+            if (!($1 in m) || ($1 == "llm_req" && $2+0 < m[$1])) m[$1]=$2+0
         }
         function delta(a,b) {
             if (!(a in m) || !(b in m) || m[b] < m[a]) return "-"
@@ -417,22 +417,19 @@ latency_report() {
             if (!(k in m) || rate !~ /^[0-9]+$/ || rate+0 <= 0) return "-"
             return sprintf("%.3f", m[k]/(rate*2))
         }
-        function near_wait(us, start,   idle,tolerance,diff) {
-            idle=m["fifo_commit1"]-start
-            if (idle<=0 || us<=0) return 0
-            tolerance=idle/4 > 100 ? idle/4 : 100
-            diff=us/1000-idle
-            return diff>=-tolerance && diff<=tolerance
+        function near_commit(at, name,   diff) {
+            if (!(name in m)) return 0
+            diff=at-m[name]
+            return diff>=-100 && diff<=100
         }
-        function underrun_phase(at, us,   i,player_phase) {
+        function underrun_phase(at,   i,player_phase) {
+            if (near_commit(at,"filler_commit")) return "prestart"
+            if (near_commit(at,"answer_commit")) return ("filler_commit" in m) ? "gap" : "prestart"
             for (i=1; i<=player_events; i++) {
                 if (player_times[i]<=at) player_phase=player_phases[i]
             }
             if (player_phase=="tail") return "tail"
             if (!("fifo_commit1" in m) || at<m["fifo_commit1"]) return "prestart"
-            if (at<=m["fifo_commit1"]+100 && us ~ /^[0-9]+$/ &&
-                (("player_fifo_open" in m) && near_wait(us,m["player_fifo_open"]) ||
-                 ("beep_end" in m) && near_wait(us,m["beep_end"]))) return "prestart"
             if (("answer_commit" in m) && at>=m["answer_commit"]) return "answer"
             if (("filler_commit" in m) && at>=m["filler_commit"]) {
                 if (rate>0 && m["filler_pcm_bytes"]>0 &&
@@ -470,18 +467,24 @@ latency_report() {
                 delta(origin,"fifo_commit1"), length_s(first "_pcm_bytes"), segs, retries, web, \
                 delta("web_plan_start","web_plan_end"), delta("web_tool_start","web_tool_end"), \
                 delta("llm_req","web_filler"), delta("llm_req","llm_done"), delta("llm_req","play_done")
+            printf " freeze→llm_entry=%s llm_entry→prepare=%s llm_prepare→req=%s", \
+                delta("native_freeze","llm_entry"), delta("llm_entry","llm_prepare"), delta("llm_prepare","llm_req")
             spec="off"
             if ("spec_used" in m) spec="used"
             else if ("spec_cancel" in m) spec="cancelled"
-            phase="-"; prestart_us=0; prestart_unknown=0
+            phase="-"; prestart_us=0; prestart_unknown=0; gap_us=0; gap_unknown=0
             for (i=1; i<=observed; i++) {
                 us=underrun_duration[i]
-                kind=underrun_phase(underrun_times[i],us)
+                kind=underrun_phase(underrun_times[i])
                 if (i==1) phase=kind
                 if (kind=="prestart" && us!="") {
                     underruns--
                     if (us=="-") { underrun_unknown--; prestart_unknown++ }
                     else { underrun_us-=us; prestart_us+=us }
+                } else if (kind=="gap" && us!="" && near_commit(underrun_times[i],"answer_commit")) {
+                    underruns--
+                    if (us=="-") { underrun_unknown--; gap_unknown++ }
+                    else { underrun_us-=us; gap_us+=us }
                 }
             }
             printf " spec=%s tts1_first=%s tts1_to_commit=%s player_prestart_wait=%s player_underrun=%d player_underrun_ms=%s", spec, \
@@ -489,6 +492,7 @@ latency_report() {
                 delta("player_fifo_open","fifo_commit1"), underruns, \
                 underrun_unknown ? "-" : sprintf("%.3f", underrun_us/1000)
             printf " player_prestart_underrun_ms=%s", prestart_unknown ? "-" : sprintf("%.3f", prestart_us/1000)
+            printf " player_gap_underrun_ms=%s", gap_unknown ? "-" : sprintf("%.3f", gap_us/1000)
             beep=("beep_commit" in m) ? "played" : (("beep_skipped" in m) ? "skipped" : "off")
             printf " wake→beep=%s beep=%s wake→led_green=%s", delta(origin,"beep_commit"), beep, delta(origin,"led_green")
             if ("player_spawn" in m) printf " player_open=%s", delta("player_spawn","player_fifo_open")
@@ -2110,7 +2114,10 @@ stop_native_playback_guard() {
 freeze_native_player() {
     NATIVE_PLAYER_STOP_OK=0
     [ "$FREEZE_NATIVE_PLAYER_ON_FALLBACK" = "1" ] || return 0
-    killall -STOP mediaplayer 2>/dev/null && NATIVE_PLAYER_STOP_OK=1
+    if killall -STOP mediaplayer 2>/dev/null; then
+        NATIVE_PLAYER_STOP_OK=1
+        [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark native_freeze
+    fi
     date +%s > "$PLAYER_FROZEN_MARKER"
     NATIVE_PLAYER_FROZEN=1
     log "[NATIVE] mediaplayer frozen"
@@ -2709,7 +2716,7 @@ llm_web_post_state() {
 
 llm_web_post() {
     (
-        local url="$1" key="$2" body="$3" seconds="$4" dir bytes clean rc code retry=''
+        local url="$1" key="$2" body="$3" seconds="$4" stage="${5:-}" dir bytes clean rc code retry=''
         llm_web_post_state other 000 ''
         dir=$(umask 077; mktemp -d /tmp/native-web.XXXXXX) || exit 12
         # Bind paths now: BusyBox unwinds locals before running EXIT traps.
@@ -2719,6 +2726,7 @@ llm_web_post() {
         printf '%s' "$body" > "$dir/request"
         (
             ulimit -f 256 || exit 1
+            [ "$stage" != plan ] || llm_web_mark llm_req
             curl -q -sS --connect-timeout 3 --max-time "$seconds" --max-filesize 131072 \
                 --config "$dir/headers" --data-binary "@$dir/request" \
                 -D "$dir/hdr" -w '%{http_code}' -o "$dir/response" "$url" > "$dir/code" 2>/dev/null
@@ -2806,7 +2814,7 @@ llm_web_request() {
             esac
             LLM_WEB_RESPONSE=''
         else
-            LLM_WEB_RESPONSE=$(llm_web_post "$url" "$key" "$body" "$limit")
+            LLM_WEB_RESPONSE=$(llm_web_post "$url" "$key" "$body" "$limit" "$stage")
             rc=$?
         fi
         error=$(cat "$LLM_WEB_MARK_DIR/post_error" 2>/dev/null)
@@ -2871,6 +2879,7 @@ llm_web_spec_start() {
     (
         # Bound the tmpfs spool even if the response lacks Content-Length.
         ulimit -f 1024 || exit 1
+        llm_web_mark llm_req
         exec curl -q -fsS -N -m "$LLM_DIRECT_TIMEOUT" "$LLM_API_BASE/chat/completions" \
             --config "$LLM_WEB_SPEC_DIR/headers" --data-binary "@$LLM_WEB_SPEC_DIR/request"
     ) > "$LLM_WEB_SPEC_DIR/sse" 2>/dev/null &
@@ -3069,6 +3078,7 @@ llm_open_stream() {
         if [ "$rc" = 0 ] || [ "$LLM_WEB_SPEC_PUBLISHED" = 1 ]; then return "$rc"; fi
     fi
     req=$(llm_build_request "$LLM_WEB_MESSAGES") || return 1
+    llm_web_mark llm_req
     curl -fsS -N -m "$LLM_DIRECT_TIMEOUT" "$LLM_API_BASE/chat/completions" \
         -H "Authorization: Bearer $LLM_API_KEY" -H 'Content-Type: application/json' -d "$req" 2>/dev/null
     rc=$?
@@ -4595,7 +4605,7 @@ llm_stream_answer_and_play() {
         return 1
     }
     t_req=$(monotonic_ms)
-    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark llm_req "$t_req"
+    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark llm_prepare "$t_req"
 
     if [ "${DEVICE_TTS_PERSISTENT:-0}" = 1 ]; then
         tts_persistent_ensure "$sid"
@@ -4658,16 +4668,37 @@ llm_stream_answer_and_play() {
                   getline status < (wd "/status"); close(wd "/status");
                   gsub(/^[ \t]+|[ \t]+$/, "", buf); if (status == "complete" && length(buf) > 0) { print buf; fflush() } }
             # C locale 下按 UTF-8 起始字节计字符，并保留完整码点。
-            function early_break(t,   i, j, n, c, recent) {
+            function char_end(t, i,   j) {
+                j = i + 1
+                while (substr(t, j, 1) ~ /[\200-\277]/) j++
+                return j
+            }
+            function digit(c) { return c ~ /^[0-9]$/ || (c != "" && index("０１２３４５６７８９", c)) }
+            function word(c) { return c ~ /^[A-Za-z0-9_]$/ }
+            function unit(c) { return c != "" && index("年月日号点时分秒%％万亿元小毫厘千百度岁天周个米克吨块", c) }
+            function num_connector(c) { return c != "" && index(".．:：,，", c) }
+            function safe_break(prev, c, next_char, numeric_tail) {
+                if (word(c) && (next_char == "" || word(next_char) || next_char == "-" || next_char == ".")) return 0
+                if (digit(c) && (next_char == "" || digit(next_char) || unit(next_char) || num_connector(next_char))) return 0
+                if ((c == "-" || c == ".") && word(prev) && (next_char == "" || word(next_char))) return 0
+                if (digit(prev) && num_connector(c) && (next_char == "" || digit(next_char))) return 0
+                if (numeric_tail && unit(c) && (next_char == "" || digit(next_char) || unit(next_char))) return 0
+                return 1
+            }
+            function early_break(t,   i, j, n, prev, c, next_char, recent, numeric_tail) {
                 for (i = 1; i <= length(t); i = j) {
-                    j = i + 1
-                    while (substr(t, j, 1) ~ /[\200-\277]/) j++
+                    j = char_end(t, i)
                     c = substr(t, i, j - i)
+                    next_char = substr(t, j, char_end(t, j) - j)
                     n++
                     if (c == "。" || c == "！" || c == "？") return j - 1
-                    if (n >= min_chars && index("，、；：,;", c)) return j - 1
-                    if (c == " " || c == "\t" || c == "，" || c == ",") recent = j - 1
-                    if (n >= max_chars) return recent ? recent : j - 1
+                    if (safe_break(prev, c, next_char, numeric_tail)) {
+                        if (n >= min_chars && index("，、；：,;", c)) return j - 1
+                        if (index(" \t，,》〉", c)) recent = j - 1
+                        if (n >= max_chars) return recent ? recent : j - 1
+                    } else if (n >= max_chars && recent) return recent
+                    numeric_tail = digit(c) || (unit(c) && numeric_tail)
+                    prev = c
                 }
                 return 0
             }
@@ -4796,6 +4827,7 @@ send_text_native() {
         return 0
     fi
 
+    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark llm_entry
     log "[LLM-NATIVE] direct → model=$LLM_MODEL text=$text"
     set_state "LLM_SPEAKING"
     record_llm_query "$text"
@@ -5521,18 +5553,19 @@ native_route_beep_gate() {
             route_beep_quiet=1
             ;;
         aivs_lab_instruction:?*)
+            if ! is_native_success_domain &&
+                printf '%s\n' "$RESULT_QUERY" | grep -Eq "$DIRECT_LLM_QUERY_PATTERNS"; then
+                # The caller freezes native playback before emitting the cue.
+                log '[HANDOFF] forced reason=direct'
+                route_beep_quiet=1
+                return 0
+            fi
             native_route_wait_quiet
             rc=$?
             case "$rc" in
                 0) route_beep_quiet=1; return 0 ;;
                 3) log '[HANDOFF] cancelled reason=new_wake'; return 1 ;;
             esac
-            if [ "$rc" = 1 ] && ! is_native_success_domain &&
-                printf '%s\n' "$RESULT_QUERY" | grep -Eq "$DIRECT_LLM_QUERY_PATTERNS"; then
-                log '[HANDOFF] forced reason=timeout'
-                if ! is_native_player_frozen; then stop_native_playback 1; fi
-                return 0
-            fi
             log '[ROUTE] native output completion unconfirmed; keep native dialog'
             return 1
             ;;
@@ -5611,27 +5644,6 @@ handle_wakeup() {
                 return 0
             fi
 
-            if is_unsupported_result && ! is_native_success_domain; then
-                log "[NATIVE] unsupported，停止原生播报并转 LLM"
-                [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark route_llm
-                if [ "${LLM_ROUTE_BEEP:-0}" = 1 ] && route_beep_allowed && ! native_route_beep_gate; then
-                    led_off
-                    [ "${DEVICE_TTS_EARLY_START:-0}" != 1 ] || tts_persistent_stop
-                    set_state "IDLE"
-                    return 0
-                fi
-                [ "${DEVICE_TTS_EARLY_START:-0}" != 1 ] || tts_early_filler_start "$session_id"
-                set_state "NATIVE_FALLBACK"
-                [ "$FOLLOWUP_ENABLED" = "1" ] && [ "$FOLLOWUP_MODE" = "native_multirounds" ] && native_followup_mark_multirounds
-                freeze_native_player
-                if [ "$route_beep_quiet" = 1 ] && [ "$NATIVE_PLAYER_STOP_OK" = 1 ]; then
-                    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark freeze_first
-                    route_beep_fire || :
-                fi
-                handle_llm_dialog "$session_id" "$fallback_query"
-                return 0
-            fi
-
             if is_native_success_domain; then
                 log "[NATIVE] success-domain，交给小米原生"
                 set_state "NATIVE_HANDLED"
@@ -5640,26 +5652,33 @@ handle_wakeup() {
                 [ "${DEVICE_TTS_EARLY_START:-0}" != 1 ] || tts_persistent_stop
                 set_state "IDLE"
                 return 0
+            fi
+
+            if is_unsupported_result; then
+                log "[NATIVE] unsupported，停止原生播报并转 LLM"
             else
                 log "[NATIVE] non-success-domain，立即 fallback LLM"
-                [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark route_llm
-                if [ "${LLM_ROUTE_BEEP:-0}" = 1 ] && route_beep_allowed && ! native_route_beep_gate; then
-                    led_off
-                    [ "${DEVICE_TTS_EARLY_START:-0}" != 1 ] || tts_persistent_stop
-                    set_state "IDLE"
-                    return 0
-                fi
-                [ "${DEVICE_TTS_EARLY_START:-0}" != 1 ] || tts_early_filler_start "$session_id"
-                set_state "NATIVE_FALLBACK"
-                [ "$FOLLOWUP_ENABLED" = "1" ] && [ "$FOLLOWUP_MODE" = "native_multirounds" ] && native_followup_mark_multirounds
+            fi
+            [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark route_llm
+            if [ "${LLM_ROUTE_BEEP:-0}" = 1 ] && route_beep_allowed && ! native_route_beep_gate; then
+                led_off
+                [ "${DEVICE_TTS_EARLY_START:-0}" != 1 ] || tts_persistent_stop
+                set_state "IDLE"
+                return 0
+            fi
+            if [ "$route_beep_quiet" = 1 ]; then
                 freeze_native_player
-                if [ "$route_beep_quiet" = 1 ] && [ "$NATIVE_PLAYER_STOP_OK" = 1 ]; then
+                if [ "$NATIVE_PLAYER_STOP_OK" = 1 ]; then
                     [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark freeze_first
                     route_beep_fire || :
                 fi
-                handle_llm_dialog "$session_id" "$fallback_query"
-                return 0
             fi
+            [ "${DEVICE_TTS_EARLY_START:-0}" != 1 ] || tts_early_filler_start "$session_id"
+            set_state "NATIVE_FALLBACK"
+            [ "$FOLLOWUP_ENABLED" = "1" ] && [ "$FOLLOWUP_MODE" = "native_multirounds" ] && native_followup_mark_multirounds
+            [ "$route_beep_quiet" = 1 ] || freeze_native_player
+            handle_llm_dialog "$session_id" "$fallback_query"
+            return 0
         fi
 
         waited_ticks=$((waited_ticks + 1))

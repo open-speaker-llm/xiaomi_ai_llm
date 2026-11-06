@@ -132,7 +132,7 @@ llm_web_post_state() {
 
 llm_web_post() {
     (
-        local url="$1" key="$2" body="$3" seconds="$4" dir bytes clean rc code retry=''
+        local url="$1" key="$2" body="$3" seconds="$4" stage="${5:-}" dir bytes clean rc code retry=''
         llm_web_post_state other 000 ''
         dir=$(umask 077; mktemp -d /tmp/native-web.XXXXXX) || exit 12
         # Bind paths now: BusyBox unwinds locals before running EXIT traps.
@@ -142,6 +142,7 @@ llm_web_post() {
         printf '%s' "$body" > "$dir/request"
         (
             ulimit -f 256 || exit 1
+            [ "$stage" != plan ] || llm_web_mark llm_req
             curl -q -sS --connect-timeout 3 --max-time "$seconds" --max-filesize 131072 \
                 --config "$dir/headers" --data-binary "@$dir/request" \
                 -D "$dir/hdr" -w '%{http_code}' -o "$dir/response" "$url" > "$dir/code" 2>/dev/null
@@ -229,7 +230,7 @@ llm_web_request() {
             esac
             LLM_WEB_RESPONSE=''
         else
-            LLM_WEB_RESPONSE=$(llm_web_post "$url" "$key" "$body" "$limit")
+            LLM_WEB_RESPONSE=$(llm_web_post "$url" "$key" "$body" "$limit" "$stage")
             rc=$?
         fi
         error=$(cat "$LLM_WEB_MARK_DIR/post_error" 2>/dev/null)
@@ -294,6 +295,7 @@ llm_web_spec_start() {
     (
         # Bound the tmpfs spool even if the response lacks Content-Length.
         ulimit -f 1024 || exit 1
+        llm_web_mark llm_req
         exec curl -q -fsS -N -m "$LLM_DIRECT_TIMEOUT" "$LLM_API_BASE/chat/completions" \
             --config "$LLM_WEB_SPEC_DIR/headers" --data-binary "@$LLM_WEB_SPEC_DIR/request"
     ) > "$LLM_WEB_SPEC_DIR/sse" 2>/dev/null &
@@ -492,6 +494,7 @@ llm_open_stream() {
         if [ "$rc" = 0 ] || [ "$LLM_WEB_SPEC_PUBLISHED" = 1 ]; then return "$rc"; fi
     fi
     req=$(llm_build_request "$LLM_WEB_MESSAGES") || return 1
+    llm_web_mark llm_req
     curl -fsS -N -m "$LLM_DIRECT_TIMEOUT" "$LLM_API_BASE/chat/completions" \
         -H "Authorization: Bearer $LLM_API_KEY" -H 'Content-Type: application/json' -d "$req" 2>/dev/null
     rc=$?

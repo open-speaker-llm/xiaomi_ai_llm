@@ -173,7 +173,7 @@ latency_report
         self.assertIn('player_underrun=3 player_underrun_ms=22.750', out)
         self.assertIn('player_underrun=4 player_underrun_ms=-', out)
 
-    def test_near_first_pcm_only_reclassifies_wait_sized_underruns(self):
+    def test_first_pcm_boundary_reclassifies_without_using_duration(self):
         for first, opened, observed, duration in ((5200, 2770, 5210, 1910695),
                                                   (5170, 2780, 5190, 1874129)):
             with self.subTest(first=first):
@@ -188,14 +188,37 @@ player_underrun_count 3
 player_underrun_us {duration * 2 + 25000}
 '''
                 out, _, _ = self.run_shell('latency_report', marks)
-                self.assertIn('player_underrun=2', out)
-                self.assertIn(f'player_prestart_underrun_ms={duration / 1000:.3f}', out)
+                self.assertIn('player_underrun=1', out)
+                self.assertIn(f'player_prestart_underrun_ms={(duration + 25000) / 1000:.3f}', out)
                 self.assertIn('player_underrun_phase=prestart', out)
 
+    def test_filler_and_answer_commit_boundary_underruns_are_excluded(self):
+        marks = '''wake 1000
+fifo_commit1 4200
+filler_commit 4200
+filler_pcm_bytes 96000
+answer_commit 7860
+player_underrun_at 4240 2000000
+player_underrun_at 7760 1000000
+player_underrun_at 7880 1700000
+player_underrun_at 7961 200000
+player_underrun_count 4
+player_underrun_us 4900000
+'''
+        out, _, _ = self.run_shell('latency_report', marks)
+        self.assertIn('player_underrun=1 player_underrun_ms=200.000', out)
+        self.assertIn('player_prestart_underrun_ms=2000.000 player_gap_underrun_ms=2700.000', out)
+
     def test_missing_reversed_and_duplicate_marks(self):
-        out, _, _ = self.run_shell('latency_report', 'llm_req 1000\nllm_first_token 900\nllm_req 500\n')
+        out, _, _ = self.run_shell('latency_report', 'llm_req 1100\nllm_first_token 900\nllm_req 1000\n')
         for field in ('wake→route=-', 'ttft=-', 'tts1=-', 'pcm1=-', 'plan=-', 'search=-', 'filler=-', 'web=off'):
             self.assertIn(field, out)
+
+    def test_earliest_actual_request_wins_when_planner_and_candidate_race(self):
+        marks = MARKS + 'llm_req 1680\nllm_prepare 1660\nllm_entry 1620\nnative_freeze 1610\n'
+        out, _, _ = self.run_shell('latency_report', marks)
+        self.assertIn('route→req=0.080', out)
+        self.assertIn('freeze→llm_entry=0.010 llm_entry→prepare=0.040 llm_prepare→req=0.020', out)
 
     def test_web_action_cannot_echo_arbitrary_content(self):
         out, _, _ = self.run_shell('''

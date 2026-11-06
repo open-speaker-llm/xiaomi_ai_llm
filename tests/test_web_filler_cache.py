@@ -12,10 +12,12 @@ from tests.test_latency_trace import HELPERS, functions
 
 class WebFillerCacheTest(unittest.TestCase):
     def pipeline(self, cache=1, size=None, change='', shell=None, *, answer='正常回答。第二句话。',
-                 search=True, settings='', answer_pcm=1024):
+                 search=True, settings='', answer_pcm=1024, pieces=None):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / 'uptime').write_text('1.50 0\n')
+            if pieces is not None:
+                (root / 'pieces').write_text('\n'.join(pieces) + '\n')
             if shell:
                 (root / 'awk').symlink_to(shell[0])
             code = embedded_protocol() + '\n' + embedded_web() + '\n' + functions(
@@ -50,6 +52,13 @@ llm_aplay() { for arg do last="$arg"; done; cat "$last" >> "$TEST_DIR/played"; }
 llm_open_stream() {
     LLM_WEB_ACTION=off
     if [ "$SEARCH" = 1 ]; then LLM_WEB_ACTION=search; llm_web_filler; fi
+    if [ -f "$TEST_DIR/pieces" ]; then
+        while IFS= read -r piece; do
+            printf 'data: {"choices":[{"delta":{"content":"%s"}}]}\n\n' "$(printf '%s' "$piece" | json_escape)"
+        done < "$TEST_DIR/pieces"
+        printf 'data: [DONE]\n\n'
+        return
+    fi
     printf 'data: {"choices":[{"delta":{"content":"%s"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n' \
         "$(printf '%s' "$ANSWER" | json_escape)"
 }
@@ -98,6 +107,23 @@ cp "$TEST_DIR/stream/marks" "$TEST_DIR/marks2"
 
     def test_long_search_body_is_split_with_inline_and_cached_filler(self):
         self.check_long_search_split()
+
+    def test_tokenwise_news_date_falls_back_to_closed_book_title(self):
+        prefix = '根据央视网《天下财经》和《正点财经》'
+        rest = '2026年11月6日的节目指出市场回暖。'
+        answer = prefix + rest
+        result = self.pipeline(answer=answer, pieces=list(answer))
+        self.assertEqual(result['tts'].splitlines(), ['搜索中，请稍等。', prefix, rest, prefix, rest])
+        self.assertEqual(result['history'], (answer + '\n') * 2)
+
+    def test_tokenwise_cut_never_divides_number_unit_or_model(self):
+        for token in ('11月6日', '12:30', '3.14万元', '50%', 'GPT-5', 'Qwen3'):
+            with self.subTest(token=token):
+                answer = '甲' * 23 + token + '继续介绍。'
+                result = self.pipeline(answer=answer, search=False, pieces=list(answer))
+                segments = result['tts'].splitlines()
+                self.assertEqual(sum(token in segment for segment in segments), 2)
+                self.assertEqual(''.join(segments), answer * 2)
 
     @unittest.skipUnless(shutil.which('busybox'), 'BusyBox ash/awk unavailable on host')
     def test_busybox_long_search_body_is_split(self):
