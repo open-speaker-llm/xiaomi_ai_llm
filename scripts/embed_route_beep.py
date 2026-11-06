@@ -19,7 +19,7 @@ def pcm(start, stop):
     for i in range(start, stop):
         edge = min(1, i / FADE, (TONE - 1 - i) / FADE)
         envelope = (1 - math.cos(math.pi * edge)) / 2
-        sample = round(0.18 * 32767 * envelope * math.sin(2 * math.pi * (i % PERIOD) / PERIOD))
+        sample = round(0.32 * 32767 * envelope * math.sin(2 * math.pi * (i % PERIOD) / PERIOD))
         samples.append(sample)
     return struct.pack(f"<{len(samples)}h", *samples)
 

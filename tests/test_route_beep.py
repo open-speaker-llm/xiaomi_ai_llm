@@ -57,9 +57,17 @@ wait_native_followup_text() {
 send_text_and_play() { send_text_native "$@"; }
 for stub in set_state set_busy apply_llm_master_volume record_llm_query finish_llm_playback \
     resume_native_player pause_native_asr resume_native_asr led_feedback_native_listening \
-    led_feedback_llm_playing led_feedback_llm_accept led_feedback_llm_followup_listening \
+    led_feedback_llm_followup_listening \
     led_feedback_followup_asr_ok led_feedback_error led_off handle_native_success_speak \
     native_followup_mark_multirounds; do eval "$stub() { :; }"; done
+led_feedback_llm_accept() { echo accept >> "$TEST_DIR/led"; }
+led_feedback_llm_playing() {
+    echo playing >> "$TEST_DIR/led"
+    if [ "$MODE" = wake ] && [ "$LLM_ROUTE_BEEP" = 1 ] && [ "$(cat "$LLM_ROUTE_BEEP_FILE" 2>/dev/null)" = BB ]; then
+        # The cue worker must launch even while the green animation is starting.
+        until [ -f "$TEST_DIR/player_started" ]; do sleep 0.01; done
+    fi
+}
 llm_build_messages() { echo stub; }
 llm_open_stream() {
     : > "$TEST_DIR/request"
@@ -78,6 +86,7 @@ llm_aplay() {
     fi
     # Delay opening until the request starts and consumption until the filler
     # is ready. The producer must neither wait for FIFO open nor drain the cue.
+    : > "$TEST_DIR/player_started"
     until [ -f "$TEST_DIR/request" ]; do sleep 0.01; done
     exec 9<"$fifo"
     until [ -f "$TEST_DIR/stream/0001.rdy" ]; do command sleep 0.01; done
@@ -101,11 +110,13 @@ exit 0
             self.assertEqual(result.stderr, '')
             self.assertFalse((root / 'early').exists())
             played = (root / 'played').read_bytes() if (root / 'played').exists() else b''
-            return played, result.stdout
+            led = (root / 'led').read_text().splitlines() if (root / 'led').exists() else []
+            return played, result.stdout, led
 
     def test_wake_beep_precedes_ready_filler_and_answer(self):
-        audio, log = self.run_round('wake')
+        audio, log, led = self.run_round('wake')
         self.assertEqual(audio, b'BBFFAA')
+        self.assertEqual(led, ['playing'])
         self.assertIn('wake→beep=0.000 beep=played', log)
 
     def test_builtin_matches_generator_and_uses_default_switches(self):
@@ -117,11 +128,11 @@ exit 0
         self.assertEqual(len(pcm), 11520)
         self.assertEqual(pcm[:3840], pcm[7680:])
         self.assertEqual(pcm[3840:7680], bytes(3840))
-        audio, _ = self.run_round('wake', enabled='', followup='', builtin=True)
+        audio, _, _ = self.run_round('wake', enabled='', followup='', builtin=True)
         self.assertEqual(audio, pcm + b'FFAA')
 
     def test_off_preserves_pcm_sequence(self):
-        audio, log = self.run_round('wake', enabled='0')
+        audio, log, _ = self.run_round('wake', enabled='0')
         self.assertEqual(audio, b'FFAA')
         self.assertIn('wake→beep=- beep=off', log)
 
@@ -137,7 +148,7 @@ exit 0
     def test_missing_and_invalid_assets_skip_without_losing_answer(self):
         for asset in (None, b'odd', b'RIFF' + bytes(44)):
             with self.subTest(asset=asset):
-                audio, log = self.run_round('wake', asset=asset)
+                audio, log, _ = self.run_round('wake', asset=asset)
                 self.assertEqual(audio, b'FFAA')
                 self.assertIn('wake→beep=- beep=skipped', log)
 
@@ -145,6 +156,6 @@ exit 0
         self.assertEqual(self.run_round('wake', trace='0')[0], b'BBFFAA')
 
     def test_failed_freeze_skips_beep(self):
-        audio, log = self.run_round('freeze_failed')
+        audio, log, _ = self.run_round('freeze_failed')
         self.assertEqual(audio, b'FFAA')
         self.assertIn('wake→beep=- beep=skipped', log)
