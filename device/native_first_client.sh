@@ -192,6 +192,11 @@ DEVICE_TTS_UA="${DEVICE_TTS_UA:-}"            # 留空用 ettsc 内置默认
 DEVICE_TTS_ORIGIN="${DEVICE_TTS_ORIGIN:-}"    # 留空用 ettsc 内置默认
 # 句级流式：1=LLM 边流式输出边按句合成播放（首句即开声，LLM 慢时收益大）；0=整段收完再合成播放。
 DEVICE_TTS_STREAM="${DEVICE_TTS_STREAM:-1}"
+# 普通与联网正文共用首段提前切分；搜索垫话不计入正文段数。
+STREAM_FIRST_SPLIT_ENABLED="${STREAM_FIRST_SPLIT_ENABLED:-1}"
+STREAM_FIRST_SPLIT_MIN_CHARS="${STREAM_FIRST_SPLIT_MIN_CHARS:-8}"
+STREAM_FIRST_SPLIT_MAX_CHARS="${STREAM_FIRST_SPLIT_MAX_CHARS:-24}"
+STREAM_EARLY_SPLIT_SENTENCES="${STREAM_EARLY_SPLIT_SENTENCES:-1}"
 # 实验：LLM 生成期间提前握手，首段复用一次；默认关闭。
 DEVICE_TTS_PREWARM="${DEVICE_TTS_PREWARM:-0}"
 TTS_PREWARM_PID=""
@@ -3518,7 +3523,7 @@ stream_play_worker() {
     return 0
 }
 
-# 句级流式（仿 Mac Server StreamingPipeline）：LLM 边流式输出边按 。！？ 切句。
+# 句级流式：正文首段可提前切分，后续段按 。！？ 切句。
 # 生产者切句并生成 PCM 或原生补播任务，再置 NNNN.rdy；后台消费者顺序播放，
 # 使"合成下一句"与"播放当前句"重叠；下句未就绪时仍可能停顿。
 # 产出：LLM_DIRECT_TTFT(首字s)/LLM_DIRECT_GEN_S(LLM流时长s)/LLM_STREAM_FIRST_SOUND(首声s)/LLM_STREAM_SEGS(成功句数)
@@ -3528,11 +3533,25 @@ llm_stream_answer_and_play() {
     local t0="$3"
     local messages t_req seq n play_pid play_rc native_segs transport_rc stream_status split_ms
     local wd="/tmp/native_first_stream"
+    local early="${STREAM_FIRST_SPLIT_ENABLED:-1}" early_count="${STREAM_EARLY_SPLIT_SENTENCES:-1}"
+    local split_min="${STREAM_FIRST_SPLIT_MIN_CHARS:-8}" split_max="${STREAM_FIRST_SPLIT_MAX_CHARS:-24}"
+    local split_invalid=0 first_pcm pcm_bytes pcm_limit
     LLM_DIRECT_ANSWER=""
 
     if [ -z "$LLM_API_KEY" ]; then
         log "[LLM-NATIVE] 缺少 LLM_API_KEY（在 /data/native_first.env 配对应后端的 API key）"
         return 1
+    fi
+    case "$early" in 0|1) ;; *) early=1; split_invalid=1 ;; esac
+    case "$early_count" in [1-9]|[1-9][0-9]|[1-9][0-9][0-9]) ;; *) early_count=1; split_invalid=1 ;; esac
+    case "$split_min" in [1-9]|[1-9][0-9]|[1-9][0-9][0-9]) ;; *) split_min=8; split_invalid=1 ;; esac
+    case "$split_max" in [1-9]|[1-9][0-9]|[1-9][0-9][0-9]) ;; *) split_max=24; split_invalid=1 ;; esac
+    if [ "$split_min" -gt "$split_max" ]; then
+        split_min=8; split_max=24; split_invalid=1
+    fi
+    if [ "$split_invalid" = 1 ] && [ "${STREAM_SPLIT_CONFIG_WARNED:-0}" != 1 ]; then
+        STREAM_SPLIT_CONFIG_WARNED=1
+        log '[WARN] 首段切分配置无效，使用默认值'
     fi
     [ -z "${TTS_PREWARM_PID:-}" ] || tts_prewarm_stop
     rm -rf "$wd" 2>/dev/null
@@ -3569,7 +3588,7 @@ llm_stream_answer_and_play() {
     play_pid=$!
 
     # 生产者管道：LLM 流 → 抽 content → tee 原始(供历史) → awk 即时切句 → 逐句 ettsc 合成。
-    # awk 首片写 ttft，END 写 genend(=LLM 流结束时刻)；切句规则与服务端一致(。！？，含标点)。
+    # awk 首片写 ttft，END 写 genend(=LLM 流结束时刻)。
     seq=0
     { llm_open_stream "$messages"; printf '%s\n' "$?" > "$wd/transport";
       if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
@@ -3580,7 +3599,8 @@ llm_stream_answer_and_play() {
     } \
         | llm_sse_content "$wd/status" \
         | tee "$wd/raw" \
-        | awk -v wd="$wd" -v filler="$LLM_WEB_FILLER" -v trace="${LATENCY_TRACE_ENABLED:-0}" '
+        | LC_ALL=C awk -v wd="$wd" -v filler="$LLM_WEB_FILLER" -v trace="${LATENCY_TRACE_ENABLED:-0}" \
+            -v early="$early" -v min_chars="$split_min" -v max_chars="$split_max" -v early_count="$early_count" '
             NR == 1 && filler != "" && $0 == filler {
                 getline up < "/proc/uptime"; close("/proc/uptime"); split(up, a, " ");
                 print a[1] > (wd "/filler_t"); close(wd "/filler_t");
@@ -3589,13 +3609,47 @@ llm_stream_answer_and_play() {
             }
             !first_answer { getline up < "/proc/uptime"; close("/proc/uptime"); split(up, a, " "); print a[1] > (wd "/ttft"); close(wd "/ttft");
                 if (trace == 1) { printf "llm_first_token %d\n", a[1]*1000 >> (wd "/marks"); close(wd "/marks") }
+                # 固定联网错误提示走同一 SSE，沿用原切句。
+                if (early == 1) {
+                    if ((getline notice < (wd "/no_history")) >= 0) early=0
+                    close(wd "/no_history")
+                }
                 first_answer=1 }
-            { buf = buf $0
-              do { p = nb(buf); if (p > 0) { s = substr(buf, 1, p); buf = substr(buf, p + 1); gsub(/^[ \t]+|[ \t]+$/, "", s); if (length(s) > 3) { print s; fflush() } } } while (p > 0) }
+            {
+                buf = buf $0
+                while (length(buf) > 0) {
+                    flexible = early == 1 && emitted < early_count
+                    if (flexible) sub(/^[ \t]+/, "", buf)
+                    p = flexible ? early_break(buf) : nb(buf)
+                    if (p == 0) break
+                    s = substr(buf, 1, p)
+                    buf = substr(buf, p + 1)
+                    gsub(/^[ \t]+|[ \t]+$/, "", s)
+                    if (length(s) > 3 || (flexible && s != "" && s != "。" && s != "！" && s != "？")) {
+                        print s
+                        fflush()
+                        emitted++
+                    }
+                }
+            }
             END { getline ue < "/proc/uptime"; close("/proc/uptime"); split(ue, e, " "); print e[1] > (wd "/genend"); close(wd "/genend");
                   if (trace == 1) { printf "llm_done %d\n", e[1]*1000 >> (wd "/marks"); close(wd "/marks") }
                   getline status < (wd "/status"); close(wd "/status");
                   gsub(/^[ \t]+|[ \t]+$/, "", buf); if (status == "complete" && length(buf) > 0) { print buf; fflush() } }
+            # C locale 下按 UTF-8 起始字节计字符，并保留完整码点。
+            function early_break(t,   i, j, n, c, recent) {
+                for (i = 1; i <= length(t); i = j) {
+                    j = i + 1
+                    while (substr(t, j, 1) ~ /[\200-\277]/) j++
+                    c = substr(t, i, j - i)
+                    n++
+                    if (c == "。" || c == "！" || c == "？") return j - 1
+                    if (n >= min_chars && index("，、；：,;", c)) return j - 1
+                    if (c == " " || c == "\t" || c == "，" || c == ",") recent = j - 1
+                    if (n >= max_chars) return recent ? recent : j - 1
+                }
+                return 0
+            }
             function nb(t,   x, y, z, m) { x = index(t, "。"); y = index(t, "！"); z = index(t, "？"); m = 0; if (x > 0) m = x; if (y > 0 && (m == 0 || y < m)) m = y; if (z > 0 && (m == 0 || z < m)) m = z; if (m == 0) return 0; return m + 2 }
         ' \
         | while IFS= read -r sentence; do
@@ -3617,6 +3671,22 @@ llm_stream_answer_and_play() {
     : > "$wd/done"
     wait "$play_pid"
     play_rc=$?
+    if [ "$early" = 1 ] && [ ! -f "$wd/no_history" ]; then
+        first_pcm="$wd/0001.pcm"
+        if [ -s "$wd/filler_t" ] && [ ! -f "$wd/web_filler_cached" ] && [ ! -f "$wd/web_filler_direct" ]; then
+            first_pcm="$wd/0002.pcm"
+        fi
+        if [ -s "$first_pcm" ]; then
+            # 以 8 字/秒估算首段时长，给单声道 S16_LE PCM 两倍余量。
+            pcm_limit=$(LC_ALL=C awk -v n="$split_max" -v rate="$DEVICE_TTS_PCM_RATE" '
+                BEGIN { if (rate ~ /^[0-9]+$/ && rate > 0 && rate <= 192000) printf "%.0f", n * rate * 2 * 2 / 8 }
+            ')
+            pcm_bytes=$(wc -c < "$first_pcm" | tr -d ' ')
+            if [ -n "$pcm_limit" ] && [ "$pcm_bytes" -gt "$pcm_limit" ]; then
+                log "[WARN] sent1_too_long pcm_bytes=$pcm_bytes limit_bytes=$pcm_limit"
+            fi
+        fi
+    fi
     if [ -n "${TTS_EARLY_FILLER_JOB:-}" ]; then
         ( : > "$TTS_EARLY_FILLER_JOB/cancel" ) 2>/dev/null || :
         [ ! -f "$TTS_EARLY_FILLER_JOB/done" ] || rm -rf "$TTS_EARLY_FILLER_JOB"

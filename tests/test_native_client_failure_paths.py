@@ -325,7 +325,7 @@ printf 'RESULT=%s\n' "$?"
 
     def test_stream_ttft_ignores_first_filler_line(self):
         source = (ROOT / 'device/native_first_client.sh').read_text()
-        awk = re.search(r"\| awk -v wd=\"\$wd\" -v filler=\"\$LLM_WEB_FILLER\" -v trace=\"\$\{LATENCY_TRACE_ENABLED:-0\}\" '(.*?)' \\",
+        awk = re.search(r"awk -v wd=\"\$wd\" -v filler=\"\$LLM_WEB_FILLER\" [^']*'(.*?)' \\",
                         source, re.S).group(1)
         with tempfile.TemporaryDirectory() as temp:
             # Replace only the clock IO in the actual production awk fragment.
@@ -333,7 +333,9 @@ printf 'RESULT=%s\n' "$?"
             awk = awk.replace('getline ue < "/proc/uptime"', 'ue = ++clock')
             Path(temp, 'status').write_text('complete')
             filler = '搜索中，请稍等。'
-            run = subprocess.run(['awk', '-v', 'wd='+temp, '-v', 'filler='+filler, awk],
+            run = subprocess.run(['awk', '-v', 'wd='+temp, '-v', 'filler='+filler,
+                                  '-v', 'early=1', '-v', 'early_count=1', '-v', 'min_chars=8',
+                                  '-v', 'max_chars=24', awk],
                                  input=filler+'\n正常回答。\n', capture_output=True, text=True,
                                  env={**os.environ, 'LC_ALL': 'C'}, timeout=3)
             self.assertEqual(run.returncode, 0, run.stderr)

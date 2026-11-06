@@ -74,6 +74,19 @@ DeepSeek 默认 `LLM_THINKING=disabled`，GLM 使用 `LLM_REASONING_EFFORT=low`�
 
 本机现有的 Dirac 播放适配、音量恢复与参考通道各有固件限制；音效的构建和验证见 [Dirac 组件](../../device/dirac/README.md)，出现音量异常从[排障](../runbooks/troubleshooting.md#7-llm-音量忽大忽小)进入。
 
+### TTS 正文首段提前切分
+
+| 配置 | 默认值 | 含义 |
+|---|---|---|
+| `STREAM_FIRST_SPLIT_ENABLED` | `1` | `1` 开启，`0` 恢复原有 `。！？` 切句 |
+| `STREAM_FIRST_SPLIT_MIN_CHARS` | `8` | 到达此字符数后允许在 `，、；：,;` 处切 |
+| `STREAM_FIRST_SPLIT_MAX_CHARS` | `24` | 达到上限时优先在最近的空格或逗号处切，其次按完整 UTF-8 字符硬切 |
+| `STREAM_EARLY_SPLIT_SENTENCES` | `1` | 从正文开始应用提前切分的段数，之后恢复 `。！？` |
+
+适用于 native + device 句级流式，普通和搜索正文共用规则，垫话不占正文段数。三个数值键接受无前导零的整数 1–999，最小字符数不得大于上限。非法值使用对应默认值，范围倒置时恢复两个字符阈值，客户端至多告警一次。已有配置可以继续使用。
+
+开启时检查正文首段的实际 PCM 字节数。诊断按 8 字/秒估算时长，以单声道 S16_LE 采样率换算字节并留两倍余量，默认 24 字和 24 kHz 对应 288000 字节。超过预算记录 `[WARN] sent1_too_long`，播放照常继续。
+
 ### TTS 首段预连接（实验）
 
 `DEVICE_TTS_PREWARM=0` 默认关闭，允许 `0/1`；非法值启动告警一次并使用 `0`。仅作用于 native + device 句级流式路径。开启后，在 LLM 请求开始前异步启动同一 `ettsc` 二进制的 `prewarm` 模式：提前完成 TCP/TLS/WebSocket 握手，保留连接等待首个待合成段，使用该连接合成一次后退出。首段可能是未命中 PCM 缓存的搜索垫话；缓存已命中时用于答案首段。后续段继续使用原一次性模式。
