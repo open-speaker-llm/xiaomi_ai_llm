@@ -121,6 +121,21 @@ start_native_asr
         self.assertIn('firmware ABI hash mismatch', result.stdout)
         self.assertNotIn('unexpected-mount', result.stdout)
 
+    def test_quiet_native_turn_resumes_without_draining_the_queue(self):
+        result = self.shell(self.functions('finish_llm_playback') + '''
+begin_native_queue_drain() { echo mute; }
+resume_native_player() { echo "resume=$1"; }
+restore_llm_master_volume() { echo restore; }
+end_native_queue_drain() { echo unmute; }
+clear_busy() { echo clear; }
+finish_llm_playback quiet
+finish_llm_playback
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(),
+                         ['resume=0', 'restore', 'clear', 'mute', 'resume=1',
+                          'restore', 'unmute', 'clear'])
+
     def test_followup_preserves_llm_volume_but_restores_native_volume(self):
         for rc in (0, 124, 125):
             with self.subTest(rc=rc), tempfile.TemporaryDirectory() as temp:

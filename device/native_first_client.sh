@@ -1564,6 +1564,7 @@ reset_native_result() {
     RESULT_ACTION=""
     RESULT_QUERY=""
     RESULT_SPEAK=""
+    RESULT_DIRECT_QUIET=0
 }
 
 select_native_result_source() {
@@ -1689,7 +1690,7 @@ direct_llm_query() {
 
 get_native_result_aivs_lab() {
     local new_lines dialog_id dialog_lines raw_query raw_speak
-    local last_dialog failure_dialog direct_owner direct_id asr_ms mute_ms
+    local last_dialog failure_dialog direct_owner direct_id asr_ms mute_ms gate_mode
     local endpoint_file endpoint_record endpoint_magic endpoint_owner endpoint_nonce endpoint_tag endpoint_status endpoint_extra
 
     reset_native_result
@@ -1749,12 +1750,13 @@ EOF
     [ -n "$raw_speak" ] && RESULT_SPEAK=$(printf '%s\n' "$raw_speak" | json_text_unescape)
 
     if [ -n "$RESULT_QUERY" ] && [ -n "${AIVS_DIRECT_DIALOG:-}" ] &&
-        read -r direct_owner direct_id asr_ms mute_ms 2>/dev/null < "$AIVS_DIRECT_DIALOG" &&
+        read -r direct_owner direct_id asr_ms mute_ms gate_mode 2>/dev/null < "$AIVS_DIRECT_DIALOG" &&
         [ "$direct_owner" = "$$" ] && [ "$direct_id" = "$dialog_id" ]; then
         RESULT_TS=$(date +%s)
         RESULT_DOMAIN=michat
         RESULT_ACTION=model
         RESULT_SOURCE=aivs_lab_direct
+        [ "$gate_mode" != quiet ] || RESULT_DIRECT_QUIET=1
         echo "$dialog_id" > "$AIVS_LAB_LAST_DIALOG_FILE"
         if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
             latency_mark asr_text_ready "$asr_ms"
@@ -2244,7 +2246,12 @@ wait_native_live_asr() {
     FOLLOWUP_TEXT=""
     # Release the frozen player's old queue before opening the microphone, so a
     # real wake can immediately use native audio without a later stop/reset.
-    finish_llm_playback
+    if [ "${LLM_NATIVE_QUEUE_QUIET:-0}" = 1 ]; then
+        finish_llm_playback quiet
+    else
+        finish_llm_playback
+    fi
+    LLM_NATIVE_QUEUE_QUIET=0
     # Native audio is restored above, but the next LLM turn belongs to the
     # same conversation. Re-reading media volume would raise later turns.
     LLM_SESSION_MASTER_TARGET="$session_master"
@@ -2255,22 +2262,24 @@ wait_native_live_asr() {
         case "$timeout" in [5-9]|[12][0-9]|30) ;; *) timeout=8 ;; esac
     fi
     set_state "FOLLOWUP_LISTENING"
-    if [ -n "${CURRENT_SESSION_ID:-}" ] && [ "${DEVICE_TTS_PERSISTENT:-0}" = 1 ]; then
-        tts_persistent_ensure "$CURRENT_SESSION_ID"
-        # An idle worker can retain its process after closing its socket.
-        # The existing silent filler job exercises the socket ahead of speech.
-        tts_early_filler_start "$CURRENT_SESSION_ID"
-    fi
-    if route_beep_allowed; then route_beep_begin || :; fi
-    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark followup_prewarm
     led_feedback_llm_followup_listening
     log "[FOLLOWUP] native live listening; cloud ASR-only; no wakeword required"
     local listen_ms
     listen_ms=$(monotonic_ms)
     FOLLOWUP_TIMEOUT_START_MS=""
     [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark followup_record_start "$listen_ms"
-    "$NATIVE_ASR_CTL" listen "$$" "$timeout" > /tmp/native_followup_text
+    "$NATIVE_ASR_CTL" listen "$$" "$timeout" > /tmp/native_followup_text &
+    NATIVE_ASR_LISTEN_PID=$!
+    if [ -n "${CURRENT_SESSION_ID:-}" ] && [ "${DEVICE_TTS_PERSISTENT:-0}" = 1 ]; then
+        tts_persistent_ensure "$CURRENT_SESSION_ID"
+        # A silent job also refreshes a socket the idle worker has closed.
+        tts_early_filler_start "$CURRENT_SESSION_ID"
+    fi
+    if route_beep_allowed; then route_beep_begin || :; fi
+    [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_mark followup_prewarm
+    wait "$NATIVE_ASR_LISTEN_PID"
     ret=$?
+    NATIVE_ASR_LISTEN_PID=""
     if [ "${LATENCY_TRACE_ENABLED:-0}" = 1 ]; then
         latency_report
         latency_discard
@@ -2382,10 +2391,17 @@ end_native_queue_drain() {
 
 finish_llm_playback() {
     [ -z "${ROUTE_BEEP_DIR:-}" ] || route_beep_end
-    begin_native_queue_drain
-    resume_native_player 1
-    restore_llm_master_volume
-    end_native_queue_drain
+    if [ "${1:-}" = quiet ]; then
+        # The synchronous SDK gate (or ASR-only followup) prevented native
+        # audio for this turn from reaching the player in the first place.
+        resume_native_player 0
+        restore_llm_master_volume
+    else
+        begin_native_queue_drain
+        resume_native_player 1
+        restore_llm_master_volume
+        end_native_queue_drain
+    fi
     clear_busy
 }
 
@@ -4980,6 +4996,7 @@ llm_stream_answer_and_play() {
 
     # 每句均已由消费者按顺序播完（含原生兜底）；不再重复播报整段。
 
+    [ ! -s "$wd/native_segs" ] || LLM_NATIVE_QUEUE_QUIET=0
     [ ! -f "$wd/no_history" ] || return 0
     llm_history_commit "$sid" "$user" "$LLM_DIRECT_ANSWER" || {
         log "[HISTORY] 完整回答未能安全保存，结束本轮"
@@ -5434,6 +5451,7 @@ classify_native_dialog_text() {
 }
 
 play_native_dialog_prompt() {
+    LLM_NATIVE_QUEUE_QUIET=0
     [ -z "${ROUTE_BEEP_DIR:-}" ] || route_beep_end
     local text="$1" wd=/tmp/native_first_input_prompt play_pid rc=0
     set_state "LLM_SPEAKING"
@@ -5522,7 +5540,7 @@ handle_llm_dialog() {
     local turn=1
     local ret
     local last_dialog route_beep_turn="${route_beep_turn:-}"
-    local LLM_END_BEEP_PLAYED=0
+    local LLM_END_BEEP_PLAYED=0 LLM_NATIVE_QUEUE_QUIET=0
 
     CURRENT_SESSION_ID="$session_id"
     NATIVE_DIALOG_HANDED_OFF=0
@@ -5591,6 +5609,10 @@ handle_llm_dialog() {
     fi
 
     if [ "$FOLLOWUP_RECORD_MODE" = "native_live" ] && is_system1_root; then
+        if [ "${RESULT_DIRECT_QUIET:-0}" = 1 ] && [ "$LLM_PIPELINE" = native ] &&
+            [ "$TTS_ENGINE" = device ] && [ "$DEVICE_TTS_STREAM" = 1 ]; then
+            LLM_NATIVE_QUEUE_QUIET=1
+        fi
         local next_text="$first_text" saved_dup="$SUPPRESS_DUP_SECONDS" is_followup=0
         while true; do
             collect_native_dialog_text "$next_text" "$is_followup" || break
@@ -5601,6 +5623,10 @@ handle_llm_dialog() {
             else
                 next_text="$NATIVE_DIALOG_TEXT"
                 if [ "$is_followup" = 1 ]; then
+                    if [ "$LLM_PIPELINE" = native ] && [ "$TTS_ENGINE" = device ] &&
+                        [ "$DEVICE_TTS_STREAM" = 1 ]; then
+                        LLM_NATIVE_QUEUE_QUIET=1
+                    fi
                     route_beep_turn=followup
                     [ "${LATENCY_TRACE_ENABLED:-0}" != 1 ] || latency_begin followup
                 fi
@@ -5911,6 +5937,10 @@ handle_wakeup() {
 }
 
 cleanup() {
+    if [ -n "${NATIVE_ASR_LISTEN_PID:-}" ]; then
+        kill "$NATIVE_ASR_LISTEN_PID" 2>/dev/null || :
+        wait "$NATIVE_ASR_LISTEN_PID" 2>/dev/null || :
+    fi
     [ -z "${ROUTE_BEEP_DIR:-}" ] || route_beep_end
     [ -z "${TTS_PERSISTENT_PID:-}" ] || tts_persistent_stop
     [ -z "${TTS_PREWARM_PID:-}" ] || tts_prewarm_stop

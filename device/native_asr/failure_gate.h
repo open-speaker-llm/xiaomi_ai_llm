@@ -12,8 +12,9 @@
 #define DIRECT_DIALOG_FILE CONTROL_DIR "/direct_dialog"
 static pthread_mutex_t failure_lock=PTHREAD_MUTEX_INITIALIZER;
 static char failure_observed[80], failure_blocked[64][80];
+static char direct_blocked[64][80];
 static uint32_t failure_owner, failure_deadline;
-static unsigned failure_cursor;
+static unsigned failure_cursor, direct_cursor;
 
 static int failure_id_valid(const char *id) {
     size_t n=strlen(id);
@@ -74,20 +75,30 @@ static void failure_observe_query(const char *id,const char *text) {
     char pattern[2048], direct[512]="";
     uint32_t owner=failure_policy(pattern,sizeof(pattern),direct,sizeof(direct));
     pthread_mutex_lock(&failure_lock);
-    for (unsigned i=0;i<64;i++) if (!strcmp(id,failure_blocked[i])) {
+    for (unsigned i=0;i<64;i++) if (!strcmp(id,direct_blocked[i])) {
         pthread_mutex_unlock(&failure_lock); return;
     }
     if (owner && *direct && gate_matches(direct,text)) {
         char record[128];
-        snprintf(record,sizeof(record),"%u %s %u %u\n",owner,id,seen,now_ms());
+        snprintf(record,sizeof(record),"%u %s %u %u quiet\n",owner,id,seen,now_ms());
         if (failure_publish(DIRECT_DIALOG_FILE,record)) {
-            snprintf(failure_blocked[failure_cursor++%64],80,"%s",id);
+            snprintf(direct_blocked[direct_cursor++%64],80,"%s",id);
             note("explicit DeepSeek Speak gate armed dialog=%s",id);
         }
     }
     snprintf(failure_observed,sizeof(failure_observed),"%s",owner?id:"");
     failure_owner=owner; failure_deadline=now_ms()+15000;
     pthread_mutex_unlock(&failure_lock);
+}
+static int direct_blocks_audio(const char *id) {
+    int blocked=0;
+    if (!failure_id_valid(id)) return 0;
+    pthread_mutex_lock(&failure_lock);
+    for (unsigned i=0;i<64;i++) if (!strcmp(id,direct_blocked[i])) {
+        blocked=1; break;
+    }
+    pthread_mutex_unlock(&failure_lock);
+    return blocked;
 }
 static int failure_block_speak(const char *id,const char *text) {
     if (!failure_id_valid(id)) return 0;

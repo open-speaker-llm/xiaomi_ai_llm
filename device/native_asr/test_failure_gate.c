@@ -69,8 +69,9 @@ int main(void) {
     failure_observe_query("direct","呼叫DeepSeek搜新闻");
     assert(!access(DIRECT_DIALOG_FILE,F_OK));
     file(NATIVE_BUSY_FILE,"");
-    assert(failure_block_speak("direct","好的，今天的新闻"));
-    assert(!failure_block_speak("next","现在是上午九点"));
+    assert(direct_blocks_audio("direct"));
+    assert(!direct_blocks_audio("volume"));
+    assert(!direct_blocks_audio("next"));
     unlink(NATIVE_BUSY_FILE); unlink(DIRECT_DIALOG_FILE);
     unlink(FAILURE_POLICY_FILE); unlink(FAILURE_ARMED_FILE);
     assert(!rmdir(CONTROL_DIR));

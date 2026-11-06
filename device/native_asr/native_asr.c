@@ -339,8 +339,13 @@ static int receive_json(int ok,void *json) {
                 pthread_mutex_unlock(&failure_lock);
             }
         }
-        if (!strcmp(ns,"SpeechSynthesizer") && !strcmp(name,"Speak") &&
-            failure_block_speak(id,string_member(payload,"text"))) return 0;
+        int speak=!strcmp(ns,"SpeechSynthesizer") && !strcmp(name,"Speak");
+        if ((speak || (!strcmp(ns,"AudioPlayer") && !strcmp(name,"Play"))) &&
+            direct_blocks_audio(id)) {
+            note("explicit DeepSeek audio suppressed instruction=%s dialog=%s",name,id);
+            return 0;
+        }
+        if (speak && failure_block_speak(id,string_member(payload,"text"))) return 0;
         return ok;
     }
     int finish=!strcmp(ns,"Dialog") && !strcmp(name,"Finish");
