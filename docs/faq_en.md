@@ -81,11 +81,21 @@ The optional computer service's [`config.yaml`](../config.yaml) also lists Claud
 
 Web search exists only when the speaker calls the model itself and `BACKEND=deepseek`. The default `LLM_WEB_SEARCH=auto` first decides whether the question needs live information (news, prices, opening status, a given page, and similar). If it does, the speaker calls DeepSeek's official Search or Fetch API and the answer names its sources. Other backends do not have this, and neither does the `server` pipeline. `off` disables both the decision and the search. On failure, an empty result, or an invalid decision, the client says exactly “暂时无法联网查询，请稍后再试。” and does not continue with an unchecked live answer. Each LLM turn adds one decision request. See [web search](reference/native-web-search.md).
 
+<a id="audio-feedback"></a>
+
+## How do I know the LLM is answering, and when it has finished?
+
+Green status feedback already existed. [PR #17](https://github.com/open-speaker-llm/xiaomi_ai_llm/pull/17), merged on 2026-11-06, adds audio cues: with on-device streaming, “dong-dong” and the green takeover light signal routing to the LLM. Web search first says “搜索中，请稍等。” (Searching, please wait). The green light rotates when the first filler or answer audio starts playing.
+
+A single “dong” after the complete answer signals that the turn has finished. With the boot1 real-time follow-up component installed and enabled, listening resumes after the end cue, with a steady green light; you can continue without the wake word. Do not rely on an end cue after playback failure or a new wake interrupting the turn. Firmware-managed `native_multirounds` skips the end cue.
+
+See [configuration](reference/configuration.md) for supported paths and controls: `LLM_ROUTE_BEEP` for the route cue, `LLM_END_BEEP` for the end cue, and `LLM_WEB_FILLER` for the search filler (empty disables it). Suppression of the native “欸” follow-up prompt is separate from the new “dong-dong” cue.
+
 <a id="followup"></a>
 
 ## Can I ask follow-ups without the wake word, and how does that end?
 
-Yes, but copying the example config is not enough. The matching component has to be installed and enabled. On boot1, after an LLM answer finishes playing, the speaker can listen again without another “小爱同学”, in the same context. The words still come from Xiaomi's cloud. A steady green light means it is ready for the next utterance. Native VAD decides when speech has stopped. The docs describe about 6 seconds of idle before exit. `NATIVE_ASR_LISTEN_TIMEOUT` defaults to 20 seconds and is a whole-turn safety limit, not an extra 20 seconds of waiting before you start speaking. Staying quiet ends the session.
+Yes, but copying the example config is not enough. The matching component has to be installed and enabled. On boot1, after an LLM answer finishes playing, the speaker can listen again without another “小爱同学”, in the same context. The words still come from Xiaomi's cloud. A steady green light means it is ready for the next utterance. Native VAD decides when speech has stopped. After the end cue, real-time follow-up uses `FOLLOWUP_TIMEOUT` (8 seconds by default) as the listening turn’s timeout limit. Native VAD or a session-end event may stop listening earlier; it is not a guaranteed full 8-second wait. Without the end-cue path, `NATIVE_ASR_LISTEN_TIMEOUT` (20 seconds by default) is the whole-turn safety timeout. Staying quiet ends the session.
 
 boot0 follow-up is a different path: record on the device, then Xiaomi file recognition. The status page lists it as experimental. The boot1 native follow-up component does not transfer onto boot0.
 

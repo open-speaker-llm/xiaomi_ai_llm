@@ -82,21 +82,28 @@
     <ol>
       <li>Wake XiaoAI. Speech recognition stays on Xiaomi's cloud.</li>
       <li>The on-speaker client chooses native XiaoAI or the LLM.</li>
-      <li>The speaker calls your cloud LLM by default. On the DeepSeek path it can first decide whether to search the web.</li>
+      <li>The speaker calls your cloud LLM by default. On-device streaming signals takeover with “dong-dong” and a green light. On the DeepSeek path, web search first says “搜索中，请稍等。” (Searching, please wait).</li>
       <li>EdgeTTS speaks the answer, with native XiaoAI TTS as a fallback.</li>
-      <li>After the follow-up component is installed, a steady green light means you can continue. Silence ends it. The five spoken exit phrases are off by default.</li>
+      <li>After a complete answer, a single “dong” signals the end. With boot1 real-time follow-up installed and enabled, listening resumes after the cue with a steady green light; continue without the wake word. Silence ends it. The five spoken exit phrases are off by default.</li>
     </ol>
+
+    <p>The green light already existed. Audio cues and search filler are included in <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/pull/17">PR #17</a>, merged on 2026-11-06. See <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/reference/configuration.md">configuration</a> for <code>LLM_ROUTE_BEEP</code>, <code>LLM_END_BEEP</code>, and <code>LLM_WEB_FILLER</code>. Firmware-managed <code>native_multirounds</code> skips the end cue.</p>
 
     <h2>Read next</h2>
     <ul>
       <li><a href="faq.html">FAQ</a> · <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/faq_en.md">docs/faq_en.md</a></li>
       <li><a href="../models.html">Tested hardware</a> (Chinese)</li>
       <li><a href="../install.html">Install notes</a> (Chinese; the command docs are in Chinese)</li>
+    </ul>
+
+    <h2>Code and videos</h2>
+    <ul>
       <li><a href="https://github.com/open-speaker-llm/xiaomi_ai_llm">GitHub</a></li>
+      <li><a href="https://www.bilibili.com/video/BV1ShjG6tEVz/">Bilibili episode 1: 小爱答不上来的问题，自动转给 DeepSeek：老音箱直连大模型，家电照常控制</a></li>
+      <li><a href="https://www.bilibili.com/video/BV1Vzja69ELB/">Bilibili episode 2: 「小爱同学，呼叫 DeepSeek！」老款小爱直连大模型，原理一次讲清</a></li>
+      <li><a href="https://www.bilibili.com/video/BV1bu4u6GEEL/">Bilibili episode 3: 让小爱联网搜最新新闻，播到一半喊&quot;开灯&quot;，灯亮了、新闻没停</a> (being re-edited) <!-- TODO: 重新投稿后替换 BV --></li>
+      <li>Bilibili episode 4: 小爱现在是不是大模型在回答？这次听声音就知道 — TODO (unpublished)</li>
       <li><a href="https://www.youtube.com/watch?v=1R8bhbN42KE">YouTube</a></li>
-      <li><a href="https://www.bilibili.com/video/BV1bu4u6GEEL/">Bilibili: live demo</a></li>
-      <li><a href="https://www.bilibili.com/video/BV1Vzja69ELB/">Bilibili: how it works</a></li>
-      <li><a href="https://www.bilibili.com/video/BV1ShjG6tEVz/">Bilibili: short overview</a></li>
     </ul>
     <footer>
       <p>MIT for this repo's own code. Not affiliated with Xiaomi. Opening the case and writing system partitions can brick the device and void the warranty.</p>

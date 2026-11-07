@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/github/license/open-speaker-llm/xiaomi_ai_llm)](LICENSE)
 [![Last commit](https://img.shields.io/github/last-commit/open-speaker-llm/xiaomi_ai_llm)](https://github.com/open-speaker-llm/xiaomi_ai_llm/commits)
 [![实测机型](https://img.shields.io/badge/实测机型-MDZ--25--DA%20%2F%20S12A-orange)](docs/reference/hardware.md)
-[![Bilibili](https://img.shields.io/badge/Bilibili-实机演示-00A1D6?logo=bilibili&logoColor=white)](https://www.bilibili.com/video/BV1bu4u6GEEL/)
+[![Bilibili](https://img.shields.io/badge/Bilibili-视频系列-00A1D6?logo=bilibili&logoColor=white)](#视频系列)
 [![YouTube](https://img.shields.io/badge/YouTube-Demo-FF0000?logo=youtube&logoColor=white)](https://www.youtube.com/watch?v=1R8bhbN42KE)
 
 [English](README_en.md) | 简体中文
@@ -25,16 +25,18 @@
 
 ![同一台音箱：小爱开灯 → 问 DeepSeek → 免唤醒追问](docs/assets/demo-native-vs-llm.gif)
 
-“搜一下最近三天的 AI 新闻，说明日期和来源。”音箱用 DeepSeek 联网查询，开始播报。播到一半，再喊“小爱同学，开灯”，灯亮了，新闻还在播。两段对话都录自同一台 **MDZ-25-DA / S12A**。
+## 视频系列
 
-[![观看实机演示：小爱音箱用 DeepSeek 搜新闻，播到一半我让它开灯](docs/assets/bilibili-news-demo.jpg)](https://www.bilibili.com/video/BV1bu4u6GEEL/)
+[![第 3 期：让小爱联网搜最新新闻，播到一半喊"开灯"，灯亮了、新闻没停](docs/assets/bilibili-news-demo.jpg)](https://www.bilibili.com/video/BV1bu4u6GEEL/) <!-- TODO: 重新投稿后替换 BV -->
 
-| 视频 | 时长 | 内容 |
-|---|---|---|
-| [B 站 · 实机演示](https://www.bilibili.com/video/BV1bu4u6GEEL/) | 3 分 06 秒 | 小爱搜新闻，边播边控灯 |
-| [B 站 · 六月原理篇](https://www.bilibili.com/video/BV1Vzja69ELB/) | 5 分 21 秒 | 老音箱如何保留原生能力、直连大模型 |
-| [B 站 · 原理速览](https://www.bilibili.com/video/BV1ShjG6tEVz/) | 1 分 35 秒 | 原理篇的短版 |
-| [YouTube · Demo](https://www.youtube.com/watch?v=1R8bhbN42KE) | 1 分 34 秒 | 面向海外观众 |
+| 期数 | 标题 | 讲什么 | 链接 |
+|---|---|---|---|
+| 1 | 小爱答不上来的问题，自动转给 DeepSeek：老音箱直连大模型，家电照常控制 | 直连大模型、原生优先 | [Bilibili](https://www.bilibili.com/video/BV1ShjG6tEVz/) |
+| 2 | 「小爱同学，呼叫 DeepSeek！」老款小爱直连大模型，原理一次讲清 | 原理 | [Bilibili](https://www.bilibili.com/video/BV1Vzja69ELB/) |
+| 3 | 让小爱联网搜最新新闻，播到一半喊"开灯"，灯亮了、新闻没停 | 联网搜新闻、播报中开灯（回声消除）；正在重剪 | [Bilibili](https://www.bilibili.com/video/BV1bu4u6GEEL/) <!-- TODO: 重新投稿后替换 BV --> |
+| 4 | 小爱现在是不是大模型在回答？这次听声音就知道 | 声音提示；未发布 | TODO（未发布） |
+
+[YouTube · Demo](https://www.youtube.com/watch?v=1R8bhbN42KE) — 面向海外观众
 
 > ℹ️ 主分支已支持 DeepSeek **联网搜索**。音箱直连 DeepSeek（`LLM_PIPELINE=native`、`BACKEND=deepseek`）时默认 `LLM_WEB_SEARCH=auto`：先判断问题是否需要实时信息（新闻、价格、营业状态、指定网页等）；需要时调用 DeepSeek 官方 Search/Fetch 接口，回答时说明来源。每轮会多一次判断请求，首声可能略慢；可设 `LLM_WEB_SEARCH=off` 关闭。详见 [联网搜索参考](docs/reference/native-web-search.md)。
 
@@ -81,12 +83,15 @@
 ```text
 小爱同学，开灯                         → 小米原生执行
 小爱同学，今天天气怎么样               → 小米原生回答
-小爱同学，问问 DeepSeek，介绍一下西湖   → 大模型回答并播报
-回答结束、绿灯续听时：那什么时候去呢？ → 沿用同一上下文继续聊
+小爱同学，让 DeepSeek 搜一下最新新闻    → 先播“搜索中，请稍等。”，再播回答
+小爱同学，问问 DeepSeek，介绍一下西湖   → “咚咚” + 绿灯，大模型回答并播报
+回答播完“咚”一声、绿灯续听时：那什么时候去呢？ → 不用唤醒词，沿用同一上下文继续聊
 保持安静                               → 结束追问，回到待机
 ```
 
-连续追问需要安装并启用对应组件。boot1 还可以增加首轮停顿续说：说到一半停约 1.5 秒，再轻声补充，音箱会继续收听；它按语音活动判停，不判断句意是否完整。
+连续追问需要安装并启用对应组件。boot1 还可以增加首轮停顿续说：说话中间停顿、卡壳，再轻声补充，音箱会继续收听（停顿保护有时限，见[逐步完善对话](docs/getting-started/conversation.md)）；它按语音活动判停，不判断句意是否完整。
+
+绿灯状态反馈原本就有；“咚咚”接管提示音、搜索垫话和结束“咚”声来自 2026-11-06 合并的 [PR #17](https://github.com/open-speaker-llm/xiaomi_ai_llm/pull/17)。接管提示音用于设备端流式 LLM 链路；启用 boot1 实时追问后，结束音播完再进入绿灯常亮的收听窗口，不用唤醒词即可追问。固件自行收音的 `native_multirounds` 模式跳过结束音。开关见[配置参考](docs/reference/configuration.md)：`LLM_ROUTE_BEEP`、`LLM_END_BEEP`、`LLM_WEB_FILLER`（空值关闭垫话）。
 
 新版客户端还提供可选的[追问结束语](docs/reference/configuration.md#用结束语退出追问)：显式启用后，在续听窗口说“结束对话”即可退出。默认关闭；这项源码增强的实机验收仍待执行，具体步骤见[逐轮测试说明](docs/testing/README.md)。
 
@@ -98,13 +103,16 @@
 flowchart LR
     A["🗣️ 小爱同学，……"] --> B{"音箱上的客户端<br/>判断谁来回答"}
     B -->|开灯、天气、音量等| C["小爱原生执行<br/>和原来一样"]
-    B -->|答不上来 / 点名问 DeepSeek| D["音箱直连大模型<br/>需要时先联网搜索"]
+    B -->|答不上来 / 点名问 DeepSeek| R["咚咚<br/>接管绿灯亮起"]
+    R --> D["音箱直连大模型<br/>需要搜索时先播：搜索中，请稍等。"]
     D --> E["EdgeTTS 逐句播报"]
-    E --> F["绿灯亮起<br/>不用唤醒词直接追问"]
-    F -->|接着问| D
+    E --> F["回答播完：咚<br/>绿灯常亮，进入续听<br/>不用唤醒词直接追问"]
+    F -->|接着问| R
     F -->|喊小爱同学| B
     F -->|不说话| G["结束，等下次唤醒"]
 ```
+
+图示对应启用提示音与 boot1 实时追问的设备端流式链路。
 
 运行位置和网络依赖见上方「哪些在音箱上，哪些在云端」；可选服务端用于 TTS、联调或回退。
 

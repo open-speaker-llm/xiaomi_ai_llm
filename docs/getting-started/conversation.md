@@ -30,7 +30,7 @@ sh /data/native_asr.sh status
 
 管理器应为 `healthy`。随后做一次真实对话：先问“介绍一下西湖”，等回答结束、绿灯续听时直接问“那什么时候去呢？”。确认第二句沿用上下文，再保持安静，确认退出并能重新唤醒小爱。
 
-这里的收听由原生 VAD 判停，空闲约 6 秒；20 秒参数是整轮保护超时。它不调用 Mac 识别程序，仍使用小米云。完整验收包括提示音、再次唤醒交接和重启，见[人工用例](../../tests/manual_native_first_cases.md)。
+这里的收听由原生 VAD 判停。结束音后的实时追问使用 `FOLLOWUP_TIMEOUT`（默认 8 秒）作为本轮收音超时上限；原生 VAD 或会话结束事件可以提前结束收听，并非保证等满 8 秒。未走结束音路径时使用 `NATIVE_ASR_LISTEN_TIMEOUT`（默认 20 秒）作为整轮保护超时。它不调用 Mac 识别程序，仍使用小米云。完整验收包括提示音、再次唤醒交接和重启，见[人工用例](../../tests/manual_native_first_cases.md)。
 
 ## 2. 再处理首轮停顿续说
 
@@ -56,6 +56,6 @@ sh /data/native_asr.sh status
 
 使用 `LLM_PIPELINE=native`、`TTS_ENGINE=device` 并安装对应组件后，模型调用、语音播放和追问可不依赖常驻 Mac。仍需分别核对真实说话、出声和家居动作，进程存活不能替代听觉与动作验收。
 
-蓝灯通常表示原生处理，绿灯表示 LLM 链路，绿灯常亮的追问窗口内可以继续说。灯效细节见[对话状态反馈](../concepts/native-first.md#状态反馈)。再次唤醒小爱可以交还原生会话，但尚未实现用语音停止正在播报的 LLM。
+蓝灯通常表示原生处理，绿灯表示 LLM 链路。设备端流式 LLM 接管时有“咚咚”提示音并亮接管绿灯，首段垫话或正文播放时绿灯转圈；完整回答播完“咚”一声后，再进入绿灯常亮的实时追问窗口，可以不用唤醒词继续说。绿灯原本已有，声音反馈来自 2026-11-06 合并的 [PR #17](https://github.com/open-speaker-llm/xiaomi_ai_llm/pull/17)；开关见[配置参考](../reference/configuration.md)中的 `LLM_ROUTE_BEEP`、`LLM_END_BEEP`、`LLM_WEB_FILLER`。固件自行收音的 `native_multirounds` 模式跳过结束音。灯效细节见[对话状态反馈](../concepts/native-first.md#状态反馈)。再次唤醒小爱可以交还原生会话，但尚未实现用语音停止正在播报的 LLM。
 
 最后配置[自启动](../runbooks/autostart.md)，把整机重启和断电恢复单独验收。以后调整、停用或回滚从[日常操作](../runbooks/operations.md)进入；现有实机证据集中在[状态页](../status.md)，不代表新设备自动通过。

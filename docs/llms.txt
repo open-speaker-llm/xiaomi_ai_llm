@@ -4,7 +4,7 @@
 
 > A client on the Xiaomi AI Speaker MDZ-25-DA (S12A). Native XiaoAI keeps lights, weather and similar commands. Open questions go to a cloud LLM the speaker calls directly, then online EdgeTTS. The model does not run on the speaker, and it does not work offline. Not an official Xiaomi product.
 
-仓库没有给出可以引用的速度或延迟数字，这里也不写。
+本页不列速度或延迟数字。
 
 ## 事实
 
@@ -14,6 +14,7 @@
 - 音箱直连模型且 TTS_ENGINE=device、追问走 boot1 原生识别时，不需要电脑或 NAS 一直开着。示例配置默认 TTS_ENGINE=server，保持默认则那台 TTS 服务要在线。
 - 音箱直连的 BACKEND：deepseek（默认 deepseek-flash）、glm（glm-5.3-flash）、kimi（kimi-k2.6）、minimax（MiniMax-M2.7），或用 LLM_API_BASE / LLM_MODEL / LLM_API_KEY 指向其他 OpenAI 兼容接口。本地模型（如 Ollama）尚未测试。
 - 联网搜索只在 LLM_PIPELINE=native 且 BACKEND=deepseek 时可用，默认 LLM_WEB_SEARCH=auto。
+- 2026-11-06 合并的 [PR #17](https://github.com/open-speaker-llm/xiaomi_ai_llm/pull/17)：设备端流式 LLM 接管时“咚咚”加绿灯，联网搜索先播“搜索中，请稍等。”，完整回答后“咚”一声；启用 boot1 实时追问后，结束音播完再进入绿灯常亮的收听窗口。绿灯原本就有，native_multirounds 跳过结束音。配置见 LLM_ROUTE_BEEP、LLM_END_BEEP、LLM_WEB_FILLER。
 - 免唤醒追问要先安装组件。默认靠保持安静结束。FOLLOWUP_EXIT_ENABLED 默认为 0；设为 1 后，追问窗口里单独说出“结束对话 / 退出对话 / 停止对话 / 不聊了 / 退下”才会直接结束。真人收听验收尚未完成。
 - 不用焊接。打通 SSH 可能改写系统分区，有变砖和失去保修的风险。
 - 自有代码 MIT。device/ettsc/src/gec_v2.rs 为 LGPL-3.0-only。EdgeTTS 在 README 中标为免费；大模型 API 由服务商计费。
@@ -38,7 +39,8 @@
 
 ## 视频
 
-- [哔哩哔哩实机演示](https://www.bilibili.com/video/BV1bu4u6GEEL/)
-- [哔哩哔哩原理](https://www.bilibili.com/video/BV1Vzja69ELB/)
-- [哔哩哔哩原理短版](https://www.bilibili.com/video/BV1ShjG6tEVz/)
+- 第 1 期：[小爱答不上来的问题，自动转给 DeepSeek：老音箱直连大模型，家电照常控制](https://www.bilibili.com/video/BV1ShjG6tEVz/)
+- 第 2 期：[「小爱同学，呼叫 DeepSeek！」老款小爱直连大模型，原理一次讲清](https://www.bilibili.com/video/BV1Vzja69ELB/)
+- 第 3 期：[让小爱联网搜最新新闻，播到一半喊"开灯"，灯亮了、新闻没停](https://www.bilibili.com/video/BV1bu4u6GEEL/)（正在重剪） <!-- TODO: 重新投稿后替换 BV -->
+- 第 4 期：小爱现在是不是大模型在回答？这次听声音就知道 — TODO（未发布）
 - [YouTube](https://www.youtube.com/watch?v=1R8bhbN42KE)
