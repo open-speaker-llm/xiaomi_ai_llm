@@ -5,7 +5,7 @@
 [![Last commit](https://img.shields.io/github/last-commit/open-speaker-llm/xiaomi_ai_llm)](https://github.com/open-speaker-llm/xiaomi_ai_llm/commits)
 [![Tested on](https://img.shields.io/badge/tested%20on-MDZ--25--DA%20%2F%20S12A-orange)](docs/reference/hardware.md)
 [![YouTube](https://img.shields.io/badge/YouTube-Demo-FF0000?logo=youtube&logoColor=white)](https://www.youtube.com/watch?v=1R8bhbN42KE)
-[![Bilibili](https://img.shields.io/badge/Bilibili-Demo-00A1D6?logo=bilibili&logoColor=white)](https://www.bilibili.com/video/BV1bu4u6GEEL/)
+[![Bilibili](https://img.shields.io/badge/Bilibili-Video%20series-00A1D6?logo=bilibili&logoColor=white)](#video-series)
 
 English | [简体中文](README.md)
 
@@ -25,26 +25,37 @@ Common questions: [docs/faq_en.md](docs/faq_en.md) ([中文](docs/faq.md)).
 
 ![Same speaker: XiaoAI turns on the light → ask DeepSeek → follow-up without wake word](docs/assets/demo-native-vs-llm.gif)
 
-[![Watch the latest demo: DeepSeek reads the news, then the light still turns on mid-playback](docs/assets/bilibili-news-demo.jpg)](https://www.bilibili.com/video/BV1bu4u6GEEL/)
+## Video series
 
-| Video | Length | What you'll see |
-|---|---|---|
-| [YouTube · Demo](https://www.youtube.com/watch?v=1R8bhbN42KE) | 1:34 | Native XiaoAI vs. LLM on the same speaker |
-| [Bilibili · Live demo](https://www.bilibili.com/video/BV1bu4u6GEEL/) (Chinese) | 3:06 | LLM reads the news; "turn on the light" mid-playback still works |
-| [Bilibili · How it works](https://www.bilibili.com/video/BV1Vzja69ELB/) (Chinese) | 5:21 | Architecture walkthrough |
-| [Bilibili · Short overview](https://www.bilibili.com/video/BV1ShjG6tEVz/) (Chinese) | 1:35 | Shorter cut of the architecture walkthrough |
+[![第 3 期：让小爱联网搜最新新闻，播到一半喊"开灯"，灯亮了、新闻没停](docs/assets/bilibili-news-demo.jpg)](https://www.bilibili.com/video/BV1bu4u6GEEL/) <!-- TODO: 重新投稿后替换 BV -->
+
+Bilibili episodes use their original Chinese titles.
+
+| Episode | Title | What it covers | Link |
+|---|---|---|---|
+| 1 | 小爱答不上来的问题，自动转给 DeepSeek：老音箱直连大模型，家电照常控制 | Direct LLM access, native-first routing | [Bilibili](https://www.bilibili.com/video/BV1ShjG6tEVz/) |
+| 2 | 「小爱同学，呼叫 DeepSeek！」老款小爱直连大模型，原理一次讲清 | How it works | [Bilibili](https://www.bilibili.com/video/BV1Vzja69ELB/) |
+| 3 | 让小爱联网搜最新新闻，播到一半喊"开灯"，灯亮了、新闻没停 | Web news search and light control during playback (echo cancellation); being re-edited | [Bilibili](https://www.bilibili.com/video/BV1bu4u6GEEL/) <!-- TODO: 重新投稿后替换 BV --> |
+| 4 | 小爱现在是不是大模型在回答？这次听声音就知道 | Audio cues; unpublished | TODO (unpublished) |
+
+[YouTube · Demo](https://www.youtube.com/watch?v=1R8bhbN42KE) — Native XiaoAI vs. LLM on the same speaker
 
 > ℹ️ **Web search is supported on `main`.** With the speaker calling DeepSeek directly (`LLM_PIPELINE=native`, `BACKEND=deepseek`), `LLM_WEB_SEARCH=auto` is the default. The speaker first decides whether a question needs live information (news, prices, opening hours, a given web page). If it does, it calls DeepSeek's official Search/Fetch API and names its sources in the answer. This adds a routing request to each LLM turn, so the first audio may come a little later. Set `LLM_WEB_SEARCH=off` to disable it. See [docs/reference/native-web-search.md](docs/reference/native-web-search.md).
 
 ## What it's like
 
 ```text
-"XiaoAI, turn on the light"                  → handled natively by Xiaomi
-"XiaoAI, what's the weather today?"          → answered natively by Xiaomi
-"XiaoAI, ask DeepSeek, tell me about West Lake" → LLM answers, spoken via TTS
-(green light, still listening) "When should I go?" → same context, keeps chatting
-"Be quiet" / silence                          → ends the follow-up, back to idle
+"XiaoAI, turn on the light"                    → handled natively by Xiaomi
+"XiaoAI, what's the weather today?"            → answered natively by Xiaomi
+"XiaoAI, ask DeepSeek to search for news"       → “搜索中，请稍等。” (Searching, please wait), then the answer
+"XiaoAI, ask DeepSeek, tell me about West Lake" → “dong-dong” + green light, then the LLM answer
+(answer ends with “dong”, steady green light) "When should I go?" → same context, no wake word
+Silence                                       → ends the follow-up, back to idle
 ```
+
+Follow-ups require the matching component to be installed and enabled. On boot1, optional first-turn pause handling keeps listening through a mid-sentence pause or hesitation, within the [pause-handling limits](docs/getting-started/conversation.md); it uses voice activity, not whether the sentence is semantically complete.
+
+The green status light already existed. The route cue “dong-dong”, search filler and end cue “dong” are included in [PR #17](https://github.com/open-speaker-llm/xiaomi_ai_llm/pull/17), merged on 2026-11-06. The route cue applies to the on-device streaming LLM path. With boot1 real-time follow-up enabled, the end cue finishes before listening resumes with a steady green light; no wake word is needed. Firmware-managed `native_multirounds` skips the end cue. See [configuration](docs/reference/configuration.md) for `LLM_ROUTE_BEEP`, `LLM_END_BEEP` and `LLM_WEB_FILLER` (empty disables the filler).
 
 The speaker understands Chinese voice commands (Xiaomi's ASR is Chinese). The trigger phrase for routing to the LLM is configurable via `DIRECT_LLM_QUERY_PATTERNS`.
 
@@ -56,13 +67,16 @@ The project reuses Xiaomi's wake word, speech recognition and device control. A 
 flowchart LR
     A["🗣️ XiaoAI, …"] --> B{"On-speaker client<br/>decides who answers"}
     B -->|lights, weather, volume| C["Native XiaoAI<br/>same as before"]
-    B -->|can't answer / ask DeepSeek| D["Speaker calls the LLM<br/>web search when needed"]
+    B -->|can't answer / ask DeepSeek| R["dong-dong<br/>green takeover light"]
+    R --> D["Speaker calls the LLM<br/>search filler before web results when needed"]
     D --> E["EdgeTTS, sentence by sentence"]
-    E --> F["Green light on<br/>follow up without the wake word"]
-    F -->|follow-up question| D
+    E --> F["dong when the answer ends<br/>steady green light for follow-up<br/>no wake word needed"]
+    F -->|follow-up question| R
     F -->|say XiaoAI| B
     F -->|silence| G["End, wait for the next wake"]
 ```
+
+The diagram shows the on-device streaming path with audio cues and boot1 real-time follow-up enabled.
 
 The detailed technical flow (boot1 VAD and the two system images) is in [一次对话的完整过程](docs/concepts/native-first.md) (Chinese).
 

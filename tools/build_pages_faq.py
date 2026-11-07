@@ -207,6 +207,7 @@ def page(english: bool, intro: str, sections) -> str:
         "always-on",
         "native",
         "llm",
+        "audio-feedback",
         "followup",
         "compare",
         "cost",

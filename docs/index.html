@@ -83,10 +83,11 @@
     <ol>
       <li>唤醒小爱。语音识别仍走小米云。</li>
       <li>音箱上的客户端决定这句话交给小爱，还是转给大模型。</li>
-      <li>转给大模型时，默认由音箱直接调用你配置的云 API。DeepSeek 这条主线还可以先判断要不要联网搜索。</li>
+      <li>转给大模型时，默认由音箱直接调用你配置的云 API。设备端流式链路用“咚咚”加绿灯提示接管；DeepSeek 需要联网搜索时先播垫话：“搜索中，请稍等。”</li>
       <li>回答用 EdgeTTS 播出来；合成失败时可以退回小爱自己的语音。</li>
-      <li>安装并启用追问组件后，绿灯亮着可以接着说。不说话就会结束。五句口头结束语默认关闭。</li>
+      <li>回答完整播完后“咚”一声；安装并启用 boot1 实时追问组件后，结束音播完再进入绿灯常亮的收听窗口，不用唤醒词可以接着说。不说话就会结束。五句口头结束语默认关闭。</li>
     </ol>
+    <p>绿灯状态反馈原本就有，提示音、垫话和结束音来自 2026-11-06 合并的 <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/pull/17">PR #17</a>。开关见<a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/reference/configuration.md">配置参考</a>：<code>LLM_ROUTE_BEEP</code>、<code>LLM_END_BEEP</code>、<code>LLM_WEB_FILLER</code>。固件自行收音的 <code>native_multirounds</code> 模式跳过结束音。</p>
     <p>更细的过程在仓库里的 <a href="https://github.com/open-speaker-llm/xiaomi_ai_llm/blob/main/docs/concepts/native-first.md">一次对话的完整过程</a>。</p>
 
     <h2>支持型号</h2>
@@ -105,6 +106,7 @@
       <li><a href="faq.html#always-on">需要电脑或 NAS 一直开着吗？</a></li>
       <li><a href="faq.html#native">开灯、天气这些原来的功能还能用吗？</a></li>
       <li><a href="faq.html#llm">支持哪些大模型？怎么切换？能联网搜索吗？</a></li>
+      <li><a href="faq.html#audio-feedback">怎么知道是大模型在回答、什么时候说完了？</a></li>
       <li><a href="faq.html#followup">能免唤醒连续追问吗？怎么结束？</a></li>
       <li><a href="faq.html#compare">和 mi-gpt、open-xiaoai 有什么不同？</a></li>
       <li><a href="faq.html#cost">费用怎么算？</a></li>
@@ -115,9 +117,10 @@
     <h2>代码和视频</h2>
     <ul>
       <li><a href="https://github.com/open-speaker-llm/xiaomi_ai_llm">GitHub 仓库</a></li>
-      <li><a href="https://www.bilibili.com/video/BV1bu4u6GEEL/">哔哩哔哩：实机演示</a></li>
-      <li><a href="https://www.bilibili.com/video/BV1Vzja69ELB/">哔哩哔哩：原理</a></li>
-      <li><a href="https://www.bilibili.com/video/BV1ShjG6tEVz/">哔哩哔哩：原理短版</a></li>
+      <li><a href="https://www.bilibili.com/video/BV1ShjG6tEVz/">B 站第 1 期：小爱答不上来的问题，自动转给 DeepSeek：老音箱直连大模型，家电照常控制</a></li>
+      <li><a href="https://www.bilibili.com/video/BV1Vzja69ELB/">B 站第 2 期：「小爱同学，呼叫 DeepSeek！」老款小爱直连大模型，原理一次讲清</a></li>
+      <li><a href="https://www.bilibili.com/video/BV1bu4u6GEEL/">B 站第 3 期：让小爱联网搜最新新闻，播到一半喊&quot;开灯&quot;，灯亮了、新闻没停</a>（正在重剪） <!-- TODO: 重新投稿后替换 BV --></li>
+      <li>B 站第 4 期：小爱现在是不是大模型在回答？这次听声音就知道 — TODO（未发布）</li>
       <li><a href="https://www.youtube.com/watch?v=1R8bhbN42KE">YouTube</a></li>
     </ul>
 
