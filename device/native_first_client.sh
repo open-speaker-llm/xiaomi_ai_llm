@@ -1,4 +1,6 @@
 #!/bin/sh
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
 #
 # 小米AI音箱 LLM 对话助手 — Native-first 版
 #
@@ -749,11 +751,23 @@ stop_native_endpoint() {
 }
 
 root_device() {
-    awk '$2 == "/" {print $1; exit}' /proc/mounts 2>/dev/null
+    awk '$2 == "/" && $1 != "rootfs" { d=$1 } END { print d }' /proc/mounts 2>/dev/null
 }
 
 is_system1_root() {
-    [ "$(root_device)" = "/dev/mtdblock5" ]
+    local dev ubi mtd label
+    dev=$(root_device)
+    [ "$dev" = "/dev/mtdblock5" ] && return 0
+    case "$dev" in
+        /dev/ubi[0-9]*_*)
+            ubi=${dev#/dev/}; ubi=${ubi%%_*}
+            mtd=$(cat "/sys/class/ubi/$ubi/mtd_num" 2>/dev/null)
+            case "$mtd" in ''|*[!0-9]*) return 1;; esac
+            label=$(awk -v n="mtd$mtd:" '$1 == n {gsub(/"/, "", $4); print $4; exit}' /proc/mtd 2>/dev/null)
+            [ "$label" = system1 ]
+            ;;
+        *) return 1;;
+    esac
 }
 
 restore_audio_capture_overlays() {
@@ -989,11 +1003,7 @@ restore_llm_master_volume() {
 }
 
 stop_our_assistants() {
-    killall kws 2>/dev/null
-    killall tail 2>/dev/null
-    killall curl 2>/dev/null
-    killall aplay 2>/dev/null
-    killall arecord 2>/dev/null
+    # S12: avoid stopping unrelated native processes.
     ps | grep -E 'stream_client.sh|wake_monitor.sh|vad_record.sh|native_client.sh|native_first_observer.sh' | grep -v grep | awk '{print $1}' | xargs -r kill -9 2>/dev/null
     if [ -f "$PID_FILE" ]; then
         pid=$(cat "$PID_FILE" 2>/dev/null)
@@ -1056,6 +1066,26 @@ log_ts() {
     echo "${base}.${ms:-000}"
 }
 
+root_device() {
+    awk '$2 == "/" && $1 != "rootfs" { d=$1 } END { print d }' /proc/mounts 2>/dev/null
+}
+
+is_system1_root() {
+    local dev ubi mtd label
+    dev=$(root_device)
+    [ "$dev" = "/dev/mtdblock5" ] && return 0
+    case "$dev" in
+        /dev/ubi[0-9]*_*)
+            ubi=${dev#/dev/}; ubi=${ubi%%_*}
+            mtd=$(cat "/sys/class/ubi/$ubi/mtd_num" 2>/dev/null)
+            case "$mtd" in ''|*[!0-9]*) return 1;; esac
+            label=$(awk -v n="mtd$mtd:" '$1 == n {gsub(/"/, "", $4); print $4; exit}' /proc/mtd 2>/dev/null)
+            [ "$label" = system1 ]
+            ;;
+        *) return 1;;
+    esac
+}
+
 # Snapshot physical wake evidence at hook entry, before phase and busy checks.
 if [ "$1" = think ]; then
     event_ms=$(awk '{printf "%.0f", $1*1000; exit}' /proc/uptime 2>/dev/null)
@@ -1076,7 +1106,7 @@ echo "[$(log_ts)] wakeup.sh $*" >> "$EVENT_LOG"
 # Busy also covers LLM PCM playback, during which physical native wake/control
 # must remain available. Only a live ASR-only lease owns these native cues.
 if [ "${SYSTEM1_FOLLOWUP_RECORD_MODE:-}" = "native_live" ] && [ -f "$BUSY_MARKER" ] &&
-    [ "$(awk '$2 == "/" {print $1;exit}' /proc/mounts)" = /dev/mtdblock5 ] &&
+    is_system1_root &&
     "${NATIVE_ASR_CTL:-/data/native_asr_ctl}" status 2>/dev/null | grep -Eq 'phase=[1-6] '; then
     case "$1" in
         WuW|WuW_first|WuW_oneshot|wuw_tips|bf|bf_end|ready|ready_delay|noangle|noangle_end|think|speek|multirounds|command_timeout|mibrain_service_timeout)
@@ -1139,15 +1169,15 @@ case "$1" in
         if [ -f "$BUSY_MARKER" ]; then
             echo "[$(log_ts)] NATIVE_THINK_IGNORED_BUSY args=$*" >> "$EVENT_LOG"
         else
-            root_dev=$(awk '$2 == "/" {print $1; exit}' /proc/mounts 2>/dev/null)
-            if [ "$AIVS_GUARD_ENABLED" = "1" ] && [ "$root_dev" = "/dev/mtdblock5" ]; then
+            root_dev=$(root_device)
+            if [ "$AIVS_GUARD_ENABLED" = "1" ] && is_system1_root; then
                 touch "$AIVS_GUARD_ARMED"
             fi
-            if [ "$WAKE_ON_THINK_SYSTEM1" = "1" ] && [ "$root_dev" = "/dev/mtdblock5" ] && [ -p "$EVENT_FIFO" ]; then
+            if [ "$WAKE_ON_THINK_SYSTEM1" = "1" ] && is_system1_root && [ -p "$EVENT_FIFO" ]; then
                 ( echo "think $ts ${event_ms:--} $physical_ms" > "$EVENT_FIFO" 2>/dev/null ) &
                 echo "[$(log_ts)] NATIVE_WAKE_EVENT_FROM_THINK root=$root_dev ts=$ts" >> "$EVENT_LOG"
             fi
-            if [ "$root_dev" = "/dev/mtdblock5" ]; then
+            if is_system1_root; then
                 echo "[$(log_ts)] NATIVE_PRE_FREEZE_SKIP_SYSTEM1 args=$*" >> "$EVENT_LOG"
             elif [ "$FREEZE_NATIVE_PLAYER_ON_THINK" = "1" ]; then
                 killall -STOP mediaplayer 2>/dev/null
