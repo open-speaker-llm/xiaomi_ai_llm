@@ -11,6 +11,22 @@ export PATH
 CONFIG_FILE="${CONFIG_FILE:-/data/native_first.env}"
 [ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
 
+# This S12's BusyBox sleep accepts only whole seconds, but its usleep supports
+# microseconds. Limit this override to the explicitly identified firmware.
+if [ "${S12_FRACTIONAL_SLEEP:-0}" = 1 ] && command -v usleep >/dev/null 2>&1; then
+    sleep() {
+        local us
+        [ "$#" = 1 ] || { /bin/sleep "$@"; return; }
+        case "$1" in
+            0.02) us=20000;; 0.05) us=50000;; 0.1) us=100000;;
+            0.2) us=200000;; 0.3) us=300000;;
+            *.*) us=$(awk -v n="$1" 'BEGIN {if (n !~ /^[0-9]+\.[0-9]+$/ || n>3600) exit 1; printf "%.0f", n*1000000}') || return 1;;
+            *) /bin/sleep "$@"; return;;
+        esac
+        usleep "$us"
+    }
+fi
+
 SERVER="${SERVER:-http://192.168.8.150:8080}"
 BACKEND="${BACKEND:-deepseek}"
 VAD_SCRIPT="${VAD_SCRIPT:-/data/vad_record.sh}"
@@ -284,12 +300,21 @@ NATIVE_FOLLOWUP_MARKED=0
 STATE="BOOT"
 LAST_LOG_SEC=""
 LAST_LOG_MS=0
-LED_RGB="/sys/devices/i2c-1/1-003c/led_rgb"
+LED_RGB="${LED_RGB:-/sys/devices/i2c-1/1-003c/led_rgb}"
 LED_IDS="0 1 2 3 4 5 6 7 8 9 10 11"
 LED_BLUE=16711680
 LED_ORANGE=33023
 LED_GREEN=65280
 LED_FEEDBACK_TOKEN_FILE="/tmp/native_first_led_feedback_token"
+
+# The S12-specific player refuses unknown firmware. If its verified baseline is
+# unavailable, keep the already-working whole-MP3 TTS route after reboot/OTA.
+if [ "${DIRAC_APLAY:-}" = /data/s12_dirac_aplay.sh ] &&
+   [ "${DEVICE_TTS_STREAM:-0}" = 1 ] &&
+   ! "$DIRAC_APLAY" --verify >/dev/null 2>&1; then
+    DEVICE_TTS_STREAM=0
+    S12_AUDIO_GUARD_WARNING=1
+fi
 
 make_log_ts() {
     local base sec ms
@@ -1042,6 +1067,19 @@ install_hook() {
 #!/bin/sh
 CONFIG_FILE="${CONFIG_FILE:-/data/native_first.env}"
 [ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+if [ "${S12_FRACTIONAL_SLEEP:-0}" = 1 ] && command -v usleep >/dev/null 2>&1; then
+    sleep() {
+        local us
+        [ "$#" = 1 ] || { /bin/sleep "$@"; return; }
+        case "$1" in
+            0.02) us=20000;; 0.05) us=50000;; 0.1) us=100000;;
+            0.2) us=200000;; 0.3) us=300000;;
+            *.*) us=$(awk -v n="$1" 'BEGIN {if (n !~ /^[0-9]+\.[0-9]+$/ || n>3600) exit 1; printf "%.0f", n*1000000}') || return 1;;
+            *) /bin/sleep "$@"; return;;
+        esac
+        usleep "$us"
+    }
+fi
 EVENT_FIFO="${EVENT_FIFO:-/tmp/native_first_event.fifo}"
 EVENT_LOG="${EVENT_LOG:-/tmp/native_first_events.log}"
 ORIG_WAKEUP="${ORIG_WAKEUP:-/tmp/wakeup.sh.orig}"
@@ -2870,7 +2908,10 @@ llm_web_post() {
         [ "$bytes" -gt 0 ] && [ "$bytes" -le 131072 ] || exit 12
         clean=$(LC_ALL=C tr -d '\000' < "$dir/response" | wc -c)
         [ "$clean" -eq "$bytes" ] || exit 12
-        [ "$(jsonfilter -i "$dir/response" -t '@' 2>/dev/null)" = object ] || exit 12
+        # Older OpenWrt jsonfilter builds reject the bare @ root expression.
+        # Wrap the response as a member so both versions validate its type.
+        { printf '{"response":'; cat "$dir/response"; printf '}'; } > "$dir/response-object" || exit 12
+        [ "$(jsonfilter -i "$dir/response-object" -t '@.response' 2>/dev/null)" = object ] || exit 12
         llm_web_post_state - 200 ''
         cat "$dir/response"
     )
@@ -6068,6 +6109,7 @@ exec >> "$LOG_FILE" 2>&1
 echo "$$" > "$PID_FILE"
 
 log "=== native-first + LLM fallback client ==="
+[ "${S12_AUDIO_GUARD_WARNING:-0}" != 1 ] || log '[S12-DIRAC] audio baseline mismatch; using whole-MP3 TTS'
 apply_system_defaults
 log "Config: $CONFIG_FILE"
 log "Server: $SERVER"
