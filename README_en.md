@@ -27,7 +27,7 @@ Common questions: [docs/faq_en.md](docs/faq_en.md) ([中文](docs/faq.md)).
 
 ## Video series
 
-[![第 3 期：让小爱联网搜最新新闻，播到一半喊"开灯"，灯亮了、新闻没停](docs/assets/bilibili-news-demo.jpg)](https://www.bilibili.com/video/BV1bu4u6GEEL/) <!-- TODO: 重新投稿后替换 BV -->
+[![第 3 期：让小爱联网搜最新新闻，播到一半喊"开灯"，灯亮了、新闻没停](docs/assets/bilibili-news-demo.jpg)](https://www.bilibili.com/video/BV1bu4u6GEEL/)
 
 Bilibili episodes use their original Chinese titles.
 
@@ -35,8 +35,8 @@ Bilibili episodes use their original Chinese titles.
 |---|---|---|---|
 | 1 | 小爱答不上来的问题，自动转给 DeepSeek：老音箱直连大模型，家电照常控制 | Direct LLM access, native-first routing | [Bilibili](https://www.bilibili.com/video/BV1ShjG6tEVz/) |
 | 2 | 「小爱同学，呼叫 DeepSeek！」老款小爱直连大模型，原理一次讲清 | How it works | [Bilibili](https://www.bilibili.com/video/BV1Vzja69ELB/) |
-| 3 | 让小爱联网搜最新新闻，播到一半喊"开灯"，灯亮了、新闻没停 | Web news search and light control during playback (echo cancellation); being re-edited | [Bilibili](https://www.bilibili.com/video/BV1bu4u6GEEL/) <!-- TODO: 重新投稿后替换 BV --> |
-| 4 | 小爱现在是不是大模型在回答？这次听声音就知道 | Audio cues; unpublished | TODO (unpublished) |
+| 3 | 让小爱联网搜最新新闻，播到一半喊"开灯"，灯亮了、新闻没停 | Web news search and light control during playback (echo cancellation) | [Bilibili](https://www.bilibili.com/video/BV1bu4u6GEEL/) (1:40) |
+| 4 | 小爱现在是不是大模型在回答？这次听声音就知道 | Audio cues | [Bilibili](https://www.bilibili.com/video/BV16W4E6XEtv/) (3:57, Published 2026-11-07) |
 
 [YouTube · Demo](https://www.youtube.com/watch?v=1R8bhbN42KE) — Native XiaoAI vs. LLM on the same speaker
 
