@@ -4,6 +4,13 @@
 
 Each answer was checked against the current code and docs. If the repo does not state it, it is not added here.
 
+**Bilibili video series**
+
+- Episode 1: [小爱答不上来的问题，自动转给 DeepSeek：老音箱直连大模型，家电照常控制](https://www.bilibili.com/video/BV1ShjG6tEVz/)
+- Episode 2: [「小爱同学，呼叫 DeepSeek！」老款小爱直连大模型，原理一次讲清](https://www.bilibili.com/video/BV1Vzja69ELB/)
+- Episode 3: [让小爱联网搜最新新闻，播到一半喊"开灯"，灯亮了、新闻没停](https://www.bilibili.com/video/BV1bu4u6GEEL/) (1:40)
+- Episode 4: [小爱现在是不是大模型在回答？这次听声音就知道](https://www.bilibili.com/video/BV16W4E6XEtv/) (3:57, Published 2026-11-07)
+
 <a id="models"></a>
 
 ## Which speaker models are supported?

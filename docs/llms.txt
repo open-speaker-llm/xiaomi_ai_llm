@@ -41,6 +41,6 @@
 
 - 第 1 期：[小爱答不上来的问题，自动转给 DeepSeek：老音箱直连大模型，家电照常控制](https://www.bilibili.com/video/BV1ShjG6tEVz/)
 - 第 2 期：[「小爱同学，呼叫 DeepSeek！」老款小爱直连大模型，原理一次讲清](https://www.bilibili.com/video/BV1Vzja69ELB/)
-- 第 3 期：[让小爱联网搜最新新闻，播到一半喊"开灯"，灯亮了、新闻没停](https://www.bilibili.com/video/BV1bu4u6GEEL/)（正在重剪） <!-- TODO: 重新投稿后替换 BV -->
-- 第 4 期：小爱现在是不是大模型在回答？这次听声音就知道 — TODO（未发布）
+- 第 3 期：[让小爱联网搜最新新闻，播到一半喊"开灯"，灯亮了、新闻没停](https://www.bilibili.com/video/BV1bu4u6GEEL/)（1:40）
+- 第 4 期：[小爱现在是不是大模型在回答？这次听声音就知道](https://www.bilibili.com/video/BV16W4E6XEtv/)（3:57，已发布 2026-11-07）
 - [YouTube](https://www.youtube.com/watch?v=1R8bhbN42KE)
