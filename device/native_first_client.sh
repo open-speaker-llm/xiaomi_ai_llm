@@ -1,4 +1,6 @@
 #!/bin/sh
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
 #
 # 小米AI音箱 LLM 对话助手 — Native-first 版
 #
@@ -8,6 +10,22 @@
 
 CONFIG_FILE="${CONFIG_FILE:-/data/native_first.env}"
 [ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+
+# This S12's BusyBox sleep accepts only whole seconds, but its usleep supports
+# microseconds. Limit this override to the explicitly identified firmware.
+if [ "${S12_FRACTIONAL_SLEEP:-0}" = 1 ] && command -v usleep >/dev/null 2>&1; then
+    sleep() {
+        local us
+        [ "$#" = 1 ] || { /bin/sleep "$@"; return; }
+        case "$1" in
+            0.02) us=20000;; 0.05) us=50000;; 0.1) us=100000;;
+            0.2) us=200000;; 0.3) us=300000;;
+            *.*) us=$(awk -v n="$1" 'BEGIN {if (n !~ /^[0-9]+\.[0-9]+$/ || n>3600) exit 1; printf "%.0f", n*1000000}') || return 1;;
+            *) /bin/sleep "$@"; return;;
+        esac
+        usleep "$us"
+    }
+fi
 
 SERVER="${SERVER:-http://192.168.8.150:8080}"
 BACKEND="${BACKEND:-deepseek}"
@@ -282,12 +300,21 @@ NATIVE_FOLLOWUP_MARKED=0
 STATE="BOOT"
 LAST_LOG_SEC=""
 LAST_LOG_MS=0
-LED_RGB="/sys/devices/i2c-1/1-003c/led_rgb"
+LED_RGB="${LED_RGB:-/sys/devices/i2c-1/1-003c/led_rgb}"
 LED_IDS="0 1 2 3 4 5 6 7 8 9 10 11"
 LED_BLUE=16711680
 LED_ORANGE=33023
 LED_GREEN=65280
 LED_FEEDBACK_TOKEN_FILE="/tmp/native_first_led_feedback_token"
+
+# The S12-specific player refuses unknown firmware. If its verified baseline is
+# unavailable, keep the already-working whole-MP3 TTS route after reboot/OTA.
+if [ "${DIRAC_APLAY:-}" = /data/s12_dirac_aplay.sh ] &&
+   [ "${DEVICE_TTS_STREAM:-0}" = 1 ] &&
+   ! "$DIRAC_APLAY" --verify >/dev/null 2>&1; then
+    DEVICE_TTS_STREAM=0
+    S12_AUDIO_GUARD_WARNING=1
+fi
 
 make_log_ts() {
     local base sec ms
@@ -749,11 +776,23 @@ stop_native_endpoint() {
 }
 
 root_device() {
-    awk '$2 == "/" {print $1; exit}' /proc/mounts 2>/dev/null
+    awk '$2 == "/" && $1 != "rootfs" { d=$1 } END { print d }' /proc/mounts 2>/dev/null
 }
 
 is_system1_root() {
-    [ "$(root_device)" = "/dev/mtdblock5" ]
+    local dev ubi mtd label
+    dev=$(root_device)
+    [ "$dev" = "/dev/mtdblock5" ] && return 0
+    case "$dev" in
+        /dev/ubi[0-9]*_*)
+            ubi=${dev#/dev/}; ubi=${ubi%%_*}
+            mtd=$(cat "/sys/class/ubi/$ubi/mtd_num" 2>/dev/null)
+            case "$mtd" in ''|*[!0-9]*) return 1;; esac
+            label=$(awk -v n="mtd$mtd:" '$1 == n {gsub(/"/, "", $4); print $4; exit}' /proc/mtd 2>/dev/null)
+            [ "$label" = system1 ]
+            ;;
+        *) return 1;;
+    esac
 }
 
 restore_audio_capture_overlays() {
@@ -989,11 +1028,7 @@ restore_llm_master_volume() {
 }
 
 stop_our_assistants() {
-    killall kws 2>/dev/null
-    killall tail 2>/dev/null
-    killall curl 2>/dev/null
-    killall aplay 2>/dev/null
-    killall arecord 2>/dev/null
+    # S12: avoid stopping unrelated native processes.
     ps | grep -E 'stream_client.sh|wake_monitor.sh|vad_record.sh|native_client.sh|native_first_observer.sh' | grep -v grep | awk '{print $1}' | xargs -r kill -9 2>/dev/null
     if [ -f "$PID_FILE" ]; then
         pid=$(cat "$PID_FILE" 2>/dev/null)
@@ -1032,6 +1067,19 @@ install_hook() {
 #!/bin/sh
 CONFIG_FILE="${CONFIG_FILE:-/data/native_first.env}"
 [ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+if [ "${S12_FRACTIONAL_SLEEP:-0}" = 1 ] && command -v usleep >/dev/null 2>&1; then
+    sleep() {
+        local us
+        [ "$#" = 1 ] || { /bin/sleep "$@"; return; }
+        case "$1" in
+            0.02) us=20000;; 0.05) us=50000;; 0.1) us=100000;;
+            0.2) us=200000;; 0.3) us=300000;;
+            *.*) us=$(awk -v n="$1" 'BEGIN {if (n !~ /^[0-9]+\.[0-9]+$/ || n>3600) exit 1; printf "%.0f", n*1000000}') || return 1;;
+            *) /bin/sleep "$@"; return;;
+        esac
+        usleep "$us"
+    }
+fi
 EVENT_FIFO="${EVENT_FIFO:-/tmp/native_first_event.fifo}"
 EVENT_LOG="${EVENT_LOG:-/tmp/native_first_events.log}"
 ORIG_WAKEUP="${ORIG_WAKEUP:-/tmp/wakeup.sh.orig}"
@@ -1056,6 +1104,26 @@ log_ts() {
     echo "${base}.${ms:-000}"
 }
 
+root_device() {
+    awk '$2 == "/" && $1 != "rootfs" { d=$1 } END { print d }' /proc/mounts 2>/dev/null
+}
+
+is_system1_root() {
+    local dev ubi mtd label
+    dev=$(root_device)
+    [ "$dev" = "/dev/mtdblock5" ] && return 0
+    case "$dev" in
+        /dev/ubi[0-9]*_*)
+            ubi=${dev#/dev/}; ubi=${ubi%%_*}
+            mtd=$(cat "/sys/class/ubi/$ubi/mtd_num" 2>/dev/null)
+            case "$mtd" in ''|*[!0-9]*) return 1;; esac
+            label=$(awk -v n="mtd$mtd:" '$1 == n {gsub(/"/, "", $4); print $4; exit}' /proc/mtd 2>/dev/null)
+            [ "$label" = system1 ]
+            ;;
+        *) return 1;;
+    esac
+}
+
 # Snapshot physical wake evidence at hook entry, before phase and busy checks.
 if [ "$1" = think ]; then
     event_ms=$(awk '{printf "%.0f", $1*1000; exit}' /proc/uptime 2>/dev/null)
@@ -1076,7 +1144,7 @@ echo "[$(log_ts)] wakeup.sh $*" >> "$EVENT_LOG"
 # Busy also covers LLM PCM playback, during which physical native wake/control
 # must remain available. Only a live ASR-only lease owns these native cues.
 if [ "${SYSTEM1_FOLLOWUP_RECORD_MODE:-}" = "native_live" ] && [ -f "$BUSY_MARKER" ] &&
-    [ "$(awk '$2 == "/" {print $1;exit}' /proc/mounts)" = /dev/mtdblock5 ] &&
+    is_system1_root &&
     "${NATIVE_ASR_CTL:-/data/native_asr_ctl}" status 2>/dev/null | grep -Eq 'phase=[1-6] '; then
     case "$1" in
         WuW|WuW_first|WuW_oneshot|wuw_tips|bf|bf_end|ready|ready_delay|noangle|noangle_end|think|speek|multirounds|command_timeout|mibrain_service_timeout)
@@ -1139,15 +1207,15 @@ case "$1" in
         if [ -f "$BUSY_MARKER" ]; then
             echo "[$(log_ts)] NATIVE_THINK_IGNORED_BUSY args=$*" >> "$EVENT_LOG"
         else
-            root_dev=$(awk '$2 == "/" {print $1; exit}' /proc/mounts 2>/dev/null)
-            if [ "$AIVS_GUARD_ENABLED" = "1" ] && [ "$root_dev" = "/dev/mtdblock5" ]; then
+            root_dev=$(root_device)
+            if [ "$AIVS_GUARD_ENABLED" = "1" ] && is_system1_root; then
                 touch "$AIVS_GUARD_ARMED"
             fi
-            if [ "$WAKE_ON_THINK_SYSTEM1" = "1" ] && [ "$root_dev" = "/dev/mtdblock5" ] && [ -p "$EVENT_FIFO" ]; then
+            if [ "$WAKE_ON_THINK_SYSTEM1" = "1" ] && is_system1_root && [ -p "$EVENT_FIFO" ]; then
                 ( echo "think $ts ${event_ms:--} $physical_ms" > "$EVENT_FIFO" 2>/dev/null ) &
                 echo "[$(log_ts)] NATIVE_WAKE_EVENT_FROM_THINK root=$root_dev ts=$ts" >> "$EVENT_LOG"
             fi
-            if [ "$root_dev" = "/dev/mtdblock5" ]; then
+            if is_system1_root; then
                 echo "[$(log_ts)] NATIVE_PRE_FREEZE_SKIP_SYSTEM1 args=$*" >> "$EVENT_LOG"
             elif [ "$FREEZE_NATIVE_PLAYER_ON_THINK" = "1" ]; then
                 killall -STOP mediaplayer 2>/dev/null
@@ -2840,7 +2908,10 @@ llm_web_post() {
         [ "$bytes" -gt 0 ] && [ "$bytes" -le 131072 ] || exit 12
         clean=$(LC_ALL=C tr -d '\000' < "$dir/response" | wc -c)
         [ "$clean" -eq "$bytes" ] || exit 12
-        [ "$(jsonfilter -i "$dir/response" -t '@' 2>/dev/null)" = object ] || exit 12
+        # Older OpenWrt jsonfilter builds reject the bare @ root expression.
+        # Wrap the response as a member so both versions validate its type.
+        { printf '{"response":'; cat "$dir/response"; printf '}'; } > "$dir/response-object" || exit 12
+        [ "$(jsonfilter -i "$dir/response-object" -t '@.response' 2>/dev/null)" = object ] || exit 12
         llm_web_post_state - 200 ''
         cat "$dir/response"
     )
@@ -6038,6 +6109,7 @@ exec >> "$LOG_FILE" 2>&1
 echo "$$" > "$PID_FILE"
 
 log "=== native-first + LLM fallback client ==="
+[ "${S12_AUDIO_GUARD_WARNING:-0}" != 1 ] || log '[S12-DIRAC] audio baseline mismatch; using whole-MP3 TTS'
 apply_system_defaults
 log "Config: $CONFIG_FILE"
 log "Server: $SERVER"
