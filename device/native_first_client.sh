@@ -763,6 +763,7 @@ setup_audio() {
 setup_native_endpoint() {
     [ "$NATIVE_ENDPOINT_ENABLED" = 1 ] || return 0
     is_system1_root || return 0
+    is_s12a_native_abi_root || { log '[ENDPOINT] 不兼容的根分区，拒绝加载 S12A 原生组件'; return 0; }
     if [ -x "$NATIVE_ENDPOINT_MANAGER" ] && sh "$NATIVE_ENDPOINT_MANAGER" start; then
         log '[ENDPOINT] 本地判停已就绪；小米识别保留完整问题后路由'
     else
@@ -793,6 +794,11 @@ is_system1_root() {
             ;;
         *) return 1;;
     esac
+}
+
+# A UBIFS system1 is not evidence of the S12A native components' ABI.
+is_s12a_native_abi_root() {
+    [ "$(root_device)" = /dev/mtdblock5 ]
 }
 
 restore_audio_capture_overlays() {
@@ -2299,6 +2305,11 @@ prepare_followup_capture() {
 setup_native_live_asr() {
     is_system1_root || return 0
     [ "$FOLLOWUP_ENABLED" = "1" ] && [ "$FOLLOWUP_RECORD_MODE" = "native_live" ] || return 0
+    if ! is_s12a_native_abi_root; then
+        FOLLOWUP_ENABLED=0
+        log '[FOLLOWUP] 不兼容的根分区，拒绝加载 S12A 原生 ASR'
+        return 0
+    fi
     if [ -x "$NATIVE_ASR_CTL" ] && [ -f "$NATIVE_ASR_MANAGER" ] && sh "$NATIVE_ASR_MANAGER" start; then
         PAUSE_NATIVE_ASR_DURING_LLM=0
         log "[FOLLOWUP] native ASR-only ready; no external recognizer"

@@ -37,11 +37,11 @@ class EndpointServiceTest(unittest.TestCase):
             with self.subTest(enabled=enabled,boot=boot),tempfile.TemporaryDirectory() as tmp:
                 p=Path(tmp);manager=p/'manager';trace=p/'trace'
                 manager.write_text('#!/bin/sh\necho "$1" >> '+shlex.quote(str(trace))+'\n');manager.chmod(0o700)
-                code=functions('setup_native_endpoint','stop_native_endpoint')+'\n'+f'NATIVE_ENDPOINT_ENABLED={enabled}\nNATIVE_ENDPOINT_MANAGER='+shlex.quote(str(manager))+'\n'+f'is_system1_root() {{ return {boot}; }}\nlog() {{ :; }}\nsetup_native_endpoint\nstop_native_endpoint\n'
+                code=functions('setup_native_endpoint','stop_native_endpoint')+'\n'+f'NATIVE_ENDPOINT_ENABLED={enabled}\nNATIVE_ENDPOINT_MANAGER='+shlex.quote(str(manager))+'\n'+f'is_system1_root() {{ return {boot}; }}\nis_s12a_native_abi_root() {{ return 0; }}\nlog() {{ :; }}\nsetup_native_endpoint\nstop_native_endpoint\n'
                 subprocess.run(['sh'],input=code,text=True,check=True)
                 expected=[] if enabled=='0' else (['start','stop'] if boot=='0' else ['stop'])
                 self.assertEqual(trace.read_text().splitlines() if trace.exists() else [],expected)
     def test_failed_endpoint_start_is_reported_without_claiming_ready(self):
-        code=functions('setup_native_endpoint')+'\nNATIVE_ENDPOINT_ENABLED=1\nNATIVE_ENDPOINT_MANAGER=/does/not/exist\nis_system1_root() { return 0; }\nlog() { echo "$*"; }\nsetup_native_endpoint\n'
+        code=functions('setup_native_endpoint')+'\nNATIVE_ENDPOINT_ENABLED=1\nNATIVE_ENDPOINT_MANAGER=/does/not/exist\nis_system1_root() { return 0; }\nis_s12a_native_abi_root() { return 0; }\nlog() { echo "$*"; }\nsetup_native_endpoint\n'
         out=subprocess.run(['sh'],input=code,capture_output=True,text=True,check=True).stdout
         self.assertIn('未就绪',out);self.assertNotIn('已就绪',out)

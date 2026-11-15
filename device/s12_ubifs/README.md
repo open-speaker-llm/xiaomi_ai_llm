@@ -11,7 +11,7 @@
 
 ## 已验证的范围
 
-仅在一台设备上验证：串口 failsafe、临时和持久公钥 SSH、正常系统冷启动、DeepSeek 直连、AArch64 静态 EdgeTTS 握手和实际播报、原生唤醒、首轮模型回答、客户端自启动。后续另在同一台机器上完成了依赖 Mac 的连续追问实验，具体边界见[两台设备对照与实验记录](model-comparison.md)；实验代码和安装流程未包含在本 PR。联网、播放、语音识别和 API 费用取决于对应云服务。
+仅在一台设备上验证：串口 failsafe、临时和持久公钥 SSH、正常系统冷启动、DeepSeek 直连、AArch64 静态 EdgeTTS 握手和实际播报、原生唤醒、首轮模型回答、客户端自启动。后续另在同一台机器上完成了依赖 Mac 的连续追问实验，具体边界见[独立的两台设备对照文档 PR](https://github.com/open-speaker-llm/xiaomi_ai_llm/pull/21)；实验代码和安装流程未包含在本 PR。联网、播放、语音识别和 API 费用取决于对应云服务。
 
 `native_first.s12.env.example` 记录这次的首轮配置。实际 API 密钥只能保存在设备私有配置中。音箱端 `ettsc` 是使用项目源码构建的 **aarch64-unknown-linux-musl** 静态产物；上游 `build.sh` 的默认目标是 32 位 ARM，构建目标必须按实际设备确定。构建过程不分发固件或设备二进制。
 
@@ -38,7 +38,18 @@ zig cc -target aarch64-linux-gnu.2.19 -shared -fPIC -Os -Wall -Wextra -Werror \
 
 在这台设备上，原厂启动脚本 `/data` 挂载失败分支包含擦除和重建。该设备的 system1 已做文件级修改，去除该分支并保留原文件备份。**挂载失败后的完整启动和服务行为没有故障注入验证**；不要把这种修改视作已验证的通用恢复方案。原厂 OTA 和自动槽位切换仍可能改变当前系统。
 
-`sshen_s12.sh` 只准备主机密钥并挂载公钥文件，**不设置 Dropbear 的认证选项**。如果固件使用 OpenWrt 的 Dropbear UCI 配置，应分别检查 `PasswordAuth` 和 `RootPasswordAuth` 是否关闭，并核对实际监听进程及启动参数；也可通过本地串口查看 `/proc/<dropbear进程号>/cmdline`。配置位置和选项随固件变化，不能仅凭 hook 推断密码认证被禁用。本记录目前缺少可复核的配置快照及正反两组认证测试，因此不能把密码禁用视为已经独立验证。
+`sshen_s12.sh` 只准备主机密钥并挂载公钥文件，**不设置 Dropbear 的认证选项**。2026-11-15 在这台 S12 实机读取到 `/etc/config/dropbear` 中 `PasswordAuth '0'`、`RootPasswordAuth '0'`、`Port '22'`，监听进程命令行为 `/usr/sbin/dropbear -F -P /var/run/dropbear.1.pid -s`；公钥认证成功。使用 `BatchMode=yes`、关闭公钥并限定密码认证的连接被拒绝（退出码 255），服务器告知可用的认证方式只有 `publickey`。**没有尝试正确或错误密码**。主机私钥、授权公钥和设备密码不在仓库。
+
+同类 OpenWrt 固件的配置示例（仅供对照，勿直接覆盖现有配置）：
+
+```text
+config dropbear
+    option PasswordAuth '0'
+    option RootPasswordAuth '0'
+    option Port '22'
+```
+
+核对时应同时检查 UCI 配置、真实运行参数和允许的方法：先保留 TTL 串口和现有公钥 SSH，再用独立连接验证公钥成功；使用 `ssh -o BatchMode=yes -o PubkeyAuthentication=no -o PreferredAuthentications=password` 检查仅密码认证是否被拒绝。配置位置和选项随固件变化，不能仅凭 hook 推断密码认证被禁用。
 
 回滚前保留可用的 TTL 串口，先确认 `/proc/mounts` 中目标确为该 hook 对 `/etc/dropbear/authorized_keys` 的 bind mount，并停用该设备上安装的 hook 启动入口；再从串口执行 `umount /etc/dropbear/authorized_keys`，核对原公钥文件及 SSH 服务配置。不要删除主机私钥或贸然重启 SSH，以免失去远程入口；具体启动入口依设备安装方式确认。上述回滚过程尚未作为完整流程实机演练。
 
@@ -52,6 +63,7 @@ S12 的脱敏观察：根挂载为 `/dev/ubi0_0 on / type ubifs`，`/sys/class/u
 
 - system0 的持久 SSH、助手自启动、正常启动与回滚尚未实机验证；仅配置了 system1。不要直接修改活动根分区或覆盖内核来复制本次操作。
 - 音箱独立的原生连续追问和高级判停尚未适配。依赖 Mac 的混合追问已在单机完成初步实验，不能等同于 S12A 的音箱端原生追问，也没有随本 PR 提供安装包。项目现有的 native ASR 组件面向已验证 S12A 固件与 ARM32 原生进程；这台设备的原生进程是 AArch64，固件 ABI 与组件基线不匹配。不要绕过安装器校验或把 ARM32 SO 直接注入 64 位进程。
+- 新增客户端入口检查：当根不是旧 S12A 的 `/dev/mtdblock5` 时，拒绝启动 S12A 原生 ASR 和 endpoint 管理器，并关闭 native-live 追问；UBIFS system1 的识别不再使这两个入口放行。旧路径本身不是 ABI 证明，管理器的固件指纹验证仍不可绕过。`tests/test_s12_native_abi_guard.py` 使用假管理器测试旧路径、UBIFS 与缺失路径；这不是在 S12 上注入不兼容二进制的实测。
 - 只读 ABI 研究：本机 `libaivs-message-util.so` 的顶层、upward 和 prepare 消息描述符分别报告结构体大小 48、72 和 40 字节，相关字段偏移分别为 32、40 和 24。`abi_probe.c` 在独立进程里使用本机描述符构造、序列化并反序列化 `activate_mode=1` 的消息，检查通过；它不向原生进程发送消息，也不启动录音。这仅验证数据布局，**不能证明可以安全唤醒、连续追问或接管判停**。`mipns-xiaomi` 使用 `libmdspeech.so`；可见 `mdspeech_create`、`mdspeech_data_read` 等符号，但原项目依赖的 `xaudio_register_callback` / `register_data_upload_callback` 入口在当前固件中没有对应的已验证实现，仍需研究会话建立、PCM 数据和真实唤醒交接。
 - 本机尝试一次合成音频的 `mibrain ai_service` 文件式 ASR，返回 `code=-1`；这只说明该次测试未成功，不能据此断言所有识别接口不可用。
 - 依赖 Mac 的混合追问尚未完成长期及异常条件验收；音箱独立追问、首轮本地判停、OTA 拦截以及其他硬件固件均未验收。具体适配应先完成 ABI 研究、独立测试、空间评估和回滚演练。
