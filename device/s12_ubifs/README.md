@@ -34,9 +34,17 @@ zig cc -target aarch64-linux-gnu.2.19 -shared -fPIC -Os -Wall -Wextra -Werror \
 
 ## SSH 入口与恢复边界
 
-`sshen_s12.sh` 是本次 system1 上使用的启动 hook 的脱敏版本，仅供审阅。它依赖事先准备的本机公钥、主机密钥和相应 Dropbear 配置；不会独立完成安全安装，也没有经过其他设备测试。设备使用端口 22 和公钥认证，禁用了密码认证，保留原授权文件并在启动时通过 bind mount 临时替换。
+`sshen_s12.sh` 是本次 system1 上使用的启动 hook 的脱敏版本，仅供审阅。它依赖事先准备的本机公钥、主机密钥和相应 Dropbear 配置；不会独立完成安全安装，也没有经过其他设备测试。设备曾使用端口 22 和公钥认证，保留原授权文件并在启动时通过 bind mount 临时替换；密码认证状态仍需按下文重新核验。
 
 在这台设备上，原厂启动脚本 `/data` 挂载失败分支包含擦除和重建。该设备的 system1 已做文件级修改，去除该分支并保留原文件备份。**挂载失败后的完整启动和服务行为没有故障注入验证**；不要把这种修改视作已验证的通用恢复方案。原厂 OTA 和自动槽位切换仍可能改变当前系统。
+
+`sshen_s12.sh` 只准备主机密钥并挂载公钥文件，**不设置 Dropbear 的认证选项**。如果固件使用 OpenWrt 的 Dropbear UCI 配置，应分别检查 `PasswordAuth` 和 `RootPasswordAuth` 是否关闭，并核对实际监听进程及启动参数；也可通过本地串口查看 `/proc/<dropbear进程号>/cmdline`。配置位置和选项随固件变化，不能仅凭 hook 推断密码认证被禁用。本记录目前缺少可复核的配置快照及正反两组认证测试，因此不能把密码禁用视为已经独立验证。
+
+回滚前保留可用的 TTL 串口，先确认 `/proc/mounts` 中目标确为该 hook 对 `/etc/dropbear/authorized_keys` 的 bind mount，并停用该设备上安装的 hook 启动入口；再从串口执行 `umount /etc/dropbear/authorized_keys`，核对原公钥文件及 SSH 服务配置。不要删除主机私钥或贸然重启 SSH，以免失去远程入口；具体启动入口依设备安装方式确认。上述回滚过程尚未作为完整流程实机演练。
+
+## 槽位检测测试
+
+S12 的脱敏观察：根挂载为 `/dev/ubi0_0 on / type ubifs`，`/sys/class/ubi/ubi0/mtd_num` 指向 `4`，`/proc/mtd` 中 `mtd3` 为 `system0`、`mtd4` 为 `system1`。只给出本次实际观察，不能当成其他机型的固定编号。`tests/test_s12_system1_detection.py` 对客户端和生成 hook 的检测函数分别模拟旧的 `/dev/mtdblock5`、UBIFS system1/system0、根挂载或映射信息缺失。信息缺失时，**检测函数返回非 system1**；这并不保证所有调用方都以安全方式处理未知设备，因此仍需要进一步审查。
 
 设备上可读取的五个分区已备份并作第二次读取校验；`nandboot` 的一次读取发生 ECC 失败，诊断数据不完整。备份不包含完整 OOB、坏块处理和经过验证的恢复流程。**本仓库不包含或分发这些备份、原厂固件、启动环境、设备密钥和个人日志。**
 

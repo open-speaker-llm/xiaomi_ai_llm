@@ -1,5 +1,5 @@
 #!/bin/sh
-PATH=/usr/sbin:/usr/bin:/sbin:/bin
+PATH="${PATH:+$PATH:}/usr/sbin:/usr/bin:/sbin:/bin"
 export PATH
 #
 # 小米AI音箱 LLM 对话助手 — Native-first 版
