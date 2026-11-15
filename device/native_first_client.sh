@@ -1151,6 +1151,7 @@ echo "[$(log_ts)] wakeup.sh $*" >> "$EVENT_LOG"
 # must remain available. Only a live ASR-only lease owns these native cues.
 if [ "${SYSTEM1_FOLLOWUP_RECORD_MODE:-}" = "native_live" ] && [ -f "$BUSY_MARKER" ] &&
     is_system1_root &&
+    [ "$(root_device)" = /dev/mtdblock5 ] &&
     "${NATIVE_ASR_CTL:-/data/native_asr_ctl}" status 2>/dev/null | grep -Eq 'phase=[1-6] '; then
     case "$1" in
         WuW|WuW_first|WuW_oneshot|wuw_tips|bf|bf_end|ready|ready_delay|noangle|noangle_end|think|speek|multirounds|command_timeout|mibrain_service_timeout)
@@ -1664,6 +1665,7 @@ start_aivs_speech_guard() {
     if [ "$AIVS_EARLY_GUARD_ENABLED" = "1" ] &&
         [ "$(select_native_result_source)" = aivs_lab_instruction ] &&
         [ "$NATIVE_AIVS_LAB_RESULT_SYSTEM1" = "1" ] &&
+        is_s12a_native_abi_root &&
         "$NATIVE_ASR_CTL" status >/dev/null 2>&1; then
         if (umask 077; printf '%s\n%s\n%s\n' "$$" "$UNSUPPORTED_PATTERNS" "$DIRECT_DEEPSEEK_WAKE_PATTERN" > "$AIVS_FAILURE_POLICY.next" &&
             mv "$AIVS_FAILURE_POLICY.next" "$AIVS_FAILURE_POLICY"); then

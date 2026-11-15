@@ -12,6 +12,12 @@ def fn(name):
     return re.search(r'^' + name + r'\(\) \{.*?^\}', SOURCE, re.M | re.S).group()
 
 class ABIGuard(unittest.TestCase):
+    def test_hook_and_early_guard_check_legacy_root_before_ctl(self):
+        hook = re.search(r'if \[ "\$\{SYSTEM1_FOLLOWUP_RECORD_MODE:-\}" = "native_live" \].*?then', SOURCE, re.S).group()
+        self.assertLess(hook.index('[ "$(root_device)" = /dev/mtdblock5 ]'), hook.index('NATIVE_ASR_CTL'))
+        guard = fn('start_aivs_speech_guard')
+        self.assertLess(guard.index('is_s12a_native_abi_root'), guard.index('"$NATIVE_ASR_CTL" status'))
+
     def test_start_managers_only_on_legacy_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             trace = Path(tmp) / 'trace'
