@@ -44,6 +44,7 @@ LAST_LLM_QUERY_FILE="/tmp/native_first_last_llm_query"
 LAST_LLM_TS_FILE="/tmp/native_first_last_llm_ts"
 LOG_FILE="${LOG_FILE:-/tmp/native_first_client.log}"
 PID_FILE="${PID_FILE:-/tmp/native_first_client.pid}"
+NATIVE_PROCESS_OWNER="${NATIVE_PROCESS_OWNER:-/data/native_process_owner}"
 ORIG_WAKEUP="/tmp/wakeup.sh.orig"
 HOOK_WAKEUP="/tmp/wakeup.sh.native_first_client"
 MIPNS_CONF="${MIPNS_CONF:-/usr/share/xiaomi/xaudio_engine.conf}"
@@ -909,7 +910,7 @@ ALSAEOF
         kill -9 "$pid" 2>/dev/null
     done
     sleep 1
-    /usr/bin/mipns-xiaomi -c "$MIPNS_CONF" $MIPNS_ARGS >/tmp/native_mipns.log 2>&1 &
+    "$NATIVE_PROCESS_OWNER" detach /usr/bin/mipns-xiaomi -c "$MIPNS_CONF" $MIPNS_ARGS >/tmp/native_mipns.log 2>&1 &
     sleep 2
 
     touch /tmp/dsnoop_ready
@@ -1033,16 +1034,11 @@ restore_llm_master_volume() {
     LLM_SESSION_MASTER_TARGET=""
 }
 
+# Stop only a session created and identified by our process supervisor.
+# Old PID files without ownership metadata are deliberately not signalled.
 stop_our_assistants() {
-    # S12: avoid stopping unrelated native processes.
-    ps | grep -E 'stream_client.sh|wake_monitor.sh|vad_record.sh|native_client.sh|native_first_observer.sh' | grep -v grep | awk '{print $1}' | xargs -r kill -9 2>/dev/null
-    if [ -f "$PID_FILE" ]; then
-        pid=$(cat "$PID_FILE" 2>/dev/null)
-        [ -n "$pid" ] && [ "$pid" != "$$" ] && kill -9 "$pid" 2>/dev/null
-    fi
-    ps | awk -v self="$$" '$1 != self && (($5 == "sh" && $6 == "/data/native_first_client.sh") || ($5 ~ /^\{native_first/ && $6 == "/bin/sh" && $7 ~ /^\/data\/native_first_client/)) { print $1 }' \
-        | xargs -r kill -9 2>/dev/null
-    rm -f /tmp/stream_fifo /tmp/native_wakeup_event.fifo "$EVENT_FIFO" "$FOLLOWUP_ARM_FILE"
+    [ -x "$NATIVE_PROCESS_OWNER" ] || { echo "native process owner is missing" >&2; return 1; }
+    "$NATIVE_PROCESS_OWNER" stop "$PID_FILE" "$0"
 }
 
 restore_hook() {
@@ -1275,51 +1271,13 @@ start_hook_watchdog() {
     log "[HOOK] watchdog pid=$HOOK_WATCHDOG_PID"
 }
 
-start_mipns() {
-    local pids count keep pid cmd
-
-    pids=$(pidof mipns-xiaomi 2>/dev/null)
-    count=$(echo "$pids" | wc -w 2>/dev/null)
-    count="${count:-0}"
-    if [ "$count" -eq 0 ] 2>/dev/null; then
-        /usr/bin/mipns-xiaomi -c "$MIPNS_CONF" $MIPNS_ARGS >/tmp/native_mipns.log 2>&1 &
-        return 0
-    fi
-
-    keep=""
-    for pid in $pids; do
-        cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
-        if echo "$cmd" | grep -q -- "-r opus32 -l"; then
-            keep="$pid"
-            break
-        fi
-    done
-    [ -n "$keep" ] || keep=$(echo "$pids" | awk '{print $1}')
-
-    if [ "$count" -gt 1 ] 2>/dev/null; then
-        log "[NATIVE] multiple mipns-xiaomi detected ($count)，keep pid=$keep"
-    fi
-    for pid in $pids; do
-        [ "$pid" = "$keep" ] || kill -9 "$pid" 2>/dev/null
-    done
-    kill -CONT "$keep" 2>/dev/null
-}
-
 restart_mipns_single() {
-    local pids pid cmd
-
-    pids=$(pidof mipns-xiaomi 2>/dev/null)
-    for pid in $pids; do
-        cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
-        if ! echo "$cmd" | grep -q -- "-r opus32 -l"; then
-            kill -9 "$pid" 2>/dev/null
-        fi
-    done
-    sleep 1
+    # Native services are not owned by this client. Keep existing instances;
+    # an absent service is started in a separate session.
     if pidof mipns-xiaomi >/dev/null 2>&1; then
-        start_mipns
+        log "[NATIVE] retaining existing mipns-xiaomi"
     else
-        /usr/bin/mipns-xiaomi -c "$MIPNS_CONF" $MIPNS_ARGS >/tmp/native_mipns.log 2>&1 &
+        "$NATIVE_PROCESS_OWNER" detach /usr/bin/mipns-xiaomi -c "$MIPNS_CONF" $MIPNS_ARGS >/tmp/native_mipns.log 2>&1 &
     fi
 }
 
@@ -6079,8 +6037,7 @@ cleanup() {
 case "$1" in
     stop)
         stop_our_assistants
-        cleanup
-        exit 0
+        exit $?
         ;;
     status)
         echo "--- mipns ---"
@@ -6115,11 +6072,18 @@ case "$1" in
         ;;
 esac
 
-trap cleanup INT TERM EXIT
+# The helper owns an isolated Linux session and serializes stop/restart.
+# Never fall back to signalling unrelated processes when it is unavailable.
+[ -x "$NATIVE_PROCESS_OWNER" ] || { echo "native process owner is missing" >&2; exit 1; }
+if [ "${NATIVE_PROCESS_SUPERVISED:-0}" != 1 ]; then
+    exec "$NATIVE_PROCESS_OWNER" run "$PID_FILE" /bin/sh "$0"
+fi
+"$NATIVE_PROCESS_OWNER" check "$PID_FILE" "$0" || { echo "invalid process owner" >&2; exit 1; }
+trap 'exit 0' INT TERM
+trap cleanup EXIT
 
 : > "$LOG_FILE"
 exec >> "$LOG_FILE" 2>&1
-echo "$$" > "$PID_FILE"
 
 log "=== native-first + LLM fallback client ==="
 [ "${S12_AUDIO_GUARD_WARNING:-0}" != 1 ] || log '[S12-DIRAC] audio baseline mismatch; using whole-MP3 TTS'
@@ -6159,7 +6123,6 @@ else
     restore_audio_capture_overlays
     log "[SETUP] 跳过 dsnoop/libxaudio 覆盖: AUDIO_CAPTURE_SETUP=$AUDIO_CAPTURE_SETUP root=$(root_device)"
 fi
-stop_our_assistants
 setup_native_live_asr
 setup_native_pcm_tap
 : > "$EVENT_LOG"
