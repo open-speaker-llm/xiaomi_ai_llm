@@ -169,7 +169,10 @@ llm_web_post() {
         [ "$bytes" -gt 0 ] && [ "$bytes" -le 131072 ] || exit 12
         clean=$(LC_ALL=C tr -d '\000' < "$dir/response" | wc -c)
         [ "$clean" -eq "$bytes" ] || exit 12
-        [ "$(jsonfilter -i "$dir/response" -t '@' 2>/dev/null)" = object ] || exit 12
+        # Older OpenWrt jsonfilter builds reject the bare @ root expression.
+        # Wrap the response as a member so both versions validate its type.
+        { printf '{"response":'; cat "$dir/response"; printf '}'; } > "$dir/response-object" || exit 12
+        [ "$(jsonfilter -i "$dir/response-object" -t '@.response' 2>/dev/null)" = object ] || exit 12
         llm_web_post_state - 200 ''
         cat "$dir/response"
     )

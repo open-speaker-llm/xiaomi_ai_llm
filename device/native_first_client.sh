@@ -1,4 +1,6 @@
 #!/bin/sh
+PATH="${PATH:+$PATH:}/usr/sbin:/usr/bin:/sbin:/bin"
+export PATH
 #
 # 小米AI音箱 LLM 对话助手 — Native-first 版
 #
@@ -8,6 +10,22 @@
 
 CONFIG_FILE="${CONFIG_FILE:-/data/native_first.env}"
 [ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+
+# This S12's BusyBox sleep accepts only whole seconds, but its usleep supports
+# microseconds. Limit this override to the explicitly identified firmware.
+if [ "${S12_FRACTIONAL_SLEEP:-0}" = 1 ] && command -v usleep >/dev/null 2>&1; then
+    sleep() {
+        local us
+        [ "$#" = 1 ] || { /bin/sleep "$@"; return; }
+        case "$1" in
+            0.02) us=20000;; 0.05) us=50000;; 0.1) us=100000;;
+            0.2) us=200000;; 0.3) us=300000;;
+            *.*) us=$(awk -v n="$1" 'BEGIN {if (n !~ /^[0-9]+\.[0-9]+$/ || n>3600) exit 1; printf "%.0f", n*1000000}') || return 1;;
+            *) /bin/sleep "$@"; return;;
+        esac
+        usleep "$us"
+    }
+fi
 
 SERVER="${SERVER:-http://192.168.8.150:8080}"
 BACKEND="${BACKEND:-deepseek}"
@@ -26,6 +44,7 @@ LAST_LLM_QUERY_FILE="/tmp/native_first_last_llm_query"
 LAST_LLM_TS_FILE="/tmp/native_first_last_llm_ts"
 LOG_FILE="${LOG_FILE:-/tmp/native_first_client.log}"
 PID_FILE="${PID_FILE:-/tmp/native_first_client.pid}"
+NATIVE_PROCESS_OWNER="${NATIVE_PROCESS_OWNER:-/data/native_process_owner}"
 ORIG_WAKEUP="/tmp/wakeup.sh.orig"
 HOOK_WAKEUP="/tmp/wakeup.sh.native_first_client"
 MIPNS_CONF="${MIPNS_CONF:-/usr/share/xiaomi/xaudio_engine.conf}"
@@ -282,12 +301,21 @@ NATIVE_FOLLOWUP_MARKED=0
 STATE="BOOT"
 LAST_LOG_SEC=""
 LAST_LOG_MS=0
-LED_RGB="/sys/devices/i2c-1/1-003c/led_rgb"
+LED_RGB="${LED_RGB:-/sys/devices/i2c-1/1-003c/led_rgb}"
 LED_IDS="0 1 2 3 4 5 6 7 8 9 10 11"
 LED_BLUE=16711680
 LED_ORANGE=33023
 LED_GREEN=65280
 LED_FEEDBACK_TOKEN_FILE="/tmp/native_first_led_feedback_token"
+
+# The S12-specific player refuses unknown firmware. If its verified baseline is
+# unavailable, keep the already-working whole-MP3 TTS route after reboot/OTA.
+if [ "${DIRAC_APLAY:-}" = /data/s12_dirac_aplay.sh ] &&
+   [ "${DEVICE_TTS_STREAM:-0}" = 1 ] &&
+   ! "$DIRAC_APLAY" --verify >/dev/null 2>&1; then
+    DEVICE_TTS_STREAM=0
+    S12_AUDIO_GUARD_WARNING=1
+fi
 
 make_log_ts() {
     local base sec ms
@@ -736,6 +764,7 @@ setup_audio() {
 setup_native_endpoint() {
     [ "$NATIVE_ENDPOINT_ENABLED" = 1 ] || return 0
     is_system1_root || return 0
+    is_s12a_native_abi_root || { log '[ENDPOINT] 不兼容的根分区，拒绝加载 S12A 原生组件'; return 0; }
     if [ -x "$NATIVE_ENDPOINT_MANAGER" ] && sh "$NATIVE_ENDPOINT_MANAGER" start; then
         log '[ENDPOINT] 本地判停已就绪；小米识别保留完整问题后路由'
     else
@@ -749,11 +778,28 @@ stop_native_endpoint() {
 }
 
 root_device() {
-    awk '$2 == "/" {print $1; exit}' /proc/mounts 2>/dev/null
+    awk '$2 == "/" && $1 != "rootfs" { d=$1 } END { print d }' /proc/mounts 2>/dev/null
 }
 
 is_system1_root() {
-    [ "$(root_device)" = "/dev/mtdblock5" ]
+    local dev ubi mtd label
+    dev=$(root_device)
+    [ "$dev" = "/dev/mtdblock5" ] && return 0
+    case "$dev" in
+        /dev/ubi[0-9]*_*)
+            ubi=${dev#/dev/}; ubi=${ubi%%_*}
+            mtd=$(cat "/sys/class/ubi/$ubi/mtd_num" 2>/dev/null)
+            case "$mtd" in ''|*[!0-9]*) return 1;; esac
+            label=$(awk -v n="mtd$mtd:" '$1 == n {gsub(/"/, "", $4); print $4; exit}' /proc/mtd 2>/dev/null)
+            [ "$label" = system1 ]
+            ;;
+        *) return 1;;
+    esac
+}
+
+# A UBIFS system1 is not evidence of the S12A native components' ABI.
+is_s12a_native_abi_root() {
+    [ "$(root_device)" = /dev/mtdblock5 ]
 }
 
 restore_audio_capture_overlays() {
@@ -864,7 +910,7 @@ ALSAEOF
         kill -9 "$pid" 2>/dev/null
     done
     sleep 1
-    /usr/bin/mipns-xiaomi -c "$MIPNS_CONF" $MIPNS_ARGS >/tmp/native_mipns.log 2>&1 &
+    "$NATIVE_PROCESS_OWNER" detach /usr/bin/mipns-xiaomi -c "$MIPNS_CONF" $MIPNS_ARGS >/tmp/native_mipns.log 2>&1 &
     sleep 2
 
     touch /tmp/dsnoop_ready
@@ -988,20 +1034,11 @@ restore_llm_master_volume() {
     LLM_SESSION_MASTER_TARGET=""
 }
 
+# Stop only a session created and identified by our process supervisor.
+# Old PID files without ownership metadata are deliberately not signalled.
 stop_our_assistants() {
-    killall kws 2>/dev/null
-    killall tail 2>/dev/null
-    killall curl 2>/dev/null
-    killall aplay 2>/dev/null
-    killall arecord 2>/dev/null
-    ps | grep -E 'stream_client.sh|wake_monitor.sh|vad_record.sh|native_client.sh|native_first_observer.sh' | grep -v grep | awk '{print $1}' | xargs -r kill -9 2>/dev/null
-    if [ -f "$PID_FILE" ]; then
-        pid=$(cat "$PID_FILE" 2>/dev/null)
-        [ -n "$pid" ] && [ "$pid" != "$$" ] && kill -9 "$pid" 2>/dev/null
-    fi
-    ps | awk -v self="$$" '$1 != self && (($5 == "sh" && $6 == "/data/native_first_client.sh") || ($5 ~ /^\{native_first/ && $6 == "/bin/sh" && $7 ~ /^\/data\/native_first_client/)) { print $1 }' \
-        | xargs -r kill -9 2>/dev/null
-    rm -f /tmp/stream_fifo /tmp/native_wakeup_event.fifo "$EVENT_FIFO" "$FOLLOWUP_ARM_FILE"
+    [ -x "$NATIVE_PROCESS_OWNER" ] || { echo "native process owner is missing" >&2; return 1; }
+    "$NATIVE_PROCESS_OWNER" stop "$PID_FILE" "$0"
 }
 
 restore_hook() {
@@ -1032,6 +1069,19 @@ install_hook() {
 #!/bin/sh
 CONFIG_FILE="${CONFIG_FILE:-/data/native_first.env}"
 [ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+if [ "${S12_FRACTIONAL_SLEEP:-0}" = 1 ] && command -v usleep >/dev/null 2>&1; then
+    sleep() {
+        local us
+        [ "$#" = 1 ] || { /bin/sleep "$@"; return; }
+        case "$1" in
+            0.02) us=20000;; 0.05) us=50000;; 0.1) us=100000;;
+            0.2) us=200000;; 0.3) us=300000;;
+            *.*) us=$(awk -v n="$1" 'BEGIN {if (n !~ /^[0-9]+\.[0-9]+$/ || n>3600) exit 1; printf "%.0f", n*1000000}') || return 1;;
+            *) /bin/sleep "$@"; return;;
+        esac
+        usleep "$us"
+    }
+fi
 EVENT_FIFO="${EVENT_FIFO:-/tmp/native_first_event.fifo}"
 EVENT_LOG="${EVENT_LOG:-/tmp/native_first_events.log}"
 ORIG_WAKEUP="${ORIG_WAKEUP:-/tmp/wakeup.sh.orig}"
@@ -1056,6 +1106,26 @@ log_ts() {
     echo "${base}.${ms:-000}"
 }
 
+root_device() {
+    awk '$2 == "/" && $1 != "rootfs" { d=$1 } END { print d }' /proc/mounts 2>/dev/null
+}
+
+is_system1_root() {
+    local dev ubi mtd label
+    dev=$(root_device)
+    [ "$dev" = "/dev/mtdblock5" ] && return 0
+    case "$dev" in
+        /dev/ubi[0-9]*_*)
+            ubi=${dev#/dev/}; ubi=${ubi%%_*}
+            mtd=$(cat "/sys/class/ubi/$ubi/mtd_num" 2>/dev/null)
+            case "$mtd" in ''|*[!0-9]*) return 1;; esac
+            label=$(awk -v n="mtd$mtd:" '$1 == n {gsub(/"/, "", $4); print $4; exit}' /proc/mtd 2>/dev/null)
+            [ "$label" = system1 ]
+            ;;
+        *) return 1;;
+    esac
+}
+
 # Snapshot physical wake evidence at hook entry, before phase and busy checks.
 if [ "$1" = think ]; then
     event_ms=$(awk '{printf "%.0f", $1*1000; exit}' /proc/uptime 2>/dev/null)
@@ -1076,7 +1146,8 @@ echo "[$(log_ts)] wakeup.sh $*" >> "$EVENT_LOG"
 # Busy also covers LLM PCM playback, during which physical native wake/control
 # must remain available. Only a live ASR-only lease owns these native cues.
 if [ "${SYSTEM1_FOLLOWUP_RECORD_MODE:-}" = "native_live" ] && [ -f "$BUSY_MARKER" ] &&
-    [ "$(awk '$2 == "/" {print $1;exit}' /proc/mounts)" = /dev/mtdblock5 ] &&
+    is_system1_root &&
+    [ "$(root_device)" = /dev/mtdblock5 ] &&
     "${NATIVE_ASR_CTL:-/data/native_asr_ctl}" status 2>/dev/null | grep -Eq 'phase=[1-6] '; then
     case "$1" in
         WuW|WuW_first|WuW_oneshot|wuw_tips|bf|bf_end|ready|ready_delay|noangle|noangle_end|think|speek|multirounds|command_timeout|mibrain_service_timeout)
@@ -1139,15 +1210,15 @@ case "$1" in
         if [ -f "$BUSY_MARKER" ]; then
             echo "[$(log_ts)] NATIVE_THINK_IGNORED_BUSY args=$*" >> "$EVENT_LOG"
         else
-            root_dev=$(awk '$2 == "/" {print $1; exit}' /proc/mounts 2>/dev/null)
-            if [ "$AIVS_GUARD_ENABLED" = "1" ] && [ "$root_dev" = "/dev/mtdblock5" ]; then
+            root_dev=$(root_device)
+            if [ "$AIVS_GUARD_ENABLED" = "1" ] && is_system1_root; then
                 touch "$AIVS_GUARD_ARMED"
             fi
-            if [ "$WAKE_ON_THINK_SYSTEM1" = "1" ] && [ "$root_dev" = "/dev/mtdblock5" ] && [ -p "$EVENT_FIFO" ]; then
+            if [ "$WAKE_ON_THINK_SYSTEM1" = "1" ] && is_system1_root && [ -p "$EVENT_FIFO" ]; then
                 ( echo "think $ts ${event_ms:--} $physical_ms" > "$EVENT_FIFO" 2>/dev/null ) &
                 echo "[$(log_ts)] NATIVE_WAKE_EVENT_FROM_THINK root=$root_dev ts=$ts" >> "$EVENT_LOG"
             fi
-            if [ "$root_dev" = "/dev/mtdblock5" ]; then
+            if is_system1_root; then
                 echo "[$(log_ts)] NATIVE_PRE_FREEZE_SKIP_SYSTEM1 args=$*" >> "$EVENT_LOG"
             elif [ "$FREEZE_NATIVE_PLAYER_ON_THINK" = "1" ]; then
                 killall -STOP mediaplayer 2>/dev/null
@@ -1200,51 +1271,13 @@ start_hook_watchdog() {
     log "[HOOK] watchdog pid=$HOOK_WATCHDOG_PID"
 }
 
-start_mipns() {
-    local pids count keep pid cmd
-
-    pids=$(pidof mipns-xiaomi 2>/dev/null)
-    count=$(echo "$pids" | wc -w 2>/dev/null)
-    count="${count:-0}"
-    if [ "$count" -eq 0 ] 2>/dev/null; then
-        /usr/bin/mipns-xiaomi -c "$MIPNS_CONF" $MIPNS_ARGS >/tmp/native_mipns.log 2>&1 &
-        return 0
-    fi
-
-    keep=""
-    for pid in $pids; do
-        cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
-        if echo "$cmd" | grep -q -- "-r opus32 -l"; then
-            keep="$pid"
-            break
-        fi
-    done
-    [ -n "$keep" ] || keep=$(echo "$pids" | awk '{print $1}')
-
-    if [ "$count" -gt 1 ] 2>/dev/null; then
-        log "[NATIVE] multiple mipns-xiaomi detected ($count)，keep pid=$keep"
-    fi
-    for pid in $pids; do
-        [ "$pid" = "$keep" ] || kill -9 "$pid" 2>/dev/null
-    done
-    kill -CONT "$keep" 2>/dev/null
-}
-
 restart_mipns_single() {
-    local pids pid cmd
-
-    pids=$(pidof mipns-xiaomi 2>/dev/null)
-    for pid in $pids; do
-        cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
-        if ! echo "$cmd" | grep -q -- "-r opus32 -l"; then
-            kill -9 "$pid" 2>/dev/null
-        fi
-    done
-    sleep 1
+    # Native services are not owned by this client. Keep existing instances;
+    # an absent service is started in a separate session.
     if pidof mipns-xiaomi >/dev/null 2>&1; then
-        start_mipns
+        log "[NATIVE] retaining existing mipns-xiaomi"
     else
-        /usr/bin/mipns-xiaomi -c "$MIPNS_CONF" $MIPNS_ARGS >/tmp/native_mipns.log 2>&1 &
+        "$NATIVE_PROCESS_OWNER" detach /usr/bin/mipns-xiaomi -c "$MIPNS_CONF" $MIPNS_ARGS >/tmp/native_mipns.log 2>&1 &
     fi
 }
 
@@ -1590,6 +1623,7 @@ start_aivs_speech_guard() {
     if [ "$AIVS_EARLY_GUARD_ENABLED" = "1" ] &&
         [ "$(select_native_result_source)" = aivs_lab_instruction ] &&
         [ "$NATIVE_AIVS_LAB_RESULT_SYSTEM1" = "1" ] &&
+        is_s12a_native_abi_root &&
         "$NATIVE_ASR_CTL" status >/dev/null 2>&1; then
         if (umask 077; printf '%s\n%s\n%s\n' "$$" "$UNSUPPORTED_PATTERNS" "$DIRECT_DEEPSEEK_WAKE_PATTERN" > "$AIVS_FAILURE_POLICY.next" &&
             mv "$AIVS_FAILURE_POLICY.next" "$AIVS_FAILURE_POLICY"); then
@@ -2231,6 +2265,11 @@ prepare_followup_capture() {
 setup_native_live_asr() {
     is_system1_root || return 0
     [ "$FOLLOWUP_ENABLED" = "1" ] && [ "$FOLLOWUP_RECORD_MODE" = "native_live" ] || return 0
+    if ! is_s12a_native_abi_root; then
+        FOLLOWUP_ENABLED=0
+        log '[FOLLOWUP] 不兼容的根分区，拒绝加载 S12A 原生 ASR'
+        return 0
+    fi
     if [ -x "$NATIVE_ASR_CTL" ] && [ -f "$NATIVE_ASR_MANAGER" ] && sh "$NATIVE_ASR_MANAGER" start; then
         PAUSE_NATIVE_ASR_DURING_LLM=0
         log "[FOLLOWUP] native ASR-only ready; no external recognizer"
@@ -2840,7 +2879,10 @@ llm_web_post() {
         [ "$bytes" -gt 0 ] && [ "$bytes" -le 131072 ] || exit 12
         clean=$(LC_ALL=C tr -d '\000' < "$dir/response" | wc -c)
         [ "$clean" -eq "$bytes" ] || exit 12
-        [ "$(jsonfilter -i "$dir/response" -t '@' 2>/dev/null)" = object ] || exit 12
+        # Older OpenWrt jsonfilter builds reject the bare @ root expression.
+        # Wrap the response as a member so both versions validate its type.
+        { printf '{"response":'; cat "$dir/response"; printf '}'; } > "$dir/response-object" || exit 12
+        [ "$(jsonfilter -i "$dir/response-object" -t '@.response' 2>/dev/null)" = object ] || exit 12
         llm_web_post_state - 200 ''
         cat "$dir/response"
     )
@@ -5995,8 +6037,7 @@ cleanup() {
 case "$1" in
     stop)
         stop_our_assistants
-        cleanup
-        exit 0
+        exit $?
         ;;
     status)
         echo "--- mipns ---"
@@ -6031,13 +6072,21 @@ case "$1" in
         ;;
 esac
 
-trap cleanup INT TERM EXIT
+# The helper owns an isolated Linux session and serializes stop/restart.
+# Never fall back to signalling unrelated processes when it is unavailable.
+[ -x "$NATIVE_PROCESS_OWNER" ] || { echo "native process owner is missing" >&2; exit 1; }
+if [ "${NATIVE_PROCESS_SUPERVISED:-0}" != 1 ]; then
+    exec "$NATIVE_PROCESS_OWNER" run "$PID_FILE" /bin/sh "$0"
+fi
+"$NATIVE_PROCESS_OWNER" check "$PID_FILE" "$0" || { echo "invalid process owner" >&2; exit 1; }
+trap 'exit 0' INT TERM
+trap cleanup EXIT
 
 : > "$LOG_FILE"
 exec >> "$LOG_FILE" 2>&1
-echo "$$" > "$PID_FILE"
 
 log "=== native-first + LLM fallback client ==="
+[ "${S12_AUDIO_GUARD_WARNING:-0}" != 1 ] || log '[S12-DIRAC] audio baseline mismatch; using whole-MP3 TTS'
 apply_system_defaults
 log "Config: $CONFIG_FILE"
 log "Server: $SERVER"
@@ -6074,7 +6123,6 @@ else
     restore_audio_capture_overlays
     log "[SETUP] 跳过 dsnoop/libxaudio 覆盖: AUDIO_CAPTURE_SETUP=$AUDIO_CAPTURE_SETUP root=$(root_device)"
 fi
-stop_our_assistants
 setup_native_live_asr
 setup_native_pcm_tap
 : > "$EVENT_LOG"
