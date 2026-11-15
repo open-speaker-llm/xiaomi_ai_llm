@@ -4,14 +4,14 @@
 
 ## 设备差异
 
-- 内核为 3.14.29、用户态 ELF 为 64 位 AArch64；无线芯片为 BCM4345，存储显示为 256 MiB NAND。
+- 内核为 3.14.29、用户态 ELF 为 64 位 AArch64；无线设备报告 SDIO 标识 `0x02d0/0x4345`，使用 `dhd` 驱动。`/proc/mtd` 分区数值合计 250 MiB，闪存芯片的型号和标称容量尚待核实。
 - 当前使用 boot1/system1。设备的 `/proc/mtd` 将 `boot0`、`boot1`、`system0`、`system1`、`data` 分别标为 `mtd1`、`mtd2`、`mtd3`、`mtd4`、`mtd5`；设备和固件不同，编号不能外推。
 - 根目录是 UBIFS。客户端依据实际根挂载、UBI 的 `mtd_num` 和 `/proc/mtd` 的 `system1` 名称识别槽位，同时保留原项目的 `/dev/mtdblock5` 路径判断。唤醒 hook 使用相同逻辑。
 - 此分支移除了客户端启动时对 `kws`、`tail`、`curl`、`aplay` 和 `arecord` 的全局 `killall`，避免无差别停止其他任务；目标服务的多实例及回退行为仍需在其他设备单独验证。
 
 ## 已验证的范围
 
-仅在一台设备上验证：串口 failsafe、临时和持久公钥 SSH、正常系统冷启动、DeepSeek 直连、AArch64 静态 EdgeTTS 握手和实际播报、原生唤醒、首轮模型回答、客户端自启动。联网、播放、语音识别和 API 费用取决于对应云服务。
+仅在一台设备上验证：串口 failsafe、临时和持久公钥 SSH、正常系统冷启动、DeepSeek 直连、AArch64 静态 EdgeTTS 握手和实际播报、原生唤醒、首轮模型回答、客户端自启动。后续另在同一台机器上完成了依赖 Mac 的连续追问实验，具体边界见[两台设备对照与实验记录](model-comparison.md)；实验代码和安装流程未包含在本 PR。联网、播放、语音识别和 API 费用取决于对应云服务。
 
 `native_first.s12.env.example` 记录这次的首轮配置。实际 API 密钥只能保存在设备私有配置中。音箱端 `ettsc` 是使用项目源码构建的 **aarch64-unknown-linux-musl** 静态产物；上游 `build.sh` 的默认目标是 32 位 ARM，构建目标必须按实际设备确定。构建过程不分发固件或设备二进制。
 
@@ -43,9 +43,9 @@ zig cc -target aarch64-linux-gnu.2.19 -shared -fPIC -Os -Wall -Wextra -Werror \
 ## 未完成与不兼容项
 
 - system0 的持久 SSH、助手自启动、正常启动与回滚尚未实机验证；仅配置了 system1。不要直接修改活动根分区或覆盖内核来复制本次操作。
-- 原生连续追问和高级判停尚未适配。项目现有的 native ASR 组件面向已验证 S12A 固件与 ARM32 原生进程；这台设备的原生进程是 AArch64，固件 ABI 与组件基线不匹配。不要绕过安装器校验或把 ARM32 SO 直接注入 64 位进程。
+- 音箱独立的原生连续追问和高级判停尚未适配。依赖 Mac 的混合追问已在单机完成初步实验，不能等同于 S12A 的音箱端原生追问，也没有随本 PR 提供安装包。项目现有的 native ASR 组件面向已验证 S12A 固件与 ARM32 原生进程；这台设备的原生进程是 AArch64，固件 ABI 与组件基线不匹配。不要绕过安装器校验或把 ARM32 SO 直接注入 64 位进程。
 - 只读 ABI 研究：本机 `libaivs-message-util.so` 的顶层、upward 和 prepare 消息描述符分别报告结构体大小 48、72 和 40 字节，相关字段偏移分别为 32、40 和 24。`abi_probe.c` 在独立进程里使用本机描述符构造、序列化并反序列化 `activate_mode=1` 的消息，检查通过；它不向原生进程发送消息，也不启动录音。这仅验证数据布局，**不能证明可以安全唤醒、连续追问或接管判停**。`mipns-xiaomi` 使用 `libmdspeech.so`；可见 `mdspeech_create`、`mdspeech_data_read` 等符号，但原项目依赖的 `xaudio_register_callback` / `register_data_upload_callback` 入口在当前固件中没有对应的已验证实现，仍需研究会话建立、PCM 数据和真实唤醒交接。
 - 本机尝试一次合成音频的 `mibrain ai_service` 文件式 ASR，返回 `code=-1`；这只说明该次测试未成功，不能据此断言所有识别接口不可用。
-- 连续追问、首轮本地判停、OTA 拦截、长期稳定性以及其他硬件固件均未验收。具体适配应先完成 ABI 研究、独立测试、空间评估和回滚演练。
+- 依赖 Mac 的混合追问尚未完成长期及异常条件验收；音箱独立追问、首轮本地判停、OTA 拦截以及其他硬件固件均未验收。具体适配应先完成 ABI 研究、独立测试、空间评估和回滚演练。
 
 本次参考上游 [`open-speaker-llm/xiaomi_ai_llm`](https://github.com/open-speaker-llm/xiaomi_ai_llm)，保留原项目许可及第三方组件许可证。此记录不含账号、网络地址或认证材料。
